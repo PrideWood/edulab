@@ -142,6 +142,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   const [profileFullName, setProfileFullName] = useState("");
   const [profileStudentNumber, setProfileStudentNumber] = useState("");
   const [profileSaving, setProfileSaving] = useState(false);
+  const [participantSwitching, setParticipantSwitching] = useState(false);
   const [profileError, setProfileError] = useState("");
   const [finalizationRetry, setFinalizationRetry] = useState(0);
   const messagesViewRef = useRef<HTMLDivElement>(null);
@@ -505,6 +506,93 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     downloadFile(`EduLab_${safeParticipant}_${stamp}.json`, JSON.stringify(record, null, 2), "application/json;charset=utf-8");
   }
 
+  function exportParticipantArchive() {
+    if (!session) return;
+    const exportedAt = new Date().toISOString();
+    const summaries = conversations.length > 0 ? conversations : [{
+      id: session.id,
+      title: "当前对话",
+      status: session.status,
+      startedAt: session.startedAt,
+      lastActivityAt: session.lastActivityAt,
+    }];
+    const record = {
+      schemaVersion: 1,
+      type: "participant-browser-archive",
+      exportedAt,
+      participant: { code: session.participantCode },
+      experiment: { id: experiment.id, label: experiment.label, title: experiment.title },
+      conversations: summaries.map((summary) => {
+        const transcript = summary.id === session.id ? messageLedgerRef.current : readLocalTranscript(summary.id);
+        return {
+          session: summary,
+          integrity: {
+            messageCount: transcript.length,
+            turnCount: new Set(transcript.map((message) => message.turnIndex)).size,
+          },
+          messages: transcript.map((message, index) => ({
+            order: index + 1,
+            sequenceNo: message.sequenceNo,
+            turnIndex: message.turnIndex,
+            role: message.role,
+            content: message.content,
+            sentAt: message.sentAt,
+            replyStartedAt: message.replyStartedAt,
+            replyCompletedAt: message.replyCompletedAt,
+            latencyMs: message.latencyMs,
+            clientRequestId: message.clientRequestId,
+            cozeMessageId: message.cozeMessageId,
+            cozeChatId: message.cozeChatId,
+          })),
+        };
+      }),
+    };
+    const safeParticipant = session.participantCode.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 50) || "participant";
+    const stamp = exportedAt.replaceAll(":", "-").replace(".", "-");
+    downloadFile(`EduLab_${safeParticipant}_全部对话_${stamp}.json`, JSON.stringify(record, null, 2), "application/json;charset=utf-8");
+  }
+
+  async function startNextParticipant() {
+    if (!session || pending || participantSwitching) return;
+    const confirmed = window.confirm("仅在实验人员要求时使用。系统将保存当前参与者的交互记录并退出，然后由下一位参与者填写信息。确认继续吗？");
+    if (!confirmed) return;
+    setParticipantSwitching(true);
+    setProfileError("");
+    try {
+      if (controls?.databaseMessagesEnabled === false) exportParticipantArchive();
+      const response = await fetch("/api/sessions/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: transcriptUploadBody(messageLedgerRef.current),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.error?.message ?? "暂时无法切换参与者。");
+
+      localStorage.removeItem(outboxKey(session.id));
+      sessionIdRef.current = null;
+      activeSessionRef.current = null;
+      messageLedgerRef.current = [];
+      automaticCompletionRef.current = null;
+      setSession(null);
+      setMessages([]);
+      setControls(null);
+      setConversations([]);
+      setParticipantProfile(null);
+      setProfileFullName("");
+      setProfileStudentNumber("");
+      setText("");
+      setRetryContent(null);
+      setError(null);
+      setTaskOpen(false);
+      setProfileOpen(true);
+      window.history.replaceState({}, "", window.location.pathname);
+    } catch (switchError) {
+      setProfileError(switchError instanceof Error ? switchError.message : "暂时无法切换参与者。");
+    } finally {
+      setParticipantSwitching(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <section className={`workspace conversation-workspace ${sidebarCollapsed ? "sidebar-collapsed" : ""}`} aria-label="AI 对话工作区">
@@ -548,13 +636,13 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
       {profileOpen && <div className="profile-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && participantProfile) setProfileOpen(false); }}>
         <section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title">
           <div className="profile-modal-head"><div><p>参与者信息</p><h2 id="profile-title">{participantProfile ? "查看或修改基本信息" : "开始前请填写基本信息"}</h2></div>{participantProfile && <button type="button" onClick={() => setProfileOpen(false)} aria-label="关闭">×</button>}</div>
-          <p className="profile-intro">用于将 Participant ID 与后续访谈对象对应。姓名和学号与聊天记录分开加密保存，不会发送给 AI。</p>
           <form className="profile-form" onSubmit={saveProfile}>
             <label><span>姓名</span><input value={profileFullName} onChange={(event) => setProfileFullName(event.target.value)} maxLength={100} autoComplete="name" placeholder="请输入姓名" /></label>
             <label><span>学号</span><input value={profileStudentNumber} onChange={(event) => setProfileStudentNumber(event.target.value)} maxLength={100} autoComplete="off" placeholder="请输入学号" /></label>
             <p className="profile-hint">至少填写一项。请使用研究者要求的信息。</p>
             {profileError && <p className="profile-error" role="alert">{profileError}</p>}
-            <button className="profile-save" type="submit" disabled={profileSaving}>{profileSaving ? "保存中…" : participantProfile ? "保存修改" : "保存并开始"}</button>
+            <button className="profile-save" type="submit" disabled={profileSaving || participantSwitching}>{profileSaving ? "保存中…" : participantProfile ? "保存修改" : "保存并开始"}</button>
+            {participantProfile && <div className="next-participant"><button type="button" onClick={startNextParticipant} disabled={pending || profileSaving || participantSwitching}>{participantSwitching ? "正在保存并切换…" : "开始下一位参与者"}</button><p>仅在实验人员要求时使用。切换后当前参与者将无法在此浏览器继续操作。</p></div>}
           </form>
         </section>
       </div>}

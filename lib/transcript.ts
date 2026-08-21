@@ -41,7 +41,7 @@ export async function persistTranscript(
   client: PoolClient,
   sessionId: string,
   messages: TranscriptMessage[],
-  options: { requireComplete: boolean; storageMode: "background_checkpoint" | "automatic_completion" },
+  options: { requireComplete: boolean; storageMode: "background_checkpoint" | "automatic_completion" | "participant_switch" },
 ) {
   const requests = await client.query<RequestRow>(
     `SELECT id, client_request_id, turn_index, status, requested_at, reply_started_at, completed_at, coze_chat_id, metadata

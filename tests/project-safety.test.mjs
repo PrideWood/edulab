@@ -76,9 +76,21 @@ test("conversation export and optional database message storage are implemented"
   assert.match(workspace, /beforeunload/);
   assert.match(workspace, /sendBeacon/);
   assert.match(workspace, /\/api\/sessions\/checkpoint/);
+  assert.match(workspace, /\/api\/sessions\/reset/);
+  assert.match(workspace, /开始下一位参与者/);
+  assert.match(workspace, /exportParticipantArchive/);
   assert.match(turnMigration, /ADD COLUMN IF NOT EXISTS turn_index integer/);
   assert.match(turnMigration, /UNIQUE \(session_id, turn_index\)/);
   assert.match(adminWorkspace, /后台保存完整对话到数据库/);
+});
+
+test("student device switching finalizes the participant and clears only the participant session", async () => {
+  const resetRoute = await readFile("app/api/sessions/reset/route.ts", "utf8");
+  assert.match(resetRoute, /storageMode: "participant_switch"/);
+  assert.match(resetRoute, /end_reason: "participant_switch"/);
+  assert.match(resetRoute, /SESSION_COOKIE/);
+  assert.match(resetRoute, /maxAge: 0/);
+  assert.doesNotMatch(resetRoute, /ACCESS_COOKIE/);
 });
 
 test("multiple conversations are isolated to the authenticated participant session family", async () => {
