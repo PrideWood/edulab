@@ -35,6 +35,8 @@ test("conversation export and optional database message storage are implemented"
   const workspace = await readFile("app/workspace.tsx", "utf8");
   const cozeSource = await readFile("lib/coze.ts", "utf8");
   const completeRoute = await readFile("app/api/sessions/complete/route.ts", "utf8");
+  const checkpointRoute = await readFile("app/api/sessions/checkpoint/route.ts", "utf8");
+  const transcriptSource = await readFile("lib/transcript.ts", "utf8");
   const adminWorkspace = await readFile("app/admin/workspace.tsx", "utf8");
   assert.match(migration, /database_message_storage_enabled boolean NOT NULL DEFAULT true/);
   assert.match(migration, /user_message_id DROP NOT NULL/);
@@ -50,12 +52,16 @@ test("conversation export and optional database message storage are implemented"
   );
   assert.doesNotMatch(cozeSource, /INSERT INTO messages/);
   assert.match(cozeSource, /role: "user"/);
-  assert.match(completeRoute, /deferred_until_completion/);
-  assert.match(completeRoute, /INSERT INTO messages/);
-  assert.match(completeRoute, /INCOMPLETE_TRANSCRIPT/);
+  assert.match(completeRoute, /automatic_completion/);
+  assert.match(checkpointRoute, /background_checkpoint/);
+  assert.match(transcriptSource, /INSERT INTO messages/);
+  assert.match(transcriptSource, /INCOMPLETE_TRANSCRIPT/);
+  assert.match(workspace, /beforeunload/);
+  assert.match(workspace, /sendBeacon/);
+  assert.match(workspace, /\/api\/sessions\/checkpoint/);
   assert.match(turnMigration, /ADD COLUMN IF NOT EXISTS turn_index integer/);
   assert.match(turnMigration, /UNIQUE \(session_id, turn_index\)/);
-  assert.match(adminWorkspace, /实验结束时保存对话到数据库/);
+  assert.match(adminWorkspace, /后台保存完整对话到数据库/);
 });
 
 test("multiple conversations are isolated to the authenticated participant session family", async () => {
@@ -68,4 +74,23 @@ test("multiple conversations are isolated to the authenticated participant sessi
   assert.match(workspace, /conversation-sidebar/);
   assert.match(workspace, /收起侧边栏/);
   assert.match(limits, /s\.session_secret_hash = \$3/);
+});
+
+test("participant identity is separately encrypted and required before chat", async () => {
+  const migration = await readFile("db/migrations/0006_participant_identity_profiles.sql", "utf8");
+  const profileSource = await readFile("lib/participant-profile.ts", "utf8");
+  const profileRoute = await readFile("app/api/participant-profile/route.ts", "utf8");
+  const adminRoute = await readFile("app/api/admin/participants/route.ts", "utf8");
+  const limits = await readFile("lib/experiment-limits.ts", "utf8");
+  const workspace = await readFile("app/workspace.tsx", "utf8");
+  assert.match(migration, /participant_id uuid PRIMARY KEY REFERENCES participants\(id\)/);
+  assert.doesNotMatch(migration, /full_name text/);
+  assert.match(migration, /full_name_ciphertext text/);
+  assert.match(migration, /student_number_ciphertext text/);
+  assert.match(profileSource, /encryptSecret/);
+  assert.match(profileRoute, /getAuthenticatedSession/);
+  assert.match(adminRoute, /getAuthenticatedAdmin/);
+  assert.match(limits, /PARTICIPANT_PROFILE_REQUIRED/);
+  assert.match(workspace, /参与者信息/);
+  assert.doesNotMatch(workspace, /participant: \{ code: session\.participantCode, fullName/);
 });

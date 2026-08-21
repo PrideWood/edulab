@@ -1,16 +1,22 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import type { ExperimentSettings } from "@/lib/experiment-settings";
 
-type Section = "content" | "limits" | "storage" | "ai";
+type Section = "participants" | "content" | "limits" | "storage" | "ai";
 type Admin = { id: string; username: string; displayName: string };
+type ParticipantDirectoryRow = {
+  id: string; participantCode: string; fullName: string; studentNumber: string;
+  profileUpdatedAt: string | null; sessionCount: number; turnCount: number;
+  createdAt: string; lastActivityAt: string | null;
+};
 
 const sections: Array<{ id: Section; number: string; label: string; description: string }> = [
-  { id: "limits", number: "01", label: "交互规则", description: "次数、字数与时长" },
-  { id: "ai", number: "02", label: "AI 接入", description: "Coze 智能体设置" },
-  { id: "storage", number: "03", label: "数据保存", description: "数据库与人工备份" },
-  { id: "content", number: "04", label: "可选任务说明", description: "通常无需展示" },
+  { id: "participants", number: "01", label: "参与者", description: "身份与编号对应表" },
+  { id: "limits", number: "02", label: "交互规则", description: "次数、字数与时长" },
+  { id: "ai", number: "03", label: "AI 接入", description: "Coze 智能体设置" },
+  { id: "storage", number: "04", label: "数据保存", description: "数据库与人工备份" },
+  { id: "content", number: "05", label: "可选任务说明", description: "通常无需展示" },
 ];
 
 async function parseResponse(response: Response) {
@@ -20,7 +26,7 @@ async function parseResponse(response: Response) {
 }
 
 export function AdminWorkspace() {
-  const [section, setSection] = useState<Section>("limits");
+  const [section, setSection] = useState<Section>("participants");
   const [admin, setAdmin] = useState<Admin | null>(null);
   const [settings, setSettings] = useState<ExperimentSettings | null>(null);
   const [mode, setMode] = useState<"loading" | "login" | "ready">("loading");
@@ -28,13 +34,30 @@ export function AdminWorkspace() {
   const [error, setError] = useState<string>("");
   const [saving, setSaving] = useState(false);
   const [token, setToken] = useState("");
+  const [participants, setParticipants] = useState<ParticipantDirectoryRow[]>([]);
+  const [participantsLoading, setParticipantsLoading] = useState(false);
+  const [participantsError, setParticipantsError] = useState("");
+
+  const loadParticipants = useCallback(async () => {
+    setParticipantsLoading(true);
+    setParticipantsError("");
+    try {
+      const response = await fetch("/api/admin/participants", { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) throw Object.assign(new Error(data?.error?.message ?? "无法读取参与者信息。"), { status: response.status });
+      setParticipants(data.participants as ParticipantDirectoryRow[]);
+    } catch (loadError) {
+      if ((loadError as { status?: number }).status === 401) setMode("login");
+      setParticipantsError(loadError instanceof Error ? loadError.message : "无法读取参与者信息。");
+    } finally { setParticipantsLoading(false); }
+  }, []);
 
   useEffect(() => {
     fetch("/api/admin/settings", { cache: "no-store" })
       .then(parseResponse)
-      .then((data) => { setAdmin(data.admin); setSettings(data.settings); setMode("ready"); })
+      .then((data) => { setAdmin(data.admin); setSettings(data.settings); setMode("ready"); void loadParticipants(); })
       .catch(() => setMode("login"));
-  }, []);
+  }, [loadParticipants]);
 
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -52,6 +75,7 @@ export function AdminWorkspace() {
     try {
       const data = await parseResponse(await fetch("/api/admin/settings", { cache: "no-store" }));
       setAdmin(data.admin); setSettings(data.settings); setMode("ready");
+      void loadParticipants();
     } catch (loadError) { setError(loadError instanceof Error ? loadError.message : "无法读取实验设置。"); }
   }
 
@@ -92,13 +116,14 @@ export function AdminWorkspace() {
       <aside className="admin-sidebar">
         <div className="admin-brand"><span className="admin-brand-mark">E</span><span>EduLab</span></div>
         <div className="admin-context"><p>管理后台</p><strong>{settings.experiment.title}</strong><span>{settings.experiment.id} · v{settings.version}</span></div>
-        <nav className="admin-nav" aria-label="设置导航">{sections.map((item) => <button className={section === item.id ? "active" : ""} key={item.id} onClick={() => setSection(item.id)}><span>{item.number}</span><div><strong>{item.label}</strong><small>{item.description}</small></div></button>)}</nav>
+        <nav className="admin-nav" aria-label="设置导航">{sections.map((item) => <button className={section === item.id ? "active" : ""} key={item.id} onClick={() => { setSection(item.id); if (item.id === "participants") void loadParticipants(); }}><span>{item.number}</span><div><strong>{item.label}</strong><small>{item.description}</small></div></button>)}</nav>
         <div className="admin-sidebar-footer"><div><span className="admin-online-dot" />{admin.displayName}</div><button onClick={logout}>退出</button></div>
       </aside>
 
       <section className="admin-main">
-        <header className="admin-header"><div><p className="admin-kicker">实验配置</p><h1>{sections.find((item) => item.id === section)?.label}</h1></div><div className="admin-header-actions"><span className={error ? "save-state error" : "save-state"}>{error || status || "设置只影响新创建的会话"}</span><button className="admin-save" onClick={save} disabled={saving}>{saving ? "保存中…" : "保存设置"}</button></div></header>
+        <header className="admin-header"><div><p className="admin-kicker">{section === "participants" ? "研究数据" : "实验配置"}</p><h1>{sections.find((item) => item.id === section)?.label}</h1></div><div className="admin-header-actions">{section === "participants" ? <><span className="save-state">身份信息与对话记录分开保存</span><button className="admin-refresh" onClick={loadParticipants} disabled={participantsLoading}>{participantsLoading ? "读取中…" : "刷新"}</button></> : <><span className={error ? "save-state error" : "save-state"}>{error || status || "设置只影响新创建的会话"}</span><button className="admin-save" onClick={save} disabled={saving}>{saving ? "保存中…" : "保存设置"}</button></>}</div></header>
         <div className="admin-content">
+          {section === "participants" && <ParticipantDirectory participants={participants} loading={participantsLoading} error={participantsError} />}
           {section === "content" && <ContentSettings settings={settings} update={updateExperiment} />}
           {section === "limits" && <LimitSettings settings={settings} updateExperiment={updateExperiment} updateLimits={updateLimits} />}
           {section === "storage" && <StorageSettings settings={settings} update={updateStorage} />}
@@ -107,6 +132,15 @@ export function AdminWorkspace() {
       </section>
     </main>
   );
+}
+
+function formatDate(value: string | null) {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
+}
+
+function ParticipantDirectory({ participants, loading, error }: { participants: ParticipantDirectoryRow[]; loading: boolean; error: string }) {
+  return <div className="settings-stack"><section className="settings-card participant-directory"><div className="settings-card-head"><div><h2>参与者身份对应表</h2><p>姓名和学号经过加密后存储，并通过内部 Participant ID 与会话关联。聊天记录和学生导出的 JSON 不包含这些直接身份信息。</p></div><span className="secure-badge">仅管理员可见</span></div>{error ? <p className="directory-error" role="alert">{error}</p> : loading && participants.length === 0 ? <p className="directory-empty">正在读取参与者信息…</p> : participants.length === 0 ? <p className="directory-empty">还没有参与者进入实验。</p> : <div className="directory-table-wrap"><table className="directory-table"><thead><tr><th>Participant ID</th><th>姓名</th><th>学号</th><th>对话</th><th>轮次</th><th>最后活动</th></tr></thead><tbody>{participants.map((participant) => <tr key={participant.id}><td><code>{participant.participantCode}</code></td><td>{participant.fullName || <span className="missing-value">未填写</span>}</td><td>{participant.studentNumber || <span className="missing-value">未填写</span>}</td><td>{participant.sessionCount}</td><td>{participant.turnCount}</td><td>{formatDate(participant.lastActivityAt)}</td></tr>)}</tbody></table></div>}</section><div className="security-note"><strong>访谈联系时如何对应</strong><p>交互数据继续使用 Participant ID。研究者只在需要联系参与者时，通过此表将 Participant ID 对应到姓名或学号，避免直接身份信息进入 AI 对话和导出文件。</p></div></div>;
 }
 
 function AdminLogin({ onSubmit, error }: { onSubmit: (event: FormEvent<HTMLFormElement>) => void; error: string }) {
@@ -125,7 +159,7 @@ function LimitSettings({ settings, updateExperiment, updateLimits }: { settings:
 
 function StorageSettings({ settings, update }: { settings: ExperimentSettings; update: (patch: Partial<ExperimentSettings["storage"]>) => void }) {
   const enabled = settings.storage.databaseMessagesEnabled;
-  return <div className="settings-stack"><section className={`settings-card ${enabled ? "" : "storage-disabled"}`}><div className="settings-card-head"><div><h2>实验结束时保存对话到数据库</h2><p>对话过程中正文只保存在学生浏览器，避免每轮数据库写入影响 AI 回复速度。</p></div><label className="switch" aria-label="实验结束时保存对话到数据库"><input type="checkbox" checked={enabled} onChange={(event) => update({ databaseMessagesEnabled: event.target.checked })} /><span /></label></div><div className="storage-mode"><strong>{enabled ? "结束时批量入库，同时保留人工导出" : "仅使用浏览器本地记录与人工导出"}</strong><p>{enabled ? "学生点击完成实验后，参与者信息、完整正文和时间信息才会一次性写入 PostgreSQL。交流过程中不会等待消息正文入库。" : "数据库不保存学生和 AI 的消息正文，但仍保留 Session、请求状态、时间与 Coze 标识。请确保参与者完成前下载并提交交互记录。"}</p></div></section><div className="security-note"><strong>刷新不会清除当前会话记录</strong><p>每条已显示的消息都会同步到当前浏览器的本地存储，页面刷新后会自动恢复。但更换设备、清除浏览器数据或使用隐私模式仍可能丢失本地副本。</p></div><div className="security-note"><strong>这个开关不能替代数据库连接</strong><p>EduLab 仍依赖 PostgreSQL 创建安全 Session、执行次数限制和防止重复请求；Coze 也仍会接收对话以维持多轮上下文。</p></div></div>;
+  return <div className="settings-stack"><section className={`settings-card ${enabled ? "" : "storage-disabled"}`}><div className="settings-card-head"><div><h2>后台保存完整对话到数据库</h2><p>AI 回复先展示给学生，随后异步整理消息，不让数据库保存阻塞回复显示。</p></div><label className="switch" aria-label="后台保存完整对话到数据库"><input type="checkbox" checked={enabled} onChange={(event) => update({ databaseMessagesEnabled: event.target.checked })} /><span /></label></div><div className="storage-mode"><strong>{enabled ? "浏览器本地副本 + 数据库后台同步 + 人工导出" : "仅使用浏览器本地记录与人工导出"}</strong><p>{enabled ? "每轮回复显示后，完整内容和时间信息会在后台同步到 PostgreSQL；达到时间或次数限制时自动完成最终整理，离开页面时还会再发送一次检查点。" : "数据库不保存学生和 AI 的消息正文，但仍保留 Session、请求状态、时间与 Coze 标识。请确保参与者完成前下载并提交交互记录。"}</p></div></section><div className="security-note"><strong>刷新不会清除当前会话记录</strong><p>每条已显示的消息都会同步到当前浏览器的本地存储，页面刷新后会自动恢复。但更换设备、清除浏览器数据或使用隐私模式仍可能丢失本地副本。</p></div><div className="security-note"><strong>这个开关不能替代数据库连接</strong><p>EduLab 仍依赖 PostgreSQL 创建安全 Session、执行次数限制和防止重复请求；Coze 也仍会接收对话以维持多轮上下文。</p></div></div>;
 }
 
 function AiSettings({ settings, update, token, setToken }: { settings: ExperimentSettings; update: (patch: Partial<ExperimentSettings["ai"]>) => void; token: string; setToken: (value: string) => void }) {

@@ -8,6 +8,7 @@ import { getAuthenticatedSession } from "@/lib/session";
 import { buildSessionPayload } from "@/lib/session-payload";
 import { hashSecret, newSessionSecret, normalizeParticipantCode, SESSION_COOKIE, verifyParticipantAccess } from "@/lib/security";
 import { buildSessionSnapshot, getExperimentSettings } from "@/lib/experiment-settings";
+import { getParticipantProfile } from "@/lib/participant-profile";
 
 export const runtime = "nodejs";
 
@@ -41,7 +42,7 @@ export async function POST(request: Request) {
     const settings = await getExperimentSettings(experiment.id);
     const snapshot = buildSessionSnapshot(settings);
     const startedAt = new Date();
-    await transaction(async (client) => {
+    const participantId = await transaction(async (client) => {
       const participant = await client.query<{ id: string }>(
         `INSERT INTO participants (id, experiment_id, external_code) VALUES ($1, $2, $3)
          ON CONFLICT (experiment_id, external_code) DO UPDATE SET external_code = EXCLUDED.external_code
@@ -55,6 +56,7 @@ export async function POST(request: Request) {
         [sessionId, publicId, participant.rows[0].id, experiment.id, hashSecret(secret),
           `edulab_${publicId.replaceAll("-", "")}`, settings.version, JSON.stringify(snapshot), startedAt],
       );
+      return participant.rows[0].id;
     });
 
     const endsAt = snapshot.limits.sessionDurationMinutes
@@ -63,7 +65,7 @@ export async function POST(request: Request) {
 
     const response = NextResponse.json({
       session: { id: publicId, status: "active", startedAt: startedAt.toISOString(), lastActivityAt: startedAt.toISOString(), participantCode, cozeConversationId: null },
-      messages: [], pending: false, failedRequest: null,
+      messages: [], participantProfile: await getParticipantProfile(participantId), pending: false, failedRequest: null,
       controls: {
         taskVisible: snapshot.experiment.taskVisible, chatEnabled: snapshot.experiment.chatEnabled,
         maxMessageChars: snapshot.limits.maxMessageChars, maxUserMessages: snapshot.limits.maxUserMessages,

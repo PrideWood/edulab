@@ -5,7 +5,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { StoredMessage } from "@/db/schema";
 import type { ExperimentConfig } from "@/config/experiment";
-import type { SessionPayload } from "@/lib/client-types";
+import type { ParticipantProfile, SessionPayload } from "@/lib/client-types";
 
 const OUTBOX_PREFIX = "edulab_pending_message:";
 const TRANSCRIPT_PREFIX = "edulab_transcript:";
@@ -27,11 +27,10 @@ function transcriptKey(sessionId: string) {
 }
 
 function mergeMessages(...groups: StoredMessage[][]) {
-  const merged = new Map<string, StoredMessage>();
+  const merged = new Map<number, StoredMessage>();
   for (const message of groups.flat()) {
-    const key = message.clientRequestId ? `request:${message.clientRequestId}` : `message:${message.id}`;
-    const existing = merged.get(key);
-    if (!existing || existing.id.startsWith("pending-") || !message.id.startsWith("pending-")) merged.set(key, message);
+    const existing = merged.get(message.sequenceNo);
+    if (!existing || existing.id.startsWith("pending-") || !message.id.startsWith("pending-")) merged.set(message.sequenceNo, message);
   }
   return [...merged.values()].sort((a, b) => a.sequenceNo - b.sequenceNo || new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime());
 }
@@ -66,6 +65,24 @@ function writeLocalTranscript(activeSession: SessionPayload["session"], messages
       messages,
     }));
   } catch { /* The in-memory ledger and export remain available if browser storage is unavailable. */ }
+}
+
+function transcriptUploadBody(messages: StoredMessage[]) {
+  return JSON.stringify({
+    messages: messages.map((message) => ({
+      sequenceNo: message.sequenceNo,
+      role: message.role,
+      content: message.content,
+      turnIndex: message.turnIndex,
+      sentAt: message.sentAt,
+      replyStartedAt: message.replyStartedAt,
+      replyCompletedAt: message.replyCompletedAt,
+      latencyMs: message.latencyMs,
+      clientRequestId: message.clientRequestId,
+      cozeMessageId: message.cozeMessageId,
+      cozeChatId: message.cozeChatId,
+    })),
+  });
 }
 
 function downloadFile(filename: string, content: string, type: string) {
@@ -120,16 +137,26 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [conversationBusy, setConversationBusy] = useState(false);
   const [taskOpen, setTaskOpen] = useState(false);
+  const [participantProfile, setParticipantProfile] = useState<ParticipantProfile | null>(null);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileFullName, setProfileFullName] = useState("");
+  const [profileStudentNumber, setProfileStudentNumber] = useState("");
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileError, setProfileError] = useState("");
+  const [finalizationRetry, setFinalizationRetry] = useState(0);
   const messagesViewRef = useRef<HTMLDivElement>(null);
   const messageLedgerRef = useRef<StoredMessage[]>([]);
   const activeSessionRef = useRef<SessionPayload["session"] | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const automaticCompletionRef = useRef<string | null>(null);
 
   const applyPayload = useCallback((payload: SessionPayload) => {
     const changedSession = sessionIdRef.current !== null && sessionIdRef.current !== payload.session.id;
     sessionIdRef.current = payload.session.id;
     activeSessionRef.current = payload.session;
     setSession(payload.session);
+    setParticipantProfile(payload.participantProfile);
+    if (!payload.participantProfile) setProfileOpen(true);
     const localMessages = readLocalTranscript(payload.session.id);
     const mergedMessages = mergeMessages(localMessages, changedSession ? [] : messageLedgerRef.current, payload.messages);
     messageLedgerRef.current = mergedMessages;
@@ -159,16 +186,30 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     setConversations(data.conversations as ConversationSummary[]);
   }, []);
 
+  const checkpointTranscript = useCallback(async () => {
+    if (!activeSessionRef.current || messageLedgerRef.current.length === 0) return;
+    try {
+      await fetch("/api/sessions/checkpoint", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: transcriptUploadBody(messageLedgerRef.current),
+      });
+    } catch { /* The browser copy and request recovery metadata remain available for a later retry. */ }
+  }, []);
+
   const pollUntilSettled = useCallback(async () => {
     for (let attempt = 0; attempt < 45; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 2000));
       const response = await fetch("/api/sessions", { cache: "no-store" });
       const payload = await readResponse(response);
       applyPayload(payload);
-      if (!payload.pending) return;
+      if (!payload.pending) {
+        void checkpointTranscript();
+        return;
+      }
     }
     setError("AI 仍在处理这条消息。你可以稍后刷新页面，系统会继续恢复结果。");
-  }, [applyPayload]);
+  }, [applyPayload, checkpointTranscript]);
 
   const sendWithId = useCallback(async (content: string, clientRequestId: string) => {
     setError(null);
@@ -199,7 +240,10 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
       });
       const payload = await readResponse(response);
       applyPayload(payload);
-      if (!payload.pending) localStorage.removeItem(outboxKey(payload.session.id));
+      if (!payload.pending) {
+        localStorage.removeItem(outboxKey(payload.session.id));
+        void checkpointTranscript();
+      }
       await refreshConversations().catch(() => undefined);
       if (payload.pending) await pollUntilSettled();
     } catch (sendError) {
@@ -210,9 +254,10 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
         const recovered = await readResponse(await fetch("/api/sessions", { cache: "no-store" }));
         applyPayload(recovered);
         if (recovered.pending) await pollUntilSettled();
+        else void checkpointTranscript();
       } catch { /* Keep the saved outbox for a later retry. */ }
     }
-  }, [applyPayload, pollUntilSettled, refreshConversations]);
+  }, [applyPayload, checkpointTranscript, pollUntilSettled, refreshConversations]);
 
   useEffect(() => {
     let cancelled = false;
@@ -227,6 +272,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
             applyPayload(payload);
             await refreshConversations();
             if (payload.pending) await pollUntilSettled();
+            else void checkpointTranscript();
           }
         } catch { if (!cancelled) setError("请使用研究者提供的完整实验链接进入。"); }
         finally { if (!cancelled) setLoading(false); }
@@ -242,6 +288,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
         await refreshConversations();
         window.history.replaceState({}, "", window.location.pathname);
         if (payload.pending) await pollUntilSettled();
+        else void checkpointTranscript();
         const outbox = localStorage.getItem(outboxKey(payload.session.id));
         if (outbox && !payload.pending && payload.session.status === "active") {
           const saved = JSON.parse(outbox) as { content?: string; clientRequestId?: string };
@@ -257,7 +304,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     }
     void initialize();
     return () => { cancelled = true; };
-  }, [applyPayload, pollUntilSettled, refreshConversations, sendWithId]);
+  }, [applyPayload, checkpointTranscript, pollUntilSettled, refreshConversations, sendWithId]);
 
   useEffect(() => {
     const container = messagesViewRef.current;
@@ -274,11 +321,59 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   const remainingSeconds = controls?.endsAt && clock > 0 ? Math.max(0, Math.ceil((new Date(controls.endsAt).getTime() - clock) / 1000)) : null;
   const timeExpired = remainingSeconds === 0;
   const messageLimitReached = controls?.remainingMessages === 0;
-  const canChat = Boolean(session?.status === "active" && controls?.chatEnabled && !timeExpired && !messageLimitReached);
+  const canChat = Boolean(participantProfile && session?.status === "active" && controls?.chatEnabled && !timeExpired && !messageLimitReached);
   const limitText = [
     controls?.remainingMessages === null || controls?.remainingMessages === undefined ? null : `剩余 ${controls.remainingMessages} 次`,
     remainingSeconds === null ? null : `剩余 ${Math.floor(remainingSeconds / 60)}:${String(remainingSeconds % 60).padStart(2, "0")}`,
   ].filter(Boolean).join(" · ");
+
+  useEffect(() => {
+    function warnBeforeLeaving(event: BeforeUnloadEvent) {
+      if (activeSessionRef.current?.status !== "active" || messageLedgerRef.current.length === 0) return;
+      event.preventDefault();
+      event.returnValue = "";
+    }
+    function uploadBeforeLeaving() {
+      if (activeSessionRef.current?.status !== "active" || messageLedgerRef.current.length === 0) return;
+      const body = transcriptUploadBody(messageLedgerRef.current);
+      const accepted = navigator.sendBeacon("/api/sessions/checkpoint", new Blob([body], { type: "application/json" }));
+      if (!accepted) {
+        void fetch("/api/sessions/checkpoint", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+          keepalive: true,
+        }).catch(() => undefined);
+      }
+    }
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    window.addEventListener("pagehide", uploadBeforeLeaving);
+    return () => {
+      window.removeEventListener("beforeunload", warnBeforeLeaving);
+      window.removeEventListener("pagehide", uploadBeforeLeaving);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!session || session.status !== "active" || pending || (!timeExpired && !messageLimitReached)) return;
+    if (automaticCompletionRef.current === session.id) return;
+    automaticCompletionRef.current = session.id;
+    void (async () => {
+      try {
+        const payload = await readResponse(await fetch("/api/sessions/complete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: transcriptUploadBody(messageLedgerRef.current),
+        }));
+        applyPayload(payload);
+        await refreshConversations().catch(() => undefined);
+      } catch {
+        automaticCompletionRef.current = null;
+        setError("云端交互记录暂未完成最终整理，本地记录仍已保留，系统将自动重试。");
+        window.setTimeout(() => setFinalizationRetry((value) => value + 1), 5000);
+      }
+    })();
+  }, [applyPayload, finalizationRetry, messageLimitReached, pending, refreshConversations, session, timeExpired]);
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
@@ -293,6 +388,36 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
       event.preventDefault();
       void submit();
     }
+  }
+
+  function openParticipantProfile() {
+    setProfileFullName(participantProfile?.fullName ?? "");
+    setProfileStudentNumber(participantProfile?.studentNumber ?? "");
+    setProfileError("");
+    setProfileOpen(true);
+  }
+
+  async function saveProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!profileFullName.trim() && !profileStudentNumber.trim()) {
+      setProfileError("请至少填写姓名或学号中的一项。");
+      return;
+    }
+    setProfileSaving(true);
+    setProfileError("");
+    try {
+      const response = await fetch("/api/participant-profile", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fullName: profileFullName, studentNumber: profileStudentNumber }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.error?.message ?? "参与者信息保存失败。");
+      setParticipantProfile(data.profile as ParticipantProfile);
+      setProfileOpen(false);
+    } catch (profileSaveError) {
+      setProfileError(profileSaveError instanceof Error ? profileSaveError.message : "参与者信息保存失败。");
+    } finally { setProfileSaving(false); }
   }
 
   async function changeConversation(action: { action: "create" } | { action: "switch"; sessionId: string }) {
@@ -311,25 +436,6 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     } catch (conversationError) {
       setError(conversationError instanceof Error ? conversationError.message : "暂时无法切换对话。");
     } finally { setConversationBusy(false); }
-  }
-
-  async function completeExperiment() {
-    setError(null);
-    try {
-      const transcript = messageLedgerRef.current;
-      applyPayload(await readResponse(await fetch("/api/sessions/complete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: transcript.map((message) => ({
-          role: message.role, content: message.content, turnIndex: message.turnIndex, sentAt: message.sentAt,
-          replyStartedAt: message.replyStartedAt, replyCompletedAt: message.replyCompletedAt,
-          latencyMs: message.latencyMs, clientRequestId: message.clientRequestId,
-          cozeMessageId: message.cozeMessageId, cozeChatId: message.cozeChatId,
-        })) }),
-      })));
-      await refreshConversations();
-    }
-    catch (completeError) { setError(completeError instanceof Error ? `交互记录暂时未能提交：${completeError.message}。请下载交互记录并联系实验人员。` : "交互记录暂时未能提交。请下载交互记录并联系实验人员。"); }
   }
 
   function exportTranscript() {
@@ -392,18 +498,18 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
           <div className="conversation-sidebar-head">
             <div className="brand sidebar-brand"><button className="brand-mark brand-toggle" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}>E</button>{!sidebarCollapsed && <div className="brand-name">EduLab</div>}</div>
           </div>
-          <button className="new-conversation" onClick={() => changeConversation({ action: "create" })} disabled={loading || pending || conversationBusy}><span>＋</span>{!sidebarCollapsed && <em>新建对话</em>}</button>
+          <button className="new-conversation" onClick={() => changeConversation({ action: "create" })} disabled={loading || pending || conversationBusy || !participantProfile}><span>＋</span>{!sidebarCollapsed && <em>新建对话</em>}</button>
           <nav className="conversation-list">
             {conversations.map((conversation) => <button key={conversation.id} className={conversation.id === session?.id ? "conversation-item active" : "conversation-item"} onClick={() => changeConversation({ action: "switch", sessionId: conversation.id })} disabled={pending || conversationBusy} title={conversation.title}><span className="conversation-icon">{conversation.title.slice(0, 1)}</span>{!sidebarCollapsed && <span className="conversation-copy"><strong>{conversation.title}</strong><small>{conversation.status === "completed" ? "已结束" : timeLabel(conversation.lastActivityAt)}</small></span>}</button>)}
           </nav>
+          <button className={`participant-profile-button ${participantProfile ? "complete" : "required"}`} onClick={openParticipantProfile} title="填写或修改基本信息"><span className="participant-profile-icon" aria-hidden="true">S</span>{!sidebarCollapsed && <span className="participant-profile-copy"><strong>{participantProfile?.fullName || participantProfile?.studentNumber || "待填写"}</strong>{participantProfile?.fullName && participantProfile.studentNumber && <small>{participantProfile.studentNumber}</small>}</span>}</button>
         </aside>
         <section className="chat-panel" aria-label="AI 对话">
           <header className="chat-header">
-            <div className="assistant-title"><div className="assistant-avatar" aria-hidden="true">AI</div><div><p className="assistant-name">{experiment.assistantName}</p><p className="assistant-status">{session?.status === "completed" || timeExpired || messageLimitReached ? "本次对话已结束" : pending ? "正在思考…" : limitText || "在线"}</p></div></div>
+            <div className="assistant-title"><div className="assistant-avatar" aria-hidden="true">AI</div><div><p className="assistant-name">{experiment.assistantName}</p><p className="assistant-status">{!participantProfile && session ? "请先填写参与者信息" : session?.status === "completed" || timeExpired || messageLimitReached ? "本次对话已结束" : pending ? "正在思考…" : limitText || "在线"}</p></div></div>
             <div className="session-actions">
               {experiment.taskVisible && <button className="task-toggle-button" onClick={() => setTaskOpen((value) => !value)}>{taskOpen ? "关闭说明" : "任务说明"}</button>}
               <div className="export-actions"><button onClick={exportTranscript} disabled={!session || messages.length === 0}>下载交互记录</button></div>
-              {session?.status === "active" && <button className="complete-button" onClick={completeExperiment} disabled={pending}>结束对话</button>}
             </div>
           </header>
           <div className="messages" ref={messagesViewRef} aria-live="polite">
@@ -418,13 +524,26 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
           </div>
           <div className="composer-wrap">
             <form className="composer" onSubmit={submit}>
-              <textarea aria-label="输入消息" placeholder={!canChat && !loading ? "本次交流已结束" : "输入你的问题或想法…"} rows={1} value={text} maxLength={controls?.maxMessageChars} onChange={(event) => setText(event.target.value)} onKeyDown={onComposerKeyDown} disabled={loading || pending || !canChat} />
+              <textarea aria-label="输入消息" placeholder={!participantProfile && session ? "请先填写参与者信息" : !canChat && !loading ? "本次交流已结束" : "输入你的问题或想法…"} rows={1} value={text} maxLength={controls?.maxMessageChars} onChange={(event) => setText(event.target.value)} onKeyDown={onComposerKeyDown} disabled={loading || pending || !canChat} />
               <button className="send-button" type="submit" disabled={!text.trim() || loading || pending || !canChat} aria-label="发送消息">↑</button>
             </form>
             <p className="composer-help"><span>按 Enter 发送 · Shift + Enter 换行</span>{controls && <span>{Array.from(text).length} / {controls.maxMessageChars} 字</span>}</p>
           </div>
         </section>
       </section>
+      {profileOpen && session && <div className="profile-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && participantProfile) setProfileOpen(false); }}>
+        <section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title">
+          <div className="profile-modal-head"><div><p>参与者信息</p><h2 id="profile-title">{participantProfile ? "查看或修改基本信息" : "开始前请填写基本信息"}</h2></div>{participantProfile && <button type="button" onClick={() => setProfileOpen(false)} aria-label="关闭">×</button>}</div>
+          <p className="profile-intro">用于将 Participant ID 与后续访谈对象对应。姓名和学号与聊天记录分开加密保存，不会发送给 AI。</p>
+          <form className="profile-form" onSubmit={saveProfile}>
+            <label><span>姓名</span><input value={profileFullName} onChange={(event) => setProfileFullName(event.target.value)} maxLength={100} autoComplete="name" placeholder="请输入姓名" /></label>
+            <label><span>学号</span><input value={profileStudentNumber} onChange={(event) => setProfileStudentNumber(event.target.value)} maxLength={100} autoComplete="off" placeholder="请输入学号" /></label>
+            <p className="profile-hint">至少填写一项。请使用研究者要求的信息。</p>
+            {profileError && <p className="profile-error" role="alert">{profileError}</p>}
+            <button className="profile-save" type="submit" disabled={profileSaving}>{profileSaving ? "保存中…" : participantProfile ? "保存修改" : "保存并开始"}</button>
+          </form>
+        </section>
+      </div>}
     </main>
   );
 }

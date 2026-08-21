@@ -3,7 +3,8 @@ import { z } from "zod";
 import { beginChatRequest, createCozeChat, finalizeCompletedRequest, getUnstoredCompletedRequestMessages, markRequestFailed, recoverPendingRequest, waitForCozeChat } from "@/lib/coze";
 import type { StoredMessage } from "@/db/schema";
 import { ApiError, errorResponse } from "@/lib/http";
-import { getLatestFailedRequest, listMessages } from "@/lib/messages";
+import { getLatestFailedRequest, listMessages, mergeStoredMessages } from "@/lib/messages";
+import { getParticipantProfile } from "@/lib/participant-profile";
 import { getAuthenticatedSession } from "@/lib/session";
 import { assertSessionCanSend, getSessionControls } from "@/lib/experiment-limits";
 
@@ -23,11 +24,10 @@ async function responsePayload(
 ) {
   const state = await getSessionControls(session);
   const storedMessages = await listMessages(session.id);
-  const messages = [...storedMessages, ...transientMessages.filter((message) => !storedMessages.some((stored) => stored.id === message.id))]
-    .sort((a, b) => a.sequenceNo - b.sequenceNo);
+  const messages = mergeStoredMessages(storedMessages, transientMessages);
   return {
     session: { id: session.publicId, status: state.status, startedAt: session.startedAt, lastActivityAt: new Date().toISOString(), participantCode: session.participantCode, cozeConversationId },
-    messages, pending,
+    messages, participantProfile: await getParticipantProfile(session.participantId), pending,
     failedRequest: pending ? null : await getLatestFailedRequest(session.id),
     controls: state.controls,
   };

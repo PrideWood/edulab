@@ -3,6 +3,14 @@ import "server-only";
 import { query } from "@/db";
 import type { StoredMessage } from "@/db/schema";
 
+export function mergeStoredMessages(...groups: StoredMessage[][]) {
+  const merged = new Map<number, StoredMessage>();
+  for (const message of groups.flat()) {
+    if (!merged.has(message.sequenceNo)) merged.set(message.sequenceNo, message);
+  }
+  return [...merged.values()].sort((a, b) => a.sequenceNo - b.sequenceNo);
+}
+
 export async function listMessages(sessionId: string): Promise<StoredMessage[]> {
   const result = await query<{
     id: string; sequence_no: number; turn_index: number; role: "user" | "assistant"; content: string;

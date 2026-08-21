@@ -61,6 +61,13 @@ export async function getSessionControls(session: AuthenticatedSession) {
 }
 
 export async function assertSessionCanSend(session: AuthenticatedSession, content: string) {
+  const identity = await query<{ exists: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM participant_identity_profiles WHERE participant_id = $1
+     ) AS exists`,
+    [session.participantId],
+  );
+  if (!identity.rows[0]?.exists) throw new ApiError(409, "PARTICIPANT_PROFILE_REQUIRED", "请先填写参与者信息。");
   const state = await getSessionControls(session);
   if (state.status !== "active") throw new ApiError(409, "SESSION_COMPLETED", "本次实验已经结束，不能再发送消息。");
   if (!state.controls.chatEnabled) throw new ApiError(403, "CHAT_DISABLED", "本次实验未开放 AI 对话。");
