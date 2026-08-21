@@ -13,9 +13,9 @@ import { getParticipantProfile } from "@/lib/participant-profile";
 export const runtime = "nodejs";
 
 const inputSchema = z.object({
-  participantCode: z.string().trim().min(1).max(80),
+  participantCode: z.string().trim().min(1).max(80).optional(),
   access: z.string().max(200).optional(),
-});
+}).refine((value) => value.participantCode || !value.access, { message: "参与者链接信息无效。" });
 
 export async function GET() {
   try {
@@ -29,12 +29,19 @@ export async function POST(request: Request) {
   try {
     const input = inputSchema.safeParse(await request.json());
     if (!input.success) throw new ApiError(400, "INVALID_PARTICIPANT", "实验链接中的参与者信息无效。");
-    const participantCode = normalizeParticipantCode(input.data.participantCode);
     const current = await getAuthenticatedSession();
+    if (!input.data.participantCode && current?.experimentId === experiment.id) {
+      return NextResponse.json(await buildSessionPayload(current));
+    }
+    const participantCode = input.data.participantCode
+      ? normalizeParticipantCode(input.data.participantCode)
+      : `AUTO-${randomUUID()}`;
     if (current && current.experimentId === experiment.id && current.participantCode === participantCode) {
       return NextResponse.json(await buildSessionPayload(current));
     }
-    if (!verifyParticipantAccess(participantCode, input.data.access)) throw new ApiError(403, "INVALID_EXPERIMENT_LINK", "实验链接无效或已被修改，请使用研究者提供的完整链接。");
+    if (input.data.participantCode && !verifyParticipantAccess(participantCode, input.data.access)) {
+      throw new ApiError(403, "INVALID_EXPERIMENT_LINK", "实验链接无效或已被修改，请使用研究者提供的完整链接。");
+    }
 
     const secret = newSessionSecret();
     const publicId = randomUUID();

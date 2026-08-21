@@ -1,6 +1,6 @@
 # EduLab
 
-EduLab 是一个面向教育实验研究的轻量 AI 智能体交互平台。学生通过研究者提供的签名链接进入实验，阅读任务并与指定 Coze 智能体连续对话。完整交互实时保存在当前浏览器；数据库保存开启时，AI 回复先展示给学生，再在后台异步整理到标准消息表，并可导出 JSON 作为人工备份。
+EduLab 是一个面向教育实验研究的轻量 AI 智能体交互平台。学生可以通过同一个实验首页进入，服务端会为每个新浏览器自动生成内部 Participant ID；学生填写姓名或学号后即可与指定 Coze 智能体连续对话。完整交互实时保存在当前浏览器；数据库保存开启时，AI 回复先展示给学生，再在后台异步整理到标准消息表，并可导出 JSON 作为人工备份。
 
 ## 技术方案
 
@@ -19,9 +19,9 @@ EduLab 是一个面向教育实验研究的轻量 AI 智能体交互平台。学
 2. 创建数据库结构：`npm run db:migrate`
 3. 临时设置 `EDULAB_ADMIN_PASSWORD`，创建管理员：`npm run admin:create -- researcher`
 4. 删除临时的 `EDULAB_ADMIN_PASSWORD`，启动项目：`npm run dev`
-5. 打开 `/admin` 配置实验，再生成参与者链接：`npm run participants:link -- P001 P002`
+5. 打开 `/admin` 配置实验，再直接访问 `http://localhost:3000/`。
 
-为了本地快速调试，可以临时设置 `ALLOW_UNSIGNED_PARTICIPANTS=true`，然后访问 `http://localhost:3000/?participant=P001`。生产环境必须关闭这个选项，并使用带 `access` 签名的完整链接。
+默认共享入口会自动生成 Participant ID，不需要研究者逐个制作链接。如果某项研究需要预先分组或指定编号，仍可运行 `npm run participants:link -- P001 P002` 生成可选的签名链接。`ALLOW_UNSIGNED_PARTICIPANTS=true` 只用于本地调试指定编号链接；生产环境必须保持关闭。
 
 ## Coze 配置
 
@@ -46,7 +46,7 @@ EduLab 是一个面向教育实验研究的轻量 AI 智能体交互平台。学
 
 学生端默认是对话优先界面，左侧用于新建和切换多个对话，可随时收起。任务说明属于可选功能，默认关闭；后台将其放在设置末位，开启后学生通过聊天页的轻量入口按需查看，不占用对话侧栏。每个对话使用独立的 Coze Conversation 和独立浏览器记录，切换时不会混合消息。次数和时长限制按同一参与者的整次实验累计，不能通过新建对话重置。
 
-学生首次进入后，需要通过左侧栏底部的“参与者信息”至少填写姓名或学号中的一项，保存后才能发送消息。姓名和学号使用 `SETTINGS_ENCRYPTION_KEY` 加密后存入独立的 `participant_identity_profiles` 表；学生只能通过自己的 HttpOnly Session 读写自己的信息，已登录管理员才能查看对应表。这些直接身份信息不会发送给 Coze，也不会进入 `messages`、`chat_requests` 或学生下载的 JSON。研究分析继续使用 Participant ID，只有需要后续访谈时才通过后台对应到具体学生。
+学生打开共享首页时，服务端使用安全随机 UUID 自动创建 Participant ID 和独立 HttpOnly Session；不同浏览器同时进入会获得不同编号。随后学生通过左侧栏底部至少填写姓名或学号中的一项，保存后才能发送消息。姓名和学号使用 `SETTINGS_ENCRYPTION_KEY` 加密后存入独立的 `participant_identity_profiles` 表；学生只能通过自己的 Session 读写自己的信息，已登录管理员才能查看对应表。这些直接身份信息不会发送给 Coze，也不会进入 `messages`、`chat_requests` 或学生下载的 JSON。研究分析继续使用 Participant ID，只有需要后续访谈时才通过后台对应到具体学生。
 
 学生端会在参与者点击发送时先同步更新当前 Session 的浏览器本地副本，再请求 AI；AI 回复到达后继续合并写入。刷新页面会同时结合本地副本与 Coze Chat 恢复双方消息，并提供 JSON 导出。导出内容包含参与者编号、Session ID、Coze Conversation / Chat / Message 标识、实验信息、严格消息顺序、对话轮次、角色、正文、发送时间、AI 回复起止时间和延迟。浏览器存储不是跨设备的中央备份，参与者清除浏览器数据后无法恢复，因此关闭数据库正文保存时必须要求参与者在实验结束前下载并提交记录。
 
@@ -62,13 +62,13 @@ EduLab 是一个面向教育实验研究的轻量 AI 智能体交互平台。学
 2. 在 Vercel 配置 `.env.example` 中除本地调试项之外的所有变量；`EDULAB_BASE_URL` 改为正式域名。
 3. 在部署前对目标 PostgreSQL 执行 `npm run db:migrate`。
 4. 建议 Neon 使用 pooled connection string，并保持较小的 `DATABASE_POOL_MAX`。
-5. 重新生成正式域名下的参与者链接。
+5. 将正式域名首页作为学生共享入口；如需预先指定编号或实验分组，再额外生成签名链接。
 
 所有 Token、数据库连接串和链接签名密钥都只能放在环境变量中。项目不会从前端返回其他参与者的记录，也没有按 URL 查询聊天记录的接口。
 
 ## 数据结构
 
-- `participants`：实验内的研究者分配编号
+- `participants`：系统自动生成或研究者预先指定的实验内编号
 - `participant_identity_profiles`：与 Participant ID 一对一关联的加密姓名、学号
 - `experiment_sessions`：一次参与过程、Coze Conversation、开始/活动/完成时间
 - `chat_requests`：每次发送的幂等状态、对话轮次、Coze Chat 标识、失败与恢复信息

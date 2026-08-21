@@ -94,3 +94,14 @@ test("participant identity is separately encrypted and required before chat", as
   assert.match(workspace, /参与者信息/);
   assert.doesNotMatch(workspace, /participant: \{ code: session\.participantCode, fullName/);
 });
+
+test("shared experiment entry creates an isolated automatic participant", async () => {
+  const sessionRoute = await readFile("app/api/sessions/route.ts", "utf8");
+  const workspace = await readFile("app/workspace.tsx", "utf8");
+  assert.match(sessionRoute, /participantCode: z\.string\(\).*\.optional\(\)/);
+  assert.match(sessionRoute, /`AUTO-\$\{randomUUID\(\)\}`/);
+  assert.match(sessionRoute, /input\.data\.participantCode && !verifyParticipantAccess/);
+  assert.match(workspace, /response\.status === 401/);
+  assert.match(workspace, /body: JSON\.stringify\(\{\}\)/);
+  assert.doesNotMatch(workspace, /请使用研究者提供的完整实验链接进入/);
+});

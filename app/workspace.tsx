@@ -267,14 +267,24 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
       const access = params.get("access") ?? undefined;
       if (!participantCode) {
         try {
-          const payload = await readResponse(await fetch("/api/sessions", { cache: "no-store" }));
+          let response = await fetch("/api/sessions", { cache: "no-store" });
+          if (response.status === 401) {
+            response = await fetch("/api/sessions", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({}),
+            });
+          }
+          const payload = await readResponse(response);
           if (!cancelled) {
             applyPayload(payload);
             await refreshConversations();
             if (payload.pending) await pollUntilSettled();
             else void checkpointTranscript();
           }
-        } catch { if (!cancelled) setError("请使用研究者提供的完整实验链接进入。"); }
+        } catch (initialError) {
+          if (!cancelled) setError(initialError instanceof Error ? initialError.message : "暂时无法进入实验，请稍后重试。");
+        }
         finally { if (!cancelled) setLoading(false); }
         return;
       }
