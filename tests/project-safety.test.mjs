@@ -7,7 +7,24 @@ test("secrets are documented as environment variables and ignored by git", async
   const gitignore = await readFile(".gitignore", "utf8");
   assert.match(envExample, /COZE_API_TOKEN=/);
   assert.match(envExample, /DATABASE_URL=/);
+  assert.match(envExample, /ACCESS_CODE=/);
   assert.match(gitignore, /\.env\*/);
+});
+
+test("access code protects student pages and APIs without exposing the secret", async () => {
+  const accessSource = await readFile("lib/access-code.ts", "utf8");
+  const proxySource = await readFile("proxy.ts", "utf8");
+  const verifyRoute = await readFile("app/api/access/verify/route.ts", "utf8");
+  const formSource = await readFile("app/access/access-code-form.tsx", "utf8");
+  assert.match(proxySource, /process\.env\.ACCESS_CODE/);
+  assert.match(proxySource, /\/api\/messages\/:path\*/);
+  assert.match(proxySource, /verifyAccessCookie/);
+  assert.match(accessSource, /crypto\.subtle\.sign\("HMAC"/);
+  assert.match(verifyRoute, /httpOnly: true/);
+  assert.match(verifyRoute, /sameSite: "lax"/);
+  assert.match(verifyRoute, /secure: process\.env\.NODE_ENV === "production"/);
+  assert.doesNotMatch(formSource, /process\.env\.ACCESS_CODE/);
+  assert.doesNotMatch(formSource, /NEXT_PUBLIC/);
 });
 
 test("database preserves message ordering and request idempotency", async () => {
@@ -95,13 +112,25 @@ test("participant identity is separately encrypted and required before chat", as
   assert.doesNotMatch(workspace, /participant: \{ code: session\.participantCode, fullName/);
 });
 
-test("shared experiment entry creates an isolated automatic participant", async () => {
+test("shared experiment entry creates a sequential participant only after identity submission", async () => {
+  const migration = await readFile("db/migrations/0007_sequential_participant_codes.sql", "utf8");
   const sessionRoute = await readFile("app/api/sessions/route.ts", "utf8");
   const workspace = await readFile("app/workspace.tsx", "utf8");
   assert.match(sessionRoute, /participantCode: z\.string\(\).*\.optional\(\)/);
-  assert.match(sessionRoute, /`AUTO-\$\{randomUUID\(\)\}`/);
-  assert.match(sessionRoute, /input\.data\.participantCode && !verifyParticipantAccess/);
+  assert.match(migration, /participant_code_counters/);
+  assert.match(sessionRoute, /formatParticipantCode/);
+  assert.match(sessionRoute, /padStart\(3, "0"\)/);
+  assert.match(sessionRoute, /saveParticipantProfileWithClient/);
+  assert.match(sessionRoute, /requestedParticipantCode && !verifyParticipantAccess/);
   assert.match(workspace, /response\.status === 401/);
-  assert.match(workspace, /body: JSON\.stringify\(\{\}\)/);
+  assert.match(workspace, /setProfileOpen\(true\)/);
+  assert.match(workspace, /profile: \{ fullName: profileFullName, studentNumber: profileStudentNumber \}/);
+  assert.doesNotMatch(workspace, /body: JSON\.stringify\(\{\}\)/);
   assert.doesNotMatch(workspace, /请使用研究者提供的完整实验链接进入/);
+});
+
+test("welcome copy is presentation-only and never becomes a recorded message", async () => {
+  const workspace = await readFile("app/workspace.tsx", "utf8");
+  assert.match(workspace, /className="conversation-welcome"/);
+  assert.doesNotMatch(workspace, /message-row assistant"><div className="bubble"><p className="welcome-title"/);
 });

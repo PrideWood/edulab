@@ -267,13 +267,10 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
       const access = params.get("access") ?? undefined;
       if (!participantCode) {
         try {
-          let response = await fetch("/api/sessions", { cache: "no-store" });
+          const response = await fetch("/api/sessions", { cache: "no-store" });
           if (response.status === 401) {
-            response = await fetch("/api/sessions", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({}),
-            });
+            if (!cancelled) setProfileOpen(true);
+            return;
           }
           const payload = await readResponse(response);
           if (!cancelled) {
@@ -416,14 +413,21 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     setProfileSaving(true);
     setProfileError("");
     try {
-      const response = await fetch("/api/participant-profile", {
-        method: "PUT",
+      const response = await fetch(session ? "/api/participant-profile" : "/api/sessions", {
+        method: session ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fullName: profileFullName, studentNumber: profileStudentNumber }),
+        body: JSON.stringify(session
+          ? { fullName: profileFullName, studentNumber: profileStudentNumber }
+          : { profile: { fullName: profileFullName, studentNumber: profileStudentNumber } }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error?.message ?? "参与者信息保存失败。");
-      setParticipantProfile(data.profile as ParticipantProfile);
+      if (session) {
+        setParticipantProfile(data.profile as ParticipantProfile);
+      } else {
+        applyPayload(data as SessionPayload);
+        await refreshConversations();
+      }
       setProfileOpen(false);
     } catch (profileSaveError) {
       setProfileError(profileSaveError instanceof Error ? profileSaveError.message : "参与者信息保存失败。");
@@ -525,7 +529,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
           <div className="messages" ref={messagesViewRef} aria-live="polite">
             {taskOpen && experiment.taskVisible && <section className="inline-task-panel"><div className="inline-task-head"><div><small>任务说明</small><h2>{experiment.title}</h2></div><button onClick={() => setTaskOpen(false)} aria-label="关闭任务说明">×</button></div><p>{experiment.introduction}</p><ol>{experiment.requirements.map((item) => <li key={item}>{item}</li>)}</ol>{experiment.material && <div><strong>学习材料</strong><p>{experiment.material}</p></div>}{experiment.hint && <div><strong>提示</strong><p>{experiment.hint}</p></div>}</section>}
             <p className="day-label">{session ? `开始于 ${timeLabel(session.startedAt)}` : "新对话"}</p>
-            <div className="message-row assistant"><div className="bubble"><p className="welcome-title">你好，我是{experiment.assistantName}。</p><p className="welcome-copy">{experiment.welcome}</p></div></div>
+            {messages.length === 0 && !loading && <div className="conversation-welcome" role="note"><p className="welcome-title">你好，我是{experiment.assistantName}。</p><p className="welcome-copy">{experiment.welcome}</p></div>}
             {messages.map((message) => <div className={`message-row ${message.role}`} key={message.id}><div className="message-stack"><div className="bubble"><MessageBody message={message} /></div><div className={`message-time ${message.role}`}>{timeLabel(message.sentAt)}</div></div></div>)}
             {pending && <div className="message-row assistant"><div className="bubble typing" aria-label="AI 正在回复"><span /><span /><span /></div></div>}
             {error && <div className="error-card" role="alert"><span>{error}</span>{retryContent && <button onClick={() => sendWithId(retryContent, crypto.randomUUID())} disabled={pending}>重新发送</button>}</div>}
@@ -541,7 +545,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
           </div>
         </section>
       </section>
-      {profileOpen && session && <div className="profile-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && participantProfile) setProfileOpen(false); }}>
+      {profileOpen && <div className="profile-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && participantProfile) setProfileOpen(false); }}>
         <section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title">
           <div className="profile-modal-head"><div><p>参与者信息</p><h2 id="profile-title">{participantProfile ? "查看或修改基本信息" : "开始前请填写基本信息"}</h2></div>{participantProfile && <button type="button" onClick={() => setProfileOpen(false)} aria-label="关闭">×</button>}</div>
           <p className="profile-intro">用于将 Participant ID 与后续访谈对象对应。姓名和学号与聊天记录分开加密保存，不会发送给 AI。</p>

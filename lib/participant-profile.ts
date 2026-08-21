@@ -1,6 +1,7 @@
 import "server-only";
 
-import { query } from "@/db";
+import type { PoolClient } from "pg";
+import { query, transaction } from "@/db";
 import type { ParticipantProfile } from "@/lib/client-types";
 import { decryptSecret, encryptSecret, type EncryptedSecret } from "@/lib/secret-crypto";
 
@@ -44,10 +45,10 @@ function encryptedValues(value: string): [string | null, string | null, string |
   return [encrypted.ciphertext, encrypted.iv, encrypted.tag];
 }
 
-export async function saveParticipantProfile(participantId: string, fullName: string, studentNumber: string) {
+export async function saveParticipantProfileWithClient(client: PoolClient, participantId: string, fullName: string, studentNumber: string) {
   const name = encryptedValues(fullName);
   const number = encryptedValues(studentNumber);
-  const result = await query<ProfileRow>(
+  const result = await client.query<ProfileRow>(
     `INSERT INTO participant_identity_profiles (
        participant_id, full_name_ciphertext, full_name_iv, full_name_tag,
        student_number_ciphertext, student_number_iv, student_number_tag
@@ -66,4 +67,8 @@ export async function saveParticipantProfile(participantId: string, fullName: st
     [participantId, ...name, ...number],
   );
   return profileFromRow(result.rows[0]);
+}
+
+export async function saveParticipantProfile(participantId: string, fullName: string, studentNumber: string) {
+  return transaction((client) => saveParticipantProfileWithClient(client, participantId, fullName, studentNumber));
 }
