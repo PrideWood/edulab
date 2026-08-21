@@ -39,7 +39,7 @@ test("conversation export and optional database message storage are implemented"
   assert.match(migration, /user_message_id DROP NOT NULL/);
   assert.match(workspace, /participantCode/);
   assert.match(workspace, /function exportTranscript/);
-  assert.match(workspace, /下载实验记录/);
+  assert.match(workspace, /下载交互记录/);
   assert.match(workspace, /replyStartedAt/);
   assert.match(workspace, /localStorage\.setItem\(transcriptKey/);
   assert.doesNotMatch(cozeSource, /INSERT INTO messages/);

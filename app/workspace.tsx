@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { StoredMessage } from "@/db/schema";
 import type { ExperimentConfig } from "@/config/experiment";
 import type { SessionPayload } from "@/lib/client-types";
@@ -64,6 +66,23 @@ function timeLabel(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
 }
 
+function MessageBody({ message }: { message: StoredMessage }) {
+  if (message.role === "user") return <>{message.content}</>;
+  return (
+    <div className="markdown-content">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        skipHtml
+        components={{
+          a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer noopener">{children}</a>,
+        }}
+      >
+        {message.content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
 export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConfig }) {
   const [text, setText] = useState("");
   const [messages, setMessages] = useState<StoredMessage[]>([]);
@@ -78,7 +97,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [conversationBusy, setConversationBusy] = useState(false);
   const [taskOpen, setTaskOpen] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
 
   const applyPayload = useCallback((payload: SessionPayload) => {
@@ -202,7 +221,11 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     return () => { cancelled = true; };
   }, [applyPayload, pollUntilSettled, refreshConversations, sendWithId]);
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, pending]);
+  useEffect(() => {
+    const container = messagesRef.current;
+    if (!container) return;
+    container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+  }, [messages, pending]);
   useEffect(() => {
     if (!session || loading) return;
     localStorage.setItem(transcriptKey(session.id), JSON.stringify({
@@ -276,7 +299,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
       })));
       await refreshConversations();
     }
-    catch (completeError) { setError(completeError instanceof Error ? `实验记录暂时未能提交：${completeError.message}。请下载实验记录并联系实验人员。` : "实验记录暂时未能提交。请下载实验记录并联系实验人员。"); }
+    catch (completeError) { setError(completeError instanceof Error ? `交互记录暂时未能提交：${completeError.message}。请下载交互记录并联系实验人员。` : "交互记录暂时未能提交。请下载交互记录并联系实验人员。"); }
   }
 
   function exportTranscript() {
@@ -322,14 +345,10 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
 
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <div className="brand"><div className="brand-mark" aria-hidden="true">E</div><div className="brand-name">EduLab</div></div>
-      </header>
       <section className={`workspace conversation-workspace ${sidebarCollapsed ? "sidebar-collapsed" : ""}`} aria-label="AI 对话工作区">
         <aside className="conversation-sidebar" aria-label="对话列表">
           <div className="conversation-sidebar-head">
-            {!sidebarCollapsed && <strong>对话</strong>}
-            <button className="sidebar-toggle" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}>{sidebarCollapsed ? "›" : "‹"}</button>
+            <div className="brand sidebar-brand"><button className="brand-mark brand-toggle" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}>E</button>{!sidebarCollapsed && <div className="brand-name">EduLab</div>}</div>
           </div>
           <button className="new-conversation" onClick={() => changeConversation({ action: "create" })} disabled={loading || pending || conversationBusy}><span>＋</span>{!sidebarCollapsed && <em>新建对话</em>}</button>
           <nav className="conversation-list">
@@ -341,20 +360,19 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
             <div className="assistant-title"><div className="assistant-avatar" aria-hidden="true">AI</div><div><p className="assistant-name">{experiment.assistantName}</p><p className="assistant-status">{session?.status === "completed" || timeExpired || messageLimitReached ? "本次对话已结束" : pending ? "正在思考…" : limitText || "在线"}</p></div></div>
             <div className="session-actions">
               {experiment.taskVisible && <button className="task-toggle-button" onClick={() => setTaskOpen((value) => !value)}>{taskOpen ? "关闭说明" : "任务说明"}</button>}
-              <div className="export-actions"><button onClick={exportTranscript} disabled={!session || messages.length === 0}>下载实验记录</button></div>
+              <div className="export-actions"><button onClick={exportTranscript} disabled={!session || messages.length === 0}>下载交互记录</button></div>
               {session?.status === "active" && <button className="complete-button" onClick={completeExperiment} disabled={pending}>结束对话</button>}
             </div>
           </header>
-          <div className="messages" aria-live="polite">
+          <div className="messages" ref={messagesRef} aria-live="polite">
             {taskOpen && experiment.taskVisible && <section className="inline-task-panel"><div className="inline-task-head"><div><small>任务说明</small><h2>{experiment.title}</h2></div><button onClick={() => setTaskOpen(false)} aria-label="关闭任务说明">×</button></div><p>{experiment.introduction}</p><ol>{experiment.requirements.map((item) => <li key={item}>{item}</li>)}</ol>{experiment.material && <div><strong>学习材料</strong><p>{experiment.material}</p></div>}{experiment.hint && <div><strong>提示</strong><p>{experiment.hint}</p></div>}</section>}
             <p className="day-label">{session ? `开始于 ${timeLabel(session.startedAt)}` : "新对话"}</p>
             <div className="message-row assistant"><div className="bubble"><p className="welcome-title">你好，我是{experiment.assistantName}。</p><p className="welcome-copy">{experiment.welcome}</p></div></div>
-            {messages.map((message) => <div className={`message-row ${message.role}`} key={message.id}><div><div className="bubble">{message.content}</div><div className={`message-time ${message.role}`}>{timeLabel(message.sentAt)}</div></div></div>)}
+            {messages.map((message) => <div className={`message-row ${message.role}`} key={message.id}><div className="message-stack"><div className="bubble"><MessageBody message={message} /></div><div className={`message-time ${message.role}`}>{timeLabel(message.sentAt)}</div></div></div>)}
             {pending && <div className="message-row assistant"><div className="bubble typing" aria-label="AI 正在回复"><span /><span /><span /></div></div>}
             {error && <div className="error-card" role="alert"><span>{error}</span>{retryContent && <button onClick={() => sendWithId(retryContent, crypto.randomUUID())} disabled={pending}>重新发送</button>}</div>}
             {loading && <div className="loading-note">正在准备实验会话…</div>}
             {session?.status === "completed" && <div className="completed-card">这个对话已经结束。你可以在左侧查看其他对话。</div>}
-            <div ref={bottomRef} />
           </div>
           <div className="composer-wrap">
             <form className="composer" onSubmit={submit}>
