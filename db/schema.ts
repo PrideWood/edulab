@@ -5,6 +5,7 @@ export type RequestStatus = "in_progress" | "completed" | "failed" | "uncertain"
 export interface StoredMessage {
   id: string;
   sequenceNo: number;
+  turnIndex: number;
   role: MessageRole;
   content: string;
   sentAt: string;
@@ -12,5 +13,7 @@ export interface StoredMessage {
   replyCompletedAt: string | null;
   latencyMs: number | null;
   clientRequestId: string | null;
+  cozeMessageId: string | null;
+  cozeChatId: string | null;
   status: "completed";
 }

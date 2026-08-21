@@ -15,13 +15,18 @@ const inputSchema = z.object({
   content: z.string().trim().min(1).max(20_000),
 });
 
-async function responsePayload(session: NonNullable<Awaited<ReturnType<typeof getAuthenticatedSession>>>, pending: boolean, transientMessages: StoredMessage[] = []) {
+async function responsePayload(
+  session: NonNullable<Awaited<ReturnType<typeof getAuthenticatedSession>>>,
+  pending: boolean,
+  transientMessages: StoredMessage[] = [],
+  cozeConversationId: string | null = session.cozeConversationId,
+) {
   const state = await getSessionControls(session);
   const storedMessages = await listMessages(session.id);
   const messages = [...storedMessages, ...transientMessages.filter((message) => !storedMessages.some((stored) => stored.id === message.id))]
     .sort((a, b) => a.sequenceNo - b.sequenceNo);
   return {
-    session: { id: session.publicId, status: state.status, startedAt: session.startedAt, lastActivityAt: new Date().toISOString(), participantCode: session.participantCode },
+    session: { id: session.publicId, status: state.status, startedAt: session.startedAt, lastActivityAt: new Date().toISOString(), participantCode: session.participantCode, cozeConversationId },
     messages, pending,
     failedRequest: pending ? null : await getLatestFailedRequest(session.id),
     controls: state.controls,
@@ -51,11 +56,11 @@ export async function POST(request: Request) {
     if (!begun.created) {
       if (begun.request.status === "completed") {
         const recovered = await getUnstoredCompletedRequestMessages(session, begun.request);
-        return NextResponse.json(await responsePayload(session, false, recovered));
+        return NextResponse.json(await responsePayload(session, false, recovered, begun.request.cozeConversationId));
       }
       if (begun.request.status === "failed" || begun.request.status === "uncertain") throw new ApiError(409, "REQUEST_FAILED", "这次发送未完成，请使用重试按钮重新发送。");
       const recovery = await recoverPendingRequest(session);
-      return NextResponse.json(await responsePayload(session, recovery.pending, recovery.messages), { status: recovery.pending ? 202 : 200 });
+      return NextResponse.json(await responsePayload(session, recovery.pending, recovery.messages, begun.request.cozeConversationId), { status: recovery.pending ? 202 : 200 });
     }
 
     let chat;
@@ -69,11 +74,14 @@ export async function POST(request: Request) {
     try { result = await waitForCozeChat(session, chat); }
     catch (error) {
       console.error("Coze polling was interrupted; the request remains recoverable", error);
-      return NextResponse.json(await responsePayload(session, true), { status: 202 });
+      return NextResponse.json(await responsePayload(session, true, [], chat.conversation_id), { status: 202 });
     }
-    if (result.pending) return NextResponse.json(await responsePayload(session, true), { status: 202 });
-    const completedMessages = await finalizeCompletedRequest(session.id, requestId, result.chat, result.messages);
-    return NextResponse.json(await responsePayload(session, false, completedMessages));
+    if (result.pending) return NextResponse.json(await responsePayload(session, true, [], result.chat.conversation_id), { status: 202 });
+    const completedMessages = await finalizeCompletedRequest(session.id, requestId, result.chat, result.messages, {
+      content: input.data.content,
+      clientRequestId: input.data.clientRequestId,
+    });
+    return NextResponse.json(await responsePayload(session, false, completedMessages, result.chat.conversation_id));
   } catch (error) {
     if (session && requestId && !(error instanceof ApiError)) {
       await markRequestFailed(session.id, requestId, "UNEXPECTED_ERROR", error instanceof Error ? error.message : "Unexpected error").catch(console.error);

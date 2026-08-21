@@ -26,6 +26,8 @@ function delay(ms: number) {
 
 export interface RequestRecord {
   id: string;
+  clientRequestId: string;
+  turnIndex: number;
   status: "in_progress" | "completed" | "failed" | "uncertain";
   cozeChatId: string | null;
   cozeConversationId: string | null;
@@ -35,14 +37,14 @@ export interface RequestRecord {
 
 export async function beginChatRequest(session: AuthenticatedSession, clientRequestId: string, content: string, databaseMessagesEnabled: boolean) {
   return transaction(async (client) => {
-    const existing = await client.query<{ id: string; status: RequestRecord["status"]; coze_chat_id: string | null; coze_conversation_id: string | null; requested_at: string; metadata: Record<string, unknown> }>(
-      `SELECT id, status, coze_chat_id, coze_conversation_id, requested_at, metadata
+    const existing = await client.query<{ id: string; client_request_id: string; turn_index: number; status: RequestRecord["status"]; coze_chat_id: string | null; coze_conversation_id: string | null; requested_at: string; metadata: Record<string, unknown> }>(
+      `SELECT id, client_request_id, turn_index, status, coze_chat_id, coze_conversation_id, requested_at, metadata
        FROM chat_requests WHERE session_id = $1 AND client_request_id = $2`,
       [session.id, clientRequestId],
     );
     if (existing.rows[0]) {
       const row = existing.rows[0];
-      return { created: false as const, request: { id: row.id, status: row.status, cozeChatId: row.coze_chat_id, cozeConversationId: row.coze_conversation_id, requestedAt: row.requested_at, metadata: row.metadata } };
+      return { created: false as const, request: { id: row.id, clientRequestId: row.client_request_id, turnIndex: row.turn_index, status: row.status, cozeChatId: row.coze_chat_id, cozeConversationId: row.coze_conversation_id, requestedAt: row.requested_at, metadata: row.metadata } };
     }
 
     const requestId = randomUUID();
@@ -58,13 +60,24 @@ export async function beginChatRequest(session: AuthenticatedSession, clientRequ
     );
     if (!locked.rows[0]) throw Object.assign(new Error("Another request is active"), { code: "SESSION_BUSY" });
 
-    const metadata = { database_messages_enabled: databaseMessagesEnabled, storage_mode: "deferred_until_completion", user_sequence: locked.rows[0].sequence_no, content_length: Array.from(content).length };
-    await client.query(
-      `INSERT INTO chat_requests (id, session_id, client_request_id, status, user_message_id, metadata)
-       VALUES ($1, $2, $3, 'in_progress', $4, $5::jsonb)`,
-      [requestId, session.id, clientRequestId, null, JSON.stringify(metadata)],
+    const turn = await client.query<{ turn_index: number }>(
+      `SELECT COALESCE(max(turn_index), 0) + 1 AS turn_index FROM chat_requests WHERE session_id = $1`,
+      [session.id],
     );
-    return { created: true as const, request: { id: requestId, status: "in_progress" as const, cozeChatId: null, cozeConversationId: null, requestedAt: new Date().toISOString(), metadata } };
+    const turnIndex = turn.rows[0].turn_index;
+    const metadata = {
+      database_messages_enabled: databaseMessagesEnabled,
+      storage_mode: "deferred_until_completion",
+      user_sequence: locked.rows[0].sequence_no,
+      content_length: Array.from(content).length,
+      ...(databaseMessagesEnabled ? { user_content: content } : {}),
+    };
+    await client.query(
+      `INSERT INTO chat_requests (id, session_id, client_request_id, turn_index, status, user_message_id, metadata)
+       VALUES ($1, $2, $3, $4, 'in_progress', $5, $6::jsonb)`,
+      [requestId, session.id, clientRequestId, turnIndex, null, JSON.stringify(metadata)],
+    );
+    return { created: true as const, request: { id: requestId, clientRequestId, turnIndex, status: "in_progress" as const, cozeChatId: null, cozeConversationId: null, requestedAt: new Date().toISOString(), metadata } };
   });
 }
 
@@ -102,7 +115,68 @@ function assistantAnswers(messages: ChatV3Message[]) {
   return messages.filter((message) => message.role === RoleType.Assistant && message.type === "answer" && message.content.trim());
 }
 
-export async function finalizeCompletedRequest(sessionId: string, requestId: string, chat: CreateChatData, messages: ChatV3Message[]): Promise<StoredMessage[]> {
+function userQuestion(messages: ChatV3Message[]) {
+  return messages.find((message) => message.role === RoleType.User && message.content.trim());
+}
+
+function transientRequestMessages(
+  request: Pick<RequestRecord, "clientRequestId" | "turnIndex" | "cozeChatId" | "requestedAt" | "metadata">,
+  messages: ChatV3Message[],
+  assistantStartSequence: number,
+  completedAt: Date,
+  fallbackUserContent = "",
+): StoredMessage[] {
+  const question = userQuestion(messages);
+  const userContent = question?.content.trim() || (typeof request.metadata.user_content === "string" ? request.metadata.user_content : "") || fallbackUserContent;
+  const userSequence = Number(request.metadata.user_sequence ?? assistantStartSequence - 1);
+  const answers = assistantAnswers(messages);
+  const replyStartedAt = answers.length ? new Date(Math.min(...answers.map((message) => message.created_at * 1000))) : null;
+  const result: StoredMessage[] = [];
+  if (userContent) {
+    result.push({
+      id: question?.id ? `coze-user-${question.id}` : `request-user-${request.clientRequestId}`,
+      sequenceNo: userSequence,
+      turnIndex: request.turnIndex,
+      role: "user",
+      content: userContent,
+      sentAt: new Date(request.requestedAt).toISOString(),
+      replyStartedAt: null,
+      replyCompletedAt: null,
+      latencyMs: null,
+      clientRequestId: request.clientRequestId,
+      cozeMessageId: question?.id ?? null,
+      cozeChatId: request.cozeChatId,
+      status: "completed",
+    });
+  }
+  for (const [index, answer] of answers.entries()) {
+    const sentAt = new Date(answer.created_at * 1000);
+    result.push({
+      id: `coze-${answer.id}`,
+      sequenceNo: assistantStartSequence + index,
+      turnIndex: request.turnIndex,
+      role: "assistant",
+      content: answer.content,
+      sentAt: sentAt.toISOString(),
+      replyStartedAt: replyStartedAt?.toISOString() ?? null,
+      replyCompletedAt: completedAt.toISOString(),
+      latencyMs: Math.max(0, completedAt.getTime() - new Date(request.requestedAt).getTime()),
+      clientRequestId: null,
+      cozeMessageId: answer.id,
+      cozeChatId: request.cozeChatId,
+      status: "completed",
+    });
+  }
+  return result;
+}
+
+export async function finalizeCompletedRequest(
+  sessionId: string,
+  requestId: string,
+  chat: CreateChatData,
+  messages: ChatV3Message[],
+  fallbackUser?: { content: string; clientRequestId: string },
+): Promise<StoredMessage[]> {
   const answers = assistantAnswers(messages);
   if (chat.status !== ChatStatus.COMPLETED || answers.length === 0) {
     const errorCode = chat.last_error?.code ? String(chat.last_error.code) : chat.status;
@@ -112,7 +186,10 @@ export async function finalizeCompletedRequest(sessionId: string, requestId: str
   }
 
   return transaction(async (client) => {
-    const request = await client.query<{ status: string; requested_at: Date }>(`SELECT status, requested_at FROM chat_requests WHERE id = $1 FOR UPDATE`, [requestId]);
+    const request = await client.query<{ status: string; client_request_id: string; turn_index: number; requested_at: Date; metadata: Record<string, unknown> }>(
+      `SELECT status, client_request_id, turn_index, requested_at, metadata FROM chat_requests WHERE id = $1 FOR UPDATE`,
+      [requestId],
+    );
     if (!request.rows[0] || request.rows[0].status === "completed") return [];
     const allocation = await client.query<{ start_sequence: number }>(
       `UPDATE experiment_sessions SET next_sequence = next_sequence + $2, last_activity_at = now(), active_request_id = NULL
@@ -122,49 +199,106 @@ export async function finalizeCompletedRequest(sessionId: string, requestId: str
     const start = allocation.rows[0].start_sequence;
     const completedAt = chat.completed_at ? new Date(chat.completed_at * 1000) : new Date();
     const replyStartedAt = new Date(Math.min(...answers.map((message) => message.created_at * 1000)));
-    const latencyMs = Math.max(0, completedAt.getTime() - request.rows[0].requested_at.getTime());
 
-    const completedMessages: StoredMessage[] = [];
-    for (const [index, answer] of answers.entries()) {
-      const message = {
-        id: randomUUID(), sessionId, requestId, sequenceNo: start + index,
-        content: answer.content, cozeMessageId: answer.id, cozeChatId: chat.id,
-        sentAt: new Date(answer.created_at * 1000), replyStartedAt, completedAt, latencyMs,
-        metadata: { content_type: answer.content_type, message_type: answer.type, section_id: answer.section_id, updated_at: answer.updated_at },
-      };
-      completedMessages.push({
-        id: `coze-${answer.id}`,
-        sequenceNo: message.sequenceNo, role: "assistant", content: message.content,
-        sentAt: message.sentAt.toISOString(), replyStartedAt: replyStartedAt.toISOString(),
-        replyCompletedAt: completedAt.toISOString(), latencyMs, clientRequestId: null, status: "completed",
-      });
-    }
+    const requestMetadata = {
+      ...request.rows[0].metadata,
+      assistant_start_sequence: start,
+    };
+    const completedMessages = transientRequestMessages({
+      clientRequestId: request.rows[0].client_request_id,
+      turnIndex: request.rows[0].turn_index,
+      cozeChatId: chat.id,
+      requestedAt: request.rows[0].requested_at.toISOString(),
+      metadata: requestMetadata,
+    }, messages, start, completedAt, fallbackUser?.content ?? "");
+    const deferredAssistantTranscript = completedMessages
+      .filter((message) => message.role === "assistant")
+      .map((message) => ({
+        id: message.id,
+        sequenceNo: message.sequenceNo,
+        turnIndex: message.turnIndex,
+        content: message.content,
+        sentAt: message.sentAt,
+        replyStartedAt: message.replyStartedAt,
+        replyCompletedAt: message.replyCompletedAt,
+        latencyMs: message.latencyMs,
+        cozeMessageId: message.cozeMessageId,
+        cozeChatId: message.cozeChatId,
+      }));
     await client.query(
       `UPDATE chat_requests SET status = 'completed', completed_at = $2, reply_started_at = $3,
          coze_chat_id = $4, coze_conversation_id = $5, metadata = metadata || $6::jsonb
        WHERE id = $1`,
-      [requestId, completedAt, replyStartedAt, chat.id, chat.conversation_id, JSON.stringify({ coze_status: chat.status, answer_count: answers.length, assistant_start_sequence: start })],
+      [requestId, completedAt, replyStartedAt, chat.id, chat.conversation_id, JSON.stringify({
+        coze_status: chat.status,
+        answer_count: answers.length,
+        assistant_start_sequence: start,
+        ...(request.rows[0].metadata.database_messages_enabled === true ? {
+          assistant_transcript: deferredAssistantTranscript,
+          user_coze_message_id: completedMessages.find((message) => message.role === "user")?.cozeMessageId ?? null,
+        } : {}),
+      })],
     );
     return completedMessages;
   });
 }
 
-async function loadUnstoredRequestMessages(session: AuthenticatedSession, request: Pick<RequestRecord, "cozeChatId" | "cozeConversationId" | "requestedAt" | "metadata">): Promise<StoredMessage[]> {
+function loadDeferredTranscript(request: Pick<RequestRecord, "clientRequestId" | "turnIndex" | "cozeChatId" | "requestedAt" | "metadata">): StoredMessage[] | null {
+  const userContent = request.metadata.user_content;
+  const assistantTranscript = request.metadata.assistant_transcript;
+  if (typeof userContent !== "string" || !userContent.trim()) return null;
+  const userSequence = Number(request.metadata.user_sequence);
+  if (!Number.isInteger(userSequence) || userSequence < 1) return null;
+  const userMessage: StoredMessage = {
+    id: `request-user-${request.clientRequestId}`,
+    sequenceNo: userSequence,
+    turnIndex: request.turnIndex,
+    role: "user",
+    content: userContent,
+    sentAt: new Date(request.requestedAt).toISOString(),
+    replyStartedAt: null,
+    replyCompletedAt: null,
+    latencyMs: null,
+    clientRequestId: request.clientRequestId,
+    cozeMessageId: typeof request.metadata.user_coze_message_id === "string" ? request.metadata.user_coze_message_id : null,
+    cozeChatId: request.cozeChatId,
+    status: "completed",
+  };
+  const assistants: StoredMessage[] = [];
+  if (!Array.isArray(assistantTranscript) || assistantTranscript.length === 0) return [userMessage];
+  for (const raw of assistantTranscript) {
+    if (!raw || typeof raw !== "object") return null;
+    const item = raw as Record<string, unknown>;
+    if (typeof item.content !== "string" || typeof item.sentAt !== "string" || !Number.isInteger(item.sequenceNo)) return null;
+    assistants.push({
+      id: typeof item.id === "string" ? item.id : `deferred-${request.clientRequestId}-${assistants.length + 1}`,
+      sequenceNo: Number(item.sequenceNo),
+      turnIndex: request.turnIndex,
+      role: "assistant",
+      content: item.content,
+      sentAt: item.sentAt,
+      replyStartedAt: typeof item.replyStartedAt === "string" ? item.replyStartedAt : null,
+      replyCompletedAt: typeof item.replyCompletedAt === "string" ? item.replyCompletedAt : null,
+      latencyMs: typeof item.latencyMs === "number" ? item.latencyMs : null,
+      clientRequestId: null,
+      cozeMessageId: typeof item.cozeMessageId === "string" ? item.cozeMessageId : null,
+      cozeChatId: typeof item.cozeChatId === "string" ? item.cozeChatId : request.cozeChatId,
+      status: "completed",
+    });
+  }
+  return [userMessage, ...assistants].sort((a, b) => a.sequenceNo - b.sequenceNo);
+}
+
+async function loadUnstoredRequestMessages(session: AuthenticatedSession, request: Pick<RequestRecord, "clientRequestId" | "turnIndex" | "cozeChatId" | "cozeConversationId" | "requestedAt" | "metadata">): Promise<StoredMessage[]> {
+  const deferred = loadDeferredTranscript(request);
+  if (deferred) return deferred;
   if (!request.cozeChatId || !request.cozeConversationId) return [];
   const coze = (await getCozeClient(session)).client;
   const messages = await coze.chat.messages.list(request.cozeConversationId, request.cozeChatId);
   const answers = assistantAnswers(messages);
-  const start = Number(request.metadata.assistant_start_sequence ?? Number.MAX_SAFE_INTEGER - answers.length);
-  const replyStartedAt = answers.length ? new Date(Math.min(...answers.map((message) => message.created_at * 1000))) : null;
-  return answers.map((answer, index) => {
-    const sentAt = new Date(answer.created_at * 1000);
-    return {
-      id: `coze-${answer.id}`, sequenceNo: start + index, role: "assistant" as const, content: answer.content,
-      sentAt: sentAt.toISOString(), replyStartedAt: replyStartedAt?.toISOString() ?? null,
-      replyCompletedAt: sentAt.toISOString(), latencyMs: Math.max(0, sentAt.getTime() - new Date(request.requestedAt).getTime()),
-      clientRequestId: null, status: "completed" as const,
-    };
-  });
+  const start = Number(request.metadata.assistant_start_sequence ?? Number(request.metadata.user_sequence ?? 0) + 1);
+  const completedAt = answers.length ? new Date(Math.max(...answers.map((message) => message.created_at * 1000))) : new Date(request.requestedAt);
+  return transientRequestMessages(request, messages, start, completedAt);
 }
 
 export async function getUnstoredCompletedRequestMessages(session: AuthenticatedSession, request: RequestRecord) {
@@ -182,20 +316,27 @@ export async function markRequestFailed(sessionId: string, requestId: string, co
 }
 
 export async function recoverPendingRequest(session: AuthenticatedSession): Promise<{ pending: boolean; messages: StoredMessage[] }> {
-  const pending = await query<{ id: string; coze_chat_id: string | null; coze_conversation_id: string | null; started_at: Date; requested_at: string; metadata: Record<string, unknown> }>(
-    `SELECT id, coze_chat_id, coze_conversation_id, started_at, requested_at, metadata FROM chat_requests
+  const pending = await query<{ id: string; client_request_id: string; turn_index: number; coze_chat_id: string | null; coze_conversation_id: string | null; started_at: Date; requested_at: string; metadata: Record<string, unknown> }>(
+    `SELECT id, client_request_id, turn_index, coze_chat_id, coze_conversation_id, started_at, requested_at, metadata FROM chat_requests
      WHERE session_id = $1 AND status = 'in_progress' ORDER BY started_at ASC LIMIT 1`,
     [session.id],
   );
   const request = pending.rows[0];
   if (!request) {
-    const latest = await query<{ coze_chat_id: string | null; coze_conversation_id: string | null; requested_at: string; metadata: Record<string, unknown> }>(
-      `SELECT coze_chat_id, coze_conversation_id, requested_at, metadata FROM chat_requests
-       WHERE session_id = $1 AND status = 'completed' ORDER BY completed_at DESC LIMIT 1`, [session.id],
+    const terminal = await query<{ client_request_id: string; turn_index: number; coze_chat_id: string | null; coze_conversation_id: string | null; requested_at: string; metadata: Record<string, unknown> }>(
+      `SELECT client_request_id, turn_index, coze_chat_id, coze_conversation_id, requested_at, metadata FROM chat_requests
+       WHERE session_id = $1 AND status IN ('completed', 'failed', 'uncertain') ORDER BY turn_index ASC`, [session.id],
     );
-    const row = latest.rows[0];
-    if (!row) return { pending: false, messages: [] };
-    return { pending: false, messages: await loadUnstoredRequestMessages(session, { cozeChatId: row.coze_chat_id, cozeConversationId: row.coze_conversation_id, requestedAt: row.requested_at, metadata: row.metadata }) };
+    if (terminal.rows.length === 0) return { pending: false, messages: [] };
+    const recovered = await Promise.all(terminal.rows.map((row) => loadUnstoredRequestMessages(session, {
+      clientRequestId: row.client_request_id,
+      turnIndex: row.turn_index,
+      cozeChatId: row.coze_chat_id,
+      cozeConversationId: row.coze_conversation_id,
+      requestedAt: row.requested_at,
+      metadata: row.metadata,
+    })));
+    return { pending: false, messages: recovered.flat().sort((a, b) => a.sequenceNo - b.sequenceNo) };
   }
   if (!request.coze_chat_id || !request.coze_conversation_id) {
     if (Date.now() - request.started_at.getTime() > 120_000) await markRequestFailed(session.id, request.id, "UNKNOWN_AFTER_CREATE", "Request outcome could not be verified", "uncertain");

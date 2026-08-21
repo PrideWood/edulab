@@ -62,7 +62,7 @@ export async function POST(request: Request) {
       : null;
 
     const response = NextResponse.json({
-      session: { id: publicId, status: "active", startedAt: startedAt.toISOString(), lastActivityAt: startedAt.toISOString(), participantCode },
+      session: { id: publicId, status: "active", startedAt: startedAt.toISOString(), lastActivityAt: startedAt.toISOString(), participantCode, cozeConversationId: null },
       messages: [], pending: false, failedRequest: null,
       controls: {
         taskVisible: snapshot.experiment.taskVisible, chatEnabled: snapshot.experiment.chatEnabled,

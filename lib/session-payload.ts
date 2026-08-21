@@ -26,6 +26,7 @@ export async function buildSessionPayload(session: AuthenticatedSession) {
     session: {
       id: session.publicId, status: state.status, startedAt: session.startedAt,
       lastActivityAt: session.lastActivityAt, participantCode: session.participantCode,
+      cozeConversationId: session.cozeConversationId,
     },
     messages,
     pending,

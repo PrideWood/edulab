@@ -31,6 +31,7 @@ test("admin settings keep credentials encrypted and preserve session conditions"
 
 test("conversation export and optional database message storage are implemented", async () => {
   const migration = await readFile("db/migrations/0003_message_storage_control.sql", "utf8");
+  const turnMigration = await readFile("db/migrations/0005_turn_index.sql", "utf8");
   const workspace = await readFile("app/workspace.tsx", "utf8");
   const cozeSource = await readFile("lib/coze.ts", "utf8");
   const completeRoute = await readFile("app/api/sessions/complete/route.ts", "utf8");
@@ -42,9 +43,18 @@ test("conversation export and optional database message storage are implemented"
   assert.match(workspace, /下载交互记录/);
   assert.match(workspace, /replyStartedAt/);
   assert.match(workspace, /localStorage\.setItem\(transcriptKey/);
+  assert.match(workspace, /turnIndex: message\.turnIndex/);
+  assert.ok(
+    workspace.indexOf("writeLocalTranscript(activeSessionRef.current") < workspace.indexOf('fetch("/api/messages"'),
+    "the participant message must be persisted locally before the Coze request starts",
+  );
   assert.doesNotMatch(cozeSource, /INSERT INTO messages/);
+  assert.match(cozeSource, /role: "user"/);
   assert.match(completeRoute, /deferred_until_completion/);
   assert.match(completeRoute, /INSERT INTO messages/);
+  assert.match(completeRoute, /INCOMPLETE_TRANSCRIPT/);
+  assert.match(turnMigration, /ADD COLUMN IF NOT EXISTS turn_index integer/);
+  assert.match(turnMigration, /UNIQUE \(session_id, turn_index\)/);
   assert.match(adminWorkspace, /实验结束时保存对话到数据库/);
 });
 

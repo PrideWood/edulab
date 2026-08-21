@@ -41,8 +41,31 @@ function readLocalTranscript(sessionId: string): StoredMessage[] {
     const raw = localStorage.getItem(transcriptKey(sessionId));
     if (!raw) return [];
     const parsed = JSON.parse(raw) as { messages?: StoredMessage[] };
-    return Array.isArray(parsed.messages) ? parsed.messages : [];
+    if (!Array.isArray(parsed.messages)) return [];
+    let inferredTurn = 0;
+    return [...parsed.messages]
+      .sort((a, b) => a.sequenceNo - b.sequenceNo)
+      .map((message) => {
+        if (Number.isInteger(message.turnIndex) && message.turnIndex > 0) {
+          inferredTurn = message.turnIndex;
+          return { ...message, cozeMessageId: message.cozeMessageId ?? null, cozeChatId: message.cozeChatId ?? null };
+        }
+        if (message.role === "user") inferredTurn += 1;
+        return { ...message, turnIndex: Math.max(1, inferredTurn), cozeMessageId: message.cozeMessageId ?? null, cozeChatId: message.cozeChatId ?? null };
+      });
   } catch { return []; }
+}
+
+function writeLocalTranscript(activeSession: SessionPayload["session"], messages: StoredMessage[]) {
+  try {
+    localStorage.setItem(transcriptKey(activeSession.id), JSON.stringify({
+      version: 2,
+      sessionId: activeSession.id,
+      participantCode: activeSession.participantCode,
+      updatedAt: new Date().toISOString(),
+      messages,
+    }));
+  } catch { /* The in-memory ledger and export remain available if browser storage is unavailable. */ }
 }
 
 function downloadFile(filename: string, content: string, type: string) {
@@ -97,15 +120,21 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [conversationBusy, setConversationBusy] = useState(false);
   const [taskOpen, setTaskOpen] = useState(false);
-  const messagesRef = useRef<HTMLDivElement>(null);
+  const messagesViewRef = useRef<HTMLDivElement>(null);
+  const messageLedgerRef = useRef<StoredMessage[]>([]);
+  const activeSessionRef = useRef<SessionPayload["session"] | null>(null);
   const sessionIdRef = useRef<string | null>(null);
 
   const applyPayload = useCallback((payload: SessionPayload) => {
     const changedSession = sessionIdRef.current !== null && sessionIdRef.current !== payload.session.id;
     sessionIdRef.current = payload.session.id;
+    activeSessionRef.current = payload.session;
     setSession(payload.session);
     const localMessages = readLocalTranscript(payload.session.id);
-    setMessages((current) => mergeMessages(localMessages, changedSession ? [] : current, payload.messages));
+    const mergedMessages = mergeMessages(localMessages, changedSession ? [] : messageLedgerRef.current, payload.messages);
+    messageLedgerRef.current = mergedMessages;
+    setMessages(mergedMessages);
+    writeLocalTranscript(payload.session, mergedMessages);
     setPending(payload.pending);
     setControls(payload.controls);
     if (payload.failedRequest) {
@@ -148,12 +177,21 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     const activeSessionId = sessionIdRef.current;
     if (!activeSessionId) return;
     localStorage.setItem(outboxKey(activeSessionId), JSON.stringify({ content, clientRequestId }));
-    setMessages((current) => current.some((message) => message.clientRequestId === clientRequestId) ? current : [
-      ...current,
-      { id: `pending-${clientRequestId}`, sequenceNo: Math.max(0, ...current.filter((message) => message.sequenceNo < Number.MAX_SAFE_INTEGER).map((message) => message.sequenceNo)) + 1, role: "user", content,
+    if (!messageLedgerRef.current.some((message) => message.clientRequestId === clientRequestId)) {
+      const optimisticMessage: StoredMessage = {
+        id: `pending-${clientRequestId}`,
+        sequenceNo: Math.max(0, ...messageLedgerRef.current.filter((message) => message.sequenceNo < Number.MAX_SAFE_INTEGER).map((message) => message.sequenceNo)) + 1,
+        turnIndex: Math.max(0, ...messageLedgerRef.current.map((message) => message.turnIndex ?? 0)) + 1,
+        role: "user",
+        content,
         sentAt: new Date().toISOString(), replyStartedAt: null, replyCompletedAt: null,
-        latencyMs: null, clientRequestId, status: "completed" },
-    ]);
+        latencyMs: null, clientRequestId, cozeMessageId: null, cozeChatId: null, status: "completed",
+      };
+      const nextMessages = mergeMessages(messageLedgerRef.current, [optimisticMessage]);
+      messageLedgerRef.current = nextMessages;
+      setMessages(nextMessages);
+      if (activeSessionRef.current) writeLocalTranscript(activeSessionRef.current, nextMessages);
+    }
     try {
       const response = await fetch("/api/messages", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -222,20 +260,10 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   }, [applyPayload, pollUntilSettled, refreshConversations, sendWithId]);
 
   useEffect(() => {
-    const container = messagesRef.current;
+    const container = messagesViewRef.current;
     if (!container) return;
     container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
   }, [messages, pending]);
-  useEffect(() => {
-    if (!session || loading) return;
-    localStorage.setItem(transcriptKey(session.id), JSON.stringify({
-      version: 1,
-      sessionId: session.id,
-      participantCode: session.participantCode,
-      updatedAt: new Date().toISOString(),
-      messages,
-    }));
-  }, [loading, messages, session]);
   useEffect(() => {
     if (!controls?.endsAt || session?.status !== "active") return;
     const initial = window.setTimeout(() => setClock(Date.now()), 0);
@@ -288,13 +316,15 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   async function completeExperiment() {
     setError(null);
     try {
+      const transcript = messageLedgerRef.current;
       applyPayload(await readResponse(await fetch("/api/sessions/complete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: messages.map((message) => ({
-          role: message.role, content: message.content, sentAt: message.sentAt,
+        body: JSON.stringify({ messages: transcript.map((message) => ({
+          role: message.role, content: message.content, turnIndex: message.turnIndex, sentAt: message.sentAt,
           replyStartedAt: message.replyStartedAt, replyCompletedAt: message.replyCompletedAt,
           latencyMs: message.latencyMs, clientRequestId: message.clientRequestId,
+          cozeMessageId: message.cozeMessageId, cozeChatId: message.cozeChatId,
         })) }),
       })));
       await refreshConversations();
@@ -304,9 +334,11 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
 
   function exportTranscript() {
     if (!session) return;
+    const transcript = messageLedgerRef.current;
     const exportedAt = new Date().toISOString();
+    const turnCount = new Set(transcript.map((message) => message.turnIndex)).size;
     const record = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       exportedAt,
       participant: { code: session.participantCode },
       session: {
@@ -314,6 +346,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
         status: session.status,
         startedAt: session.startedAt,
         lastActivityAt: session.lastActivityAt,
+        cozeConversationId: session.cozeConversationId,
       },
       experiment: {
         id: experiment.id,
@@ -326,9 +359,16 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
         databaseMessagesEnabled: controls?.databaseMessagesEnabled ?? true,
         browserBackupIncluded: true,
       },
-      messages: messages.map((message, index) => ({
+      integrity: {
+        messageCount: transcript.length,
+        turnCount,
+        participantMessageCount: transcript.filter((message) => message.role === "user").length,
+        assistantMessageCount: transcript.filter((message) => message.role === "assistant").length,
+      },
+      messages: transcript.map((message, index) => ({
         order: index + 1,
         sequenceNo: message.sequenceNo,
+        turnIndex: message.turnIndex,
         role: message.role,
         content: message.content,
         sentAt: message.sentAt,
@@ -336,6 +376,8 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
         replyCompletedAt: message.replyCompletedAt,
         latencyMs: message.latencyMs,
         clientRequestId: message.clientRequestId,
+        cozeMessageId: message.cozeMessageId,
+        cozeChatId: message.cozeChatId,
       })),
     };
     const safeParticipant = session.participantCode.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 50) || "participant";
@@ -364,7 +406,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
               {session?.status === "active" && <button className="complete-button" onClick={completeExperiment} disabled={pending}>结束对话</button>}
             </div>
           </header>
-          <div className="messages" ref={messagesRef} aria-live="polite">
+          <div className="messages" ref={messagesViewRef} aria-live="polite">
             {taskOpen && experiment.taskVisible && <section className="inline-task-panel"><div className="inline-task-head"><div><small>任务说明</small><h2>{experiment.title}</h2></div><button onClick={() => setTaskOpen(false)} aria-label="关闭任务说明">×</button></div><p>{experiment.introduction}</p><ol>{experiment.requirements.map((item) => <li key={item}>{item}</li>)}</ol>{experiment.material && <div><strong>学习材料</strong><p>{experiment.material}</p></div>}{experiment.hint && <div><strong>提示</strong><p>{experiment.hint}</p></div>}</section>}
             <p className="day-label">{session ? `开始于 ${timeLabel(session.startedAt)}` : "新对话"}</p>
             <div className="message-row assistant"><div className="bubble"><p className="welcome-title">你好，我是{experiment.assistantName}。</p><p className="welcome-copy">{experiment.welcome}</p></div></div>

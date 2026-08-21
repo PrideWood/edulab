@@ -8,6 +8,7 @@ export interface SessionPayload {
     startedAt: string;
     lastActivityAt: string;
     participantCode: string;
+    cozeConversationId: string | null;
   };
   messages: StoredMessage[];
   pending: boolean;
