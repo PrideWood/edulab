@@ -98,8 +98,35 @@ function downloadFile(filename: string, content: string, type: string) {
 
 async function readResponse(response: Response): Promise<SessionPayload> {
   const data = await response.json();
-  if (!response.ok) throw new Error(data?.error?.message ?? "请求失败，请稍后重试。");
+  if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "请求失败，请稍后重试。");
   return data;
+}
+
+class ClientApiError extends Error {
+  constructor(public status: number, public code: string, message: string) {
+    super(message);
+  }
+}
+
+function isInvalidSessionError(error: unknown) {
+  return error instanceof ClientApiError && error.status === 401 && error.code === "SESSION_REQUIRED";
+}
+
+function clearLocalParticipantData(participantCode: string, currentSessionId: string | null) {
+  const sessionIds = new Set<string>(currentSessionId ? [currentSessionId] : []);
+  const transcriptKeys: string[] = [];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (!key?.startsWith(TRANSCRIPT_PREFIX)) continue;
+    try {
+      const saved = JSON.parse(localStorage.getItem(key) ?? "{}") as { participantCode?: string; sessionId?: string };
+      if (saved.participantCode !== participantCode) continue;
+      transcriptKeys.push(key);
+      if (saved.sessionId) sessionIds.add(saved.sessionId);
+    } catch { /* Ignore unrelated or malformed browser data. */ }
+  }
+  for (const key of transcriptKeys) localStorage.removeItem(key);
+  for (const sessionId of sessionIds) localStorage.removeItem(outboxKey(sessionId));
 }
 
 function timeLabel(value: string) {
@@ -151,6 +178,43 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   const sessionIdRef = useRef<string | null>(null);
   const automaticCompletionRef = useRef<string | null>(null);
 
+  const clearInvalidatedSession = useCallback((notice: string) => {
+    const previousSession = activeSessionRef.current;
+    if (previousSession) clearLocalParticipantData(previousSession.participantCode, previousSession.id);
+    sessionIdRef.current = null;
+    activeSessionRef.current = null;
+    messageLedgerRef.current = [];
+    automaticCompletionRef.current = null;
+    setSession(null);
+    setMessages([]);
+    setControls(null);
+    setConversations([]);
+    setParticipantProfile(null);
+    setProfileFullName("");
+    setProfileStudentNumber("");
+    setText("");
+    setPending(false);
+    setRetryContent(null);
+    setError(null);
+    setTaskOpen(false);
+    setProfileError(notice);
+    setProfileOpen(true);
+    setLoading(false);
+    window.history.replaceState({}, "", window.location.pathname);
+  }, []);
+
+  const releaseInvalidatedSession = useCallback(async (notice = "原参与者记录已从后台删除，请填写下一位参与者信息。") => {
+    const transcript = transcriptUploadBody(messageLedgerRef.current);
+    clearInvalidatedSession(notice);
+    try {
+      await fetch("/api/sessions/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: transcript,
+      });
+    } catch { /* Local cleanup must still continue when the deleted server record is unavailable. */ }
+  }, [clearInvalidatedSession]);
+
   const applyPayload = useCallback((payload: SessionPayload) => {
     const changedSession = sessionIdRef.current !== null && sessionIdRef.current !== payload.session.id;
     sessionIdRef.current = payload.session.id;
@@ -183,34 +247,37 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   const refreshConversations = useCallback(async () => {
     const response = await fetch("/api/conversations", { cache: "no-store" });
     const data = await response.json();
-    if (!response.ok) throw new Error(data?.error?.message ?? "无法读取对话列表。");
+    if (!response.ok) {
+      const responseError = new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "无法读取对话列表。");
+      if (isInvalidSessionError(responseError)) {
+        await releaseInvalidatedSession();
+        return false;
+      }
+      throw responseError;
+    }
     setConversations(data.conversations as ConversationSummary[]);
-  }, []);
-
-  const checkpointTranscript = useCallback(async () => {
-    if (!activeSessionRef.current || messageLedgerRef.current.length === 0) return;
-    try {
-      await fetch("/api/sessions/checkpoint", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: transcriptUploadBody(messageLedgerRef.current),
-      });
-    } catch { /* The browser copy and request recovery metadata remain available for a later retry. */ }
-  }, []);
+    return true;
+  }, [releaseInvalidatedSession]);
 
   const pollUntilSettled = useCallback(async () => {
+    const expectedSessionId = sessionIdRef.current;
+    if (!expectedSessionId) return;
     for (let attempt = 0; attempt < 45; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 2000));
+      if (sessionIdRef.current !== expectedSessionId) return;
       const response = await fetch("/api/sessions", { cache: "no-store" });
       const payload = await readResponse(response);
+      if (sessionIdRef.current !== expectedSessionId || payload.session.id !== expectedSessionId) {
+        await releaseInvalidatedSession();
+        return;
+      }
       applyPayload(payload);
       if (!payload.pending) {
-        void checkpointTranscript();
         return;
       }
     }
     setError("AI 仍在处理这条消息。你可以稍后刷新页面，系统会继续恢复结果。");
-  }, [applyPayload, checkpointTranscript]);
+  }, [applyPayload, releaseInvalidatedSession]);
 
   const sendWithId = useCallback(async (content: string, clientRequestId: string) => {
     setError(null);
@@ -218,12 +285,14 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     setPending(true);
     const activeSessionId = sessionIdRef.current;
     if (!activeSessionId) return;
+    const turnIndex = Math.max(0, ...messageLedgerRef.current.map((message) => message.turnIndex ?? 0)) + 1;
+    const userSequence = Math.max(0, ...messageLedgerRef.current.filter((message) => message.sequenceNo < Number.MAX_SAFE_INTEGER).map((message) => message.sequenceNo)) + 1;
     localStorage.setItem(outboxKey(activeSessionId), JSON.stringify({ content, clientRequestId }));
     if (!messageLedgerRef.current.some((message) => message.clientRequestId === clientRequestId)) {
       const optimisticMessage: StoredMessage = {
         id: `pending-${clientRequestId}`,
-        sequenceNo: Math.max(0, ...messageLedgerRef.current.filter((message) => message.sequenceNo < Number.MAX_SAFE_INTEGER).map((message) => message.sequenceNo)) + 1,
-        turnIndex: Math.max(0, ...messageLedgerRef.current.map((message) => message.turnIndex ?? 0)) + 1,
+        sequenceNo: userSequence,
+        turnIndex,
         role: "user",
         content,
         sentAt: new Date().toISOString(), replyStartedAt: null, replyCompletedAt: null,
@@ -237,17 +306,23 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     try {
       const response = await fetch("/api/messages", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, clientRequestId }),
+        body: JSON.stringify({ content, clientRequestId, turnIndex, userSequence }),
       });
       const payload = await readResponse(response);
+      if (sessionIdRef.current !== activeSessionId || payload.session.id !== activeSessionId) {
+        await releaseInvalidatedSession();
+        return;
+      }
       applyPayload(payload);
       if (!payload.pending) {
         localStorage.removeItem(outboxKey(payload.session.id));
-        void checkpointTranscript();
       }
-      await refreshConversations().catch(() => undefined);
       if (payload.pending) await pollUntilSettled();
     } catch (sendError) {
+      if (isInvalidSessionError(sendError)) {
+        await releaseInvalidatedSession();
+        return;
+      }
       setPending(false);
       setRetryContent(content);
       setError(sendError instanceof Error ? sendError.message : "发送失败，请重试。");
@@ -255,10 +330,9 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
         const recovered = await readResponse(await fetch("/api/sessions", { cache: "no-store" }));
         applyPayload(recovered);
         if (recovered.pending) await pollUntilSettled();
-        else void checkpointTranscript();
       } catch { /* Keep the saved outbox for a later retry. */ }
     }
-  }, [applyPayload, checkpointTranscript, pollUntilSettled, refreshConversations]);
+  }, [applyPayload, pollUntilSettled, releaseInvalidatedSession]);
 
   useEffect(() => {
     let cancelled = false;
@@ -276,9 +350,9 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
           const payload = await readResponse(response);
           if (!cancelled) {
             applyPayload(payload);
-            await refreshConversations();
+            const valid = await refreshConversations().catch(() => undefined);
+            if (valid === false) return;
             if (payload.pending) await pollUntilSettled();
-            else void checkpointTranscript();
           }
         } catch (initialError) {
           if (!cancelled) setError(initialError instanceof Error ? initialError.message : "暂时无法进入实验，请稍后重试。");
@@ -293,10 +367,10 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
         }));
         if (cancelled) return;
         applyPayload(payload);
-        await refreshConversations();
+        const valid = await refreshConversations().catch(() => undefined);
+        if (valid === false) return;
         window.history.replaceState({}, "", window.location.pathname);
         if (payload.pending) await pollUntilSettled();
-        else void checkpointTranscript();
         const outbox = localStorage.getItem(outboxKey(payload.session.id));
         if (outbox && !payload.pending && payload.session.status === "active") {
           const saved = JSON.parse(outbox) as { content?: string; clientRequestId?: string };
@@ -312,7 +386,38 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     }
     void initialize();
     return () => { cancelled = true; };
-  }, [applyPayload, checkpointTranscript, pollUntilSettled, refreshConversations, sendWithId]);
+  }, [applyPayload, pollUntilSettled, refreshConversations, sendWithId]);
+
+  useEffect(() => {
+    let checking = false;
+    async function validateWhenReturning() {
+      if (checking || document.visibilityState !== "visible" || !activeSessionRef.current) return;
+      checking = true;
+      try { await refreshConversations(); }
+      catch { /* A temporary database outage must not interrupt the existing AI conversation. */ }
+      finally { checking = false; }
+    }
+    function onVisibilityChange() {
+      if (document.visibilityState === "visible") void validateWhenReturning();
+    }
+    window.addEventListener("focus", validateWhenReturning);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", validateWhenReturning);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [refreshConversations]);
+
+  useEffect(() => {
+    if (!("BroadcastChannel" in window)) return;
+    const channel = new BroadcastChannel("edulab_session_events");
+    channel.onmessage = (event: MessageEvent<{ type?: string; participantCode?: string }>) => {
+      if (event.data?.type === "participant_deleted" && event.data.participantCode === activeSessionRef.current?.participantCode) {
+        void releaseInvalidatedSession();
+      }
+    };
+    return () => channel.close();
+  }, [releaseInvalidatedSession]);
 
   useEffect(() => {
     const container = messagesViewRef.current;
@@ -422,7 +527,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
           : { profile: { fullName: profileFullName, studentNumber: profileStudentNumber } }),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data?.error?.message ?? "参与者信息保存失败。");
+      if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "参与者信息保存失败。");
       if (session) {
         setParticipantProfile(data.profile as ParticipantProfile);
       } else {
@@ -431,6 +536,10 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
       }
       setProfileOpen(false);
     } catch (profileSaveError) {
+      if (isInvalidSessionError(profileSaveError)) {
+        await releaseInvalidatedSession();
+        return;
+      }
       setProfileError(profileSaveError instanceof Error ? profileSaveError.message : "参与者信息保存失败。");
     } finally { setProfileSaving(false); }
   }
@@ -444,11 +553,15 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data?.error?.message ?? "暂时无法切换对话。");
+      if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "暂时无法切换对话。");
       applyPayload(data.payload as SessionPayload);
       setConversations(data.conversations as ConversationSummary[]);
       setTaskOpen(false);
     } catch (conversationError) {
+      if (isInvalidSessionError(conversationError)) {
+        await releaseInvalidatedSession();
+        return;
+      }
       setError(conversationError instanceof Error ? conversationError.message : "暂时无法切换对话。");
     } finally { setConversationBusy(false); }
   }
@@ -468,6 +581,8 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
         startedAt: session.startedAt,
         lastActivityAt: session.lastActivityAt,
         cozeConversationId: session.cozeConversationId,
+        experimentRunId: session.experimentRunId,
+        agentId: session.agentId,
       },
       experiment: {
         id: experiment.id,
@@ -566,7 +681,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
         body: transcriptUploadBody(messageLedgerRef.current),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data?.error?.message ?? "暂时无法切换参与者。");
+      if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "暂时无法切换参与者。");
 
       localStorage.removeItem(outboxKey(session.id));
       sessionIdRef.current = null;
@@ -587,6 +702,10 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
       setProfileOpen(true);
       window.history.replaceState({}, "", window.location.pathname);
     } catch (switchError) {
+      if (isInvalidSessionError(switchError)) {
+        clearInvalidatedSession("原参与者记录已从后台删除，请填写下一位参与者信息。");
+        return;
+      }
       setProfileError(switchError instanceof Error ? switchError.message : "暂时无法切换参与者。");
     } finally {
       setParticipantSwitching(false);

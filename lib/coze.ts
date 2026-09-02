@@ -9,6 +9,26 @@ import { getRuntimeAiConfig } from "@/lib/experiment-settings";
 
 const TERMINAL = new Set([ChatStatus.COMPLETED, ChatStatus.FAILED, ChatStatus.CANCELED, ChatStatus.REQUIRES_ACTION]);
 
+export class CozeChatError extends Error {
+  constructor(public cozeCode: string, message: string) {
+    super(message);
+    this.name = "CozeChatError";
+  }
+}
+
+export function formatCozeError(error: CozeChatError) {
+  return `Coze 返回错误（${error.cozeCode}）：${error.message}`;
+}
+
+function chatFailure(chat: CreateChatData) {
+  const code = chat.last_error?.code ? String(chat.last_error.code) : String(chat.status);
+  const message = chat.last_error?.msg
+    ?? (chat.status === ChatStatus.REQUIRES_ACTION
+      ? "The Coze agent requested an unsupported tool action"
+      : "Coze did not return an answer");
+  return new CozeChatError(code, message);
+}
+
 async function getCozeClient(session: AuthenticatedSession) {
   const config = await getRuntimeAiConfig(session.experimentId, session.configSnapshot);
   if (!config.token) throw new Error("Coze API Token is not configured");
@@ -107,8 +127,101 @@ export async function waitForCozeChat(session: AuthenticatedSession, chat: Creat
     current = await coze.chat.retrieve(chat.conversation_id, chat.id);
   }
   if (!TERMINAL.has(current.status)) return { pending: true as const, chat: current, messages: [] as ChatV3Message[] };
+  if (current.status !== ChatStatus.COMPLETED) {
+    return { pending: false as const, chat: current, messages: [] as ChatV3Message[] };
+  }
   const messages = await coze.chat.messages.list(chat.conversation_id, chat.id);
+  if (!Array.isArray(messages)) {
+    throw new CozeChatError("INVALID_MESSAGE_RESPONSE", "Coze returned no message list for the completed chat");
+  }
   return { pending: false as const, chat: current, messages };
+}
+
+export async function runCozeChatWithoutDatabase(input: {
+  token: string;
+  baseUrl: string;
+  botId: string;
+  cozeUserId: string;
+  cozeConversationId: string | null;
+  sessionPublicId: string;
+  clientRequestId: string;
+  content: string;
+  turnIndex: number;
+  userSequence: number;
+  timeoutMs?: number;
+}) {
+  const client = new CozeAPI({
+    token: input.token,
+    baseURL: input.baseUrl,
+    axiosOptions: { timeout: 15_000 },
+  });
+  const requestedAt = new Date();
+  const chat = await client.chat.create({
+    bot_id: input.botId,
+    user_id: input.cozeUserId,
+    conversation_id: input.cozeConversationId ?? undefined,
+    auto_save_history: true,
+    additional_messages: [{ role: RoleType.User, type: "question", content: input.content, content_type: "text" }],
+    meta_data: { edulab_session: input.sessionPublicId, edulab_request: input.clientRequestId },
+  });
+  const deadline = Date.now() + (input.timeoutMs ?? 45_000);
+  let current = chat;
+  while (!TERMINAL.has(current.status) && Date.now() < deadline) {
+    await delay(400);
+    current = await client.chat.retrieve(chat.conversation_id, chat.id);
+  }
+  if (!TERMINAL.has(current.status)) {
+    return { pending: true as const, chat: current, messages: [] as StoredMessage[] };
+  }
+  if (current.status !== ChatStatus.COMPLETED) throw chatFailure(current);
+  const cozeMessages = await client.chat.messages.list(current.conversation_id, current.id);
+  if (!Array.isArray(cozeMessages)) {
+    throw new CozeChatError("INVALID_MESSAGE_RESPONSE", "Coze returned no message list for the completed chat");
+  }
+  const answers = assistantAnswers(cozeMessages);
+  if (answers.length === 0) throw new CozeChatError("NO_ANSWER", "Coze completed the chat without returning an answer");
+  const completedAt = current.completed_at ? new Date(current.completed_at * 1000) : new Date();
+  const messages = transientRequestMessages({
+    clientRequestId: input.clientRequestId,
+    turnIndex: input.turnIndex,
+    cozeChatId: current.id,
+    requestedAt: requestedAt.toISOString(),
+    metadata: { user_sequence: input.userSequence, user_content: input.content },
+  }, cozeMessages, input.userSequence + 1, completedAt, input.content);
+  return { pending: false as const, chat: current, messages };
+}
+
+export async function recoverCozeChatWithoutDatabase(input: {
+  token: string;
+  baseUrl: string;
+  conversationId: string;
+  chatId: string;
+  clientRequestId: string;
+  turnIndex: number;
+  userSequence: number;
+  requestedAt: string;
+}) {
+  const client = new CozeAPI({
+    token: input.token,
+    baseURL: input.baseUrl,
+    axiosOptions: { timeout: 15_000 },
+  });
+  const chat = await client.chat.retrieve(input.conversationId, input.chatId);
+  if (!TERMINAL.has(chat.status)) return { pending: true as const, chat, messages: [] as StoredMessage[] };
+  if (chat.status !== ChatStatus.COMPLETED) throw chatFailure(chat);
+  const cozeMessages = await client.chat.messages.list(input.conversationId, input.chatId);
+  if (!Array.isArray(cozeMessages)) throw new CozeChatError("INVALID_MESSAGE_RESPONSE", "Coze returned no message list for the completed chat");
+  const answers = assistantAnswers(cozeMessages);
+  if (answers.length === 0) throw new CozeChatError("NO_ANSWER", "Coze completed the chat without returning an answer");
+  const completedAt = chat.completed_at ? new Date(chat.completed_at * 1000) : new Date();
+  const messages = transientRequestMessages({
+    clientRequestId: input.clientRequestId,
+    turnIndex: input.turnIndex,
+    cozeChatId: input.chatId,
+    requestedAt: input.requestedAt,
+    metadata: { user_sequence: input.userSequence },
+  }, cozeMessages, input.userSequence + 1, completedAt);
+  return { pending: false as const, chat, messages };
 }
 
 function assistantAnswers(messages: ChatV3Message[]) {
@@ -177,12 +290,16 @@ export async function finalizeCompletedRequest(
   messages: ChatV3Message[],
   fallbackUser?: { content: string; clientRequestId: string },
 ): Promise<StoredMessage[]> {
+  if (chat.status !== ChatStatus.COMPLETED) {
+    const failure = chatFailure(chat);
+    await markRequestFailed(sessionId, requestId, failure.cozeCode, failure.message);
+    throw failure;
+  }
   const answers = assistantAnswers(messages);
-  if (chat.status !== ChatStatus.COMPLETED || answers.length === 0) {
-    const errorCode = chat.last_error?.code ? String(chat.last_error.code) : chat.status;
-    const errorMessage = chat.last_error?.msg ?? (chat.status === ChatStatus.REQUIRES_ACTION ? "The Coze agent requested an unsupported tool action" : "Coze did not return an answer");
-    await markRequestFailed(sessionId, requestId, errorCode, errorMessage);
-    throw Object.assign(new Error(errorMessage), { code: "COZE_FAILED" });
+  if (answers.length === 0) {
+    const failure = new CozeChatError("NO_ANSWER", "Coze completed the chat without returning an answer");
+    await markRequestFailed(sessionId, requestId, failure.cozeCode, failure.message);
+    throw failure;
   }
 
   return transaction(async (client) => {
@@ -295,6 +412,7 @@ async function loadUnstoredRequestMessages(session: AuthenticatedSession, reques
   if (!request.cozeChatId || !request.cozeConversationId) return [];
   const coze = (await getCozeClient(session)).client;
   const messages = await coze.chat.messages.list(request.cozeConversationId, request.cozeChatId);
+  if (!Array.isArray(messages)) return [];
   const answers = assistantAnswers(messages);
   const start = Number(request.metadata.assistant_start_sequence ?? Number(request.metadata.user_sequence ?? 0) + 1);
   const completedAt = answers.length ? new Date(Math.max(...answers.map((message) => message.created_at * 1000))) : new Date(request.requestedAt);
@@ -359,7 +477,13 @@ export async function recoverPendingRequest(session: AuthenticatedSession): Prom
     }
     return { pending: true, messages: [] };
   }
+  if (chat.status !== ChatStatus.COMPLETED) {
+    const failure = chatFailure(chat);
+    await markRequestFailed(session.id, request.id, failure.cozeCode, failure.message);
+    return { pending: false, messages: [] };
+  }
   const messages = await coze.chat.messages.list(request.coze_conversation_id, request.coze_chat_id);
+  if (!Array.isArray(messages)) return { pending: true, messages: [] };
   const completed = await finalizeCompletedRequest(session.id, request.id, chat, messages);
   return { pending: false, messages: completed };
 }

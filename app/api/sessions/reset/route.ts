@@ -1,3 +1,4 @@
+import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { transaction } from "@/db";
 import { assertSameOrigin } from "@/lib/admin-auth";
@@ -5,6 +6,7 @@ import { getSessionControls } from "@/lib/experiment-limits";
 import { ApiError, errorResponse } from "@/lib/http";
 import { getAuthenticatedSession } from "@/lib/session";
 import { SESSION_COOKIE } from "@/lib/security";
+import { clearRuntimeCookie, getRuntimeSession } from "@/lib/runtime-session";
 import { persistTranscript, transcriptInputSchema } from "@/lib/transcript";
 
 export const runtime = "nodejs";
@@ -12,8 +14,22 @@ export const runtime = "nodejs";
 export async function POST(request: Request) {
   try {
     assertSameOrigin(request);
+    const runtime = await getRuntimeSession();
     const session = await getAuthenticatedSession();
-    if (!session) throw new ApiError(401, "SESSION_REQUIRED", "实验会话已失效。");
+    if (!session) {
+      const hasSessionCookie = Boolean((await cookies()).get(SESSION_COOKIE)?.value);
+      if (!runtime && !hasSessionCookie) throw new ApiError(401, "SESSION_REQUIRED", "实验会话已失效。");
+      const orphanedResponse = NextResponse.json({ reset: true, orphaned: true, databaseMessagesSaved: false });
+      orphanedResponse.cookies.set(SESSION_COOKIE, "", {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        path: "/",
+        maxAge: 0,
+      });
+      clearRuntimeCookie(orphanedResponse);
+      return orphanedResponse;
+    }
     const input = transcriptInputSchema.safeParse(await request.json().catch(() => ({ messages: [] })));
     if (!input.success) throw new ApiError(400, "INVALID_TRANSCRIPT", input.error.issues[0]?.message ?? "本地对话记录格式无效。");
     const state = await getSessionControls(session);
@@ -58,6 +74,7 @@ export async function POST(request: Request) {
       path: "/",
       maxAge: 0,
     });
+    clearRuntimeCookie(response);
     return response;
   } catch (error) {
     return errorResponse(error);

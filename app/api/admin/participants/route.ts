@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import { experiment } from "@/config/experiment";
 import { query } from "@/db";
-import { getAuthenticatedAdmin } from "@/lib/admin-auth";
+import { deleteParticipantRecord } from "@/lib/admin-records";
+import { assertSameOrigin, getAuthenticatedAdmin } from "@/lib/admin-auth";
 import { ApiError, errorResponse } from "@/lib/http";
 import { profileFromRow } from "@/lib/participant-profile";
+import { SESSION_COOKIE } from "@/lib/security";
+import { clearRuntimeCookie, getRuntimeSession } from "@/lib/runtime-session";
 
 export const runtime = "nodejs";
 
@@ -21,6 +25,18 @@ interface ParticipantRow {
   session_count: string;
   turn_count: string;
   last_activity_at: string | null;
+}
+
+const deleteSchema = z.object({
+  participantId: z.uuid(),
+  confirmationCode: z.string().trim().min(1).max(100),
+});
+
+function participantDeleteError(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  if (message === "PARTICIPANT_NOT_FOUND") return new ApiError(404, message, "找不到这条参与者记录，可能已被删除。");
+  if (message === "PARTICIPANT_CONFIRMATION_MISMATCH") return new ApiError(400, message, "输入的 Participant ID 不一致，未执行删除。");
+  return error;
 }
 
 export async function GET() {
@@ -61,4 +77,28 @@ export async function GET() {
     });
     return NextResponse.json({ participants }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) { return errorResponse(error); }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    assertSameOrigin(request);
+    const admin = await getAuthenticatedAdmin();
+    if (!admin) throw new ApiError(401, "ADMIN_REQUIRED", "请先登录管理后台。");
+    const input = deleteSchema.safeParse(await request.json());
+    if (!input.success) throw new ApiError(400, "INVALID_PARTICIPANT_DELETE", "删除确认信息无效。");
+    const deleted = await deleteParticipantRecord({ ...input.data, experimentId: experiment.id }, admin.id);
+    const response = NextResponse.json({ deleted });
+    const runtime = await getRuntimeSession();
+    if (runtime?.session.participantId === deleted.participantId) {
+      response.cookies.set(SESSION_COOKIE, "", {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        path: "/",
+        maxAge: 0,
+      });
+      clearRuntimeCookie(response);
+    }
+    return response;
+  } catch (error) { return errorResponse(participantDeleteError(error)); }
 }

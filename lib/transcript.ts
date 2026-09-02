@@ -48,6 +48,63 @@ export async function persistTranscript(
      FROM chat_requests WHERE session_id = $1 ORDER BY turn_index ASC`,
     [sessionId],
   );
+  const turns = new Map<number, TranscriptMessage[]>();
+  for (const message of messages) {
+    const group = turns.get(message.turnIndex) ?? [];
+    group.push(message);
+    turns.set(message.turnIndex, group);
+  }
+  for (const [turnIndex, turnMessages] of [...turns.entries()].sort((a, b) => a[0] - b[0])) {
+    const user = turnMessages.find((message) => message.role === "user");
+    if (!user?.clientRequestId) {
+      if (options.requireComplete) throw new ApiError(400, "INCOMPLETE_TRANSCRIPT", `第 ${turnIndex} 轮缺少参与者消息。`);
+      continue;
+    }
+    const assistants = turnMessages.filter((message) => message.role === "assistant");
+    const requestedAt = new Date(user.sentAt);
+    const replyStartedAt = assistants.map((message) => message.replyStartedAt).filter((value): value is string => Boolean(value)).sort()[0] ?? null;
+    const completedAt = assistants.map((message) => message.replyCompletedAt ?? message.sentAt).sort().at(-1) ?? null;
+    const cozeChatId = assistants.find((message) => message.cozeChatId)?.cozeChatId ?? user.cozeChatId;
+    const inserted = await client.query<RequestRow>(
+      `INSERT INTO chat_requests (
+         id, session_id, client_request_id, turn_index, status, user_message_id,
+         coze_chat_id, requested_at, started_at, completed_at, reply_started_at, metadata
+       ) VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,$7,$8,$9,$10::jsonb)
+       ON CONFLICT (session_id, client_request_id) DO UPDATE SET
+         status = EXCLUDED.status,
+         coze_chat_id = COALESCE(chat_requests.coze_chat_id, EXCLUDED.coze_chat_id),
+         completed_at = COALESCE(chat_requests.completed_at, EXCLUDED.completed_at),
+         reply_started_at = COALESCE(chat_requests.reply_started_at, EXCLUDED.reply_started_at),
+         metadata = chat_requests.metadata || EXCLUDED.metadata
+       RETURNING id, client_request_id, turn_index, status, requested_at,
+         reply_started_at, completed_at, coze_chat_id, metadata`,
+      [randomUUID(), sessionId, user.clientRequestId, turnIndex,
+        assistants.length > 0 ? "completed" : "uncertain", cozeChatId,
+        requestedAt, completedAt ? new Date(completedAt) : null,
+        replyStartedAt ? new Date(replyStartedAt) : null,
+        JSON.stringify({
+          user_content: user.content,
+          user_sequence: user.sequenceNo,
+          assistant_start_sequence: assistants[0]?.sequenceNo ?? user.sequenceNo + 1,
+          imported_at_completion: true,
+          assistant_transcript: assistants.map((message) => ({
+            id: message.cozeMessageId ? `coze-${message.cozeMessageId}` : `imported-${turnIndex}-${message.sequenceNo}`,
+            sequenceNo: message.sequenceNo,
+            turnIndex,
+            content: message.content,
+            sentAt: message.sentAt,
+            replyStartedAt: message.replyStartedAt,
+            replyCompletedAt: message.replyCompletedAt,
+            latencyMs: message.latencyMs,
+            cozeMessageId: message.cozeMessageId,
+            cozeChatId: message.cozeChatId,
+          })),
+        })],
+    );
+    const existingIndex = requests.rows.findIndex((row) => row.turn_index === turnIndex);
+    if (existingIndex >= 0) requests.rows[existingIndex] = inserted.rows[0];
+    else requests.rows.push(inserted.rows[0]);
+  }
   const byTurn = new Map(requests.rows.map((row) => [row.turn_index, row]));
   const includedUsers = new Set<string>();
   const includedAssistants = new Set<string>();
@@ -131,5 +188,19 @@ export async function persistTranscript(
     if (missingUser) throw new ApiError(400, "INCOMPLETE_TRANSCRIPT", `第 ${missingUser.turn_index} 轮缺少参与者消息。`);
     const missingAssistant = requests.rows.find((row) => row.status === "completed" && !includedAssistants.has(row.id));
     if (missingAssistant) throw new ApiError(400, "INCOMPLETE_TRANSCRIPT", `第 ${missingAssistant.turn_index} 轮缺少 AI 回复。`);
+  }
+  if (messages.length > 0) {
+    const maxSequence = Math.max(...messages.map((message) => message.sequenceNo));
+    const firstUser = [...messages].sort((a, b) => a.sequenceNo - b.sequenceNo).find((message) => message.role === "user");
+    const title = firstUser ? Array.from(firstUser.content.replace(/\s+/g, " ").trim()).slice(0, 28).join("") || "新对话" : "新对话";
+    await client.query(
+      `UPDATE experiment_sessions
+       SET next_sequence = GREATEST(next_sequence, $2), last_activity_at = now(),
+         metadata = CASE WHEN COALESCE(metadata->>'conversation_title', '新对话') = '新对话'
+           THEN jsonb_set(metadata, '{conversation_title}', to_jsonb($3::text), true)
+           ELSE metadata END
+       WHERE id = $1`,
+      [sessionId, maxSequence + 1, title],
+    );
   }
 }

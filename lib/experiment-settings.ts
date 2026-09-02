@@ -24,7 +24,7 @@ export interface ExperimentSessionSnapshot {
   experiment: ExperimentConfig;
   limits: ExperimentLimits;
   storage: { databaseMessagesEnabled: boolean };
-  ai: { baseUrl: string; botId: string };
+  ai: { baseUrl: string; botId: string; agentId?: string; runId?: string; internalName?: string };
 }
 
 interface SettingsRow {

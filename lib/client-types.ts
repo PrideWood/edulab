@@ -15,6 +15,8 @@ export interface SessionPayload {
     lastActivityAt: string;
     participantCode: string;
     cozeConversationId: string | null;
+    experimentRunId: string | null;
+    agentId: string | null;
   };
   messages: StoredMessage[];
   participantProfile: ParticipantProfile | null;

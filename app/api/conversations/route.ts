@@ -9,6 +9,8 @@ import { getSessionControls } from "@/lib/experiment-limits";
 import { getAuthenticatedSession, type AuthenticatedSession } from "@/lib/session";
 import { buildSessionPayload } from "@/lib/session-payload";
 import { parseSessionCookie, SESSION_COOKIE } from "@/lib/security";
+import { getParticipantProfile } from "@/lib/participant-profile";
+import { getRuntimeControls, getRuntimeSession, setRuntimeCookie } from "@/lib/runtime-session";
 
 const inputSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("create") }),
@@ -75,10 +77,14 @@ export async function POST(request: Request) {
     if (!parsedCookie) throw new ApiError(401, "SESSION_REQUIRED", "实验会话已失效。");
     const input = inputSchema.safeParse(await request.json());
     if (!input.success) throw new ApiError(400, "INVALID_CONVERSATION_ACTION", "对话操作无效。");
+    const decodedRuntime = await getRuntimeSession();
+    const currentRuntime = decodedRuntime?.session.publicId === current.publicId ? decodedRuntime : null;
 
     let target: AuthenticatedSession;
     if (input.data.action === "create") {
-      const controls = await getSessionControls(current);
+      const controls = currentRuntime
+        ? { controls: getRuntimeControls(currentRuntime) }
+        : await getSessionControls(current);
       if (!controls.controls.chatEnabled) throw new ApiError(403, "CHAT_DISABLED", "本次实验未开放 AI 对话。");
       if (controls.controls.remainingMessages === 0) throw new ApiError(409, "MESSAGE_LIMIT_REACHED", "已经达到本次实验允许的交流次数。");
       if (controls.controls.endsAt && new Date(controls.controls.endsAt).getTime() <= Date.now()) throw new ApiError(409, "TIME_LIMIT_REACHED", "本次实验的交流时间已经结束。");
@@ -89,13 +95,15 @@ export async function POST(request: Request) {
         const publicId = randomUUID();
         const inserted = await client.query<SessionRow>(
           `INSERT INTO experiment_sessions (id, public_id, participant_id, experiment_id, session_secret_hash,
-             coze_user_id, config_version, config_snapshot, started_at, last_activity_at, metadata)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$9,'{"conversation_title":"新对话"}'::jsonb)
+             coze_user_id, config_version, config_snapshot, started_at, last_activity_at, metadata,
+             experiment_run_id, agent_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$9,'{"conversation_title":"新对话"}'::jsonb,$10,$11)
            RETURNING id, public_id, participant_id, experiment_id, status, coze_user_id,
              coze_conversation_id, active_request_id, started_at, last_activity_at,
              config_version, config_snapshot, session_secret_hash`,
           [id, publicId, current.participantId, current.experimentId, current.sessionSecretHash,
-            `edulab_${publicId.replaceAll("-", "")}`, snapshot.version, JSON.stringify(snapshot), now],
+            `edulab_${publicId.replaceAll("-", "")}`, snapshot.version, JSON.stringify(snapshot), now,
+            snapshot.ai.runId ?? null, snapshot.ai.agentId ?? null],
         );
         return inserted.rows[0];
       });
@@ -113,11 +121,25 @@ export async function POST(request: Request) {
       target = authenticatedFromRow(result.rows[0], current.participantCode);
     }
 
+    const payload = await buildSessionPayload(target);
     const response = NextResponse.json({
-      payload: await buildSessionPayload(target),
+      payload,
       conversations: await listConversations(target),
     });
     setSessionCookie(response, target.publicId, parsedCookie.secret);
+    const runtime = currentRuntime;
+    if (runtime && runtime.session.participantId === target.participantId) {
+      const turnCount = await query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM chat_requests WHERE session_id = $1`,
+        [target.id],
+      );
+      runtime.session = { ...target, configSnapshot: null };
+      runtime.profile = payload.participantProfile ?? await getParticipantProfile(target.participantId);
+      runtime.usedMessages = Math.max(runtime.usedMessages, payload.controls.usedMessages);
+      runtime.conversationTurnCount = Number(turnCount.rows[0]?.count ?? 0);
+      delete runtime.pendingRequest;
+      setRuntimeCookie(response, runtime);
+    }
     return response;
   } catch (error) { return errorResponse(error); }
 }

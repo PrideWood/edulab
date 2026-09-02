@@ -25,6 +25,8 @@ export async function buildSessionPayload(session: AuthenticatedSession) {
       id: session.publicId, status: state.status, startedAt: session.startedAt,
       lastActivityAt: session.lastActivityAt, participantCode: session.participantCode,
       cozeConversationId: session.cozeConversationId,
+      experimentRunId: session.configSnapshot?.ai.runId ?? null,
+      agentId: session.configSnapshot?.ai.agentId ?? null,
     },
     messages,
     participantProfile: await getParticipantProfile(session.participantId),

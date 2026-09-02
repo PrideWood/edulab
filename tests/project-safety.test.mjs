@@ -81,7 +81,86 @@ test("conversation export and optional database message storage are implemented"
   assert.match(workspace, /exportParticipantArchive/);
   assert.match(turnMigration, /ADD COLUMN IF NOT EXISTS turn_index integer/);
   assert.match(turnMigration, /UNIQUE \(session_id, turn_index\)/);
-  assert.match(adminWorkspace, /后台保存完整对话到数据库/);
+  assert.match(adminWorkspace, /实验结束时备份完整对话到数据库/);
+});
+
+test("the student message fast path calls Coze without waiting for PostgreSQL", async () => {
+  const messageRoute = await readFile("app/api/messages/route.ts", "utf8");
+  const runtimeSource = await readFile("lib/runtime-session.ts", "utf8");
+  const workspace = await readFile("app/workspace.tsx", "utf8");
+  const fastPathStart = messageRoute.indexOf("async function postWithoutDatabase");
+  const fastPathEnd = messageRoute.indexOf("async function responsePayload");
+  assert.ok(fastPathStart >= 0 && fastPathEnd > fastPathStart);
+  assert.doesNotMatch(messageRoute.slice(fastPathStart, fastPathEnd), /query\(|transaction\(|beginChatRequest|getAuthenticatedSession/);
+  assert.match(messageRoute, /getRuntimeSession\(\)/);
+  assert.match(messageRoute, /runCozeChatWithoutDatabase/);
+  assert.match(runtimeSource, /httpOnly: true/);
+  assert.doesNotMatch(workspace.slice(workspace.indexOf("const sendWithId"), workspace.indexOf("useEffect(() =>", workspace.indexOf("const sendWithId"))), /checkpointTranscript/);
+});
+
+test("multiple agents and controlled experiment runs are persisted", async () => {
+  const migration = await readFile("db/migrations/0008_multi_agent_experiment_runs.sql", "utf8");
+  const agentControl = await readFile("lib/agent-control.ts", "utf8");
+  const adminWorkspace = await readFile("app/admin/workspace.tsx", "utf8");
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS ai_agent_configs/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS experiment_runs/);
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS participant_agent_assignments/);
+  assert.match(migration, /experiment_runs_one_active_idx/);
+  assert.match(agentControl, /assignment_mode === "fixed"/);
+  assert.match(agentControl, /ORDER BY count\(assignment\.id\), random\(\)/);
+  assert.match(adminWorkspace, /固定智能体/);
+  assert.match(adminWorkspace, /均衡随机分配/);
+});
+
+test("admin destructive actions require typed confirmation and preserve referenced agents", async () => {
+  const adminRecords = await readFile("lib/admin-records.ts", "utf8");
+  const participantsRoute = await readFile("app/api/admin/participants/route.ts", "utf8");
+  const agentControl = await readFile("lib/agent-control.ts", "utf8");
+  const agentRoute = await readFile("app/api/admin/agent-control/route.ts", "utf8");
+  const adminWorkspace = await readFile("app/admin/workspace.tsx", "utf8");
+  assert.match(participantsRoute, /export async function DELETE/);
+  assert.match(participantsRoute, /assertSameOrigin/);
+  assert.match(adminRecords, /PARTICIPANT_CONFIRMATION_MISMATCH/);
+  assert.match(adminRecords, /DELETE FROM messages/);
+  assert.match(adminRecords, /DELETE FROM chat_requests/);
+  assert.match(adminRecords, /participant\.record\.delete/);
+  assert.match(agentRoute, /export async function DELETE/);
+  assert.match(agentControl, /AGENT_CONFIRMATION_MISMATCH/);
+  assert.match(agentControl, /AGENT_HAS_REFERENCES/);
+  assert.match(agentControl, /ai\.agent\.delete/);
+  assert.match(adminWorkspace, /function DangerConfirmation/);
+  assert.match(adminWorkspace, /confirmation !== expectedValue/);
+});
+
+test("deleting a participant invalidates stale browser state without adding database work to message delivery", async () => {
+  const participantsRoute = await readFile("app/api/admin/participants/route.ts", "utf8");
+  const resetRoute = await readFile("app/api/sessions/reset/route.ts", "utf8");
+  const workspace = await readFile("app/workspace.tsx", "utf8");
+  const adminWorkspace = await readFile("app/admin/workspace.tsx", "utf8");
+  const messageRoute = await readFile("app/api/messages/route.ts", "utf8");
+  assert.match(participantsRoute, /clearRuntimeCookie/);
+  assert.match(participantsRoute, /runtime\?\.session\.participantId === deleted\.participantId/);
+  assert.match(resetRoute, /orphaned: true/);
+  assert.match(resetRoute, /hasSessionCookie/);
+  assert.match(workspace, /clearLocalParticipantData/);
+  assert.match(workspace, /visibilitychange/);
+  assert.match(workspace, /releaseInvalidatedSession/);
+  assert.match(workspace, /participant_deleted/);
+  assert.match(adminWorkspace, /participant_deleted/);
+  const fastPathStart = messageRoute.indexOf("async function postWithoutDatabase");
+  const fastPathEnd = messageRoute.indexOf("async function responsePayload");
+  assert.doesNotMatch(messageRoute.slice(fastPathStart, fastPathEnd), /query\(|transaction\(|getAuthenticatedSession/);
+});
+
+test("Coze failures preserve the provider error instead of parsing a missing message list", async () => {
+  const cozeSource = await readFile("lib/coze.ts", "utf8");
+  const messageRoute = await readFile("app/api/messages/route.ts", "utf8");
+  const messagesSource = await readFile("lib/messages.ts", "utf8");
+  assert.match(cozeSource, /current\.status !== ChatStatus\.COMPLETED/);
+  assert.match(cozeSource, /throw failure/);
+  assert.match(messageRoute, /error instanceof CozeChatError/);
+  assert.match(messageRoute, /formatCozeError\(error\)/);
+  assert.match(messagesSource, /Coze 返回错误/);
 });
 
 test("student device switching finalizes the participant and clears only the participant session", async () => {

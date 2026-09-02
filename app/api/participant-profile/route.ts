@@ -4,6 +4,7 @@ import { assertSameOrigin } from "@/lib/admin-auth";
 import { ApiError, errorResponse } from "@/lib/http";
 import { getParticipantProfile, saveParticipantProfile } from "@/lib/participant-profile";
 import { getAuthenticatedSession } from "@/lib/session";
+import { getRuntimeSession, setRuntimeCookie } from "@/lib/runtime-session";
 
 export const runtime = "nodejs";
 
@@ -34,6 +35,12 @@ export async function PUT(request: Request) {
     const input = inputSchema.safeParse(await request.json());
     if (!input.success) throw new ApiError(400, "INVALID_PARTICIPANT_PROFILE", input.error.issues[0]?.message ?? "参与者信息无效。");
     const profile = await saveParticipantProfile(session.participantId, input.data.fullName, input.data.studentNumber);
-    return noStoreJson({ profile });
+    const response = noStoreJson({ profile });
+    const runtime = await getRuntimeSession();
+    if (runtime && runtime.session.participantId === session.participantId) {
+      runtime.profile = profile;
+      setRuntimeCookie(response, runtime);
+    }
+    return response;
   } catch (error) { return errorResponse(error); }
 }

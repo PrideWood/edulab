@@ -6,6 +6,7 @@ import { ApiError, errorResponse } from "@/lib/http";
 import { getAuthenticatedSession } from "@/lib/session";
 import { buildSessionPayload } from "@/lib/session-payload";
 import { persistTranscript, transcriptInputSchema } from "@/lib/transcript";
+import { getRuntimeSession, setRuntimeCookie } from "@/lib/runtime-session";
 
 export const runtime = "nodejs";
 
@@ -18,6 +19,7 @@ export async function POST(request: Request) {
     const input = transcriptInputSchema.safeParse(await request.json().catch(() => ({ messages: [] })));
     if (!input.success) throw new ApiError(400, "INVALID_TRANSCRIPT", input.error.issues[0]?.message ?? "本地对话记录格式无效。");
     const state = await getSessionControls(session);
+    const runtime = await getRuntimeSession();
 
     const completedAt = await transaction(async (client) => {
       if (state.controls.databaseMessagesEnabled) {
@@ -28,6 +30,7 @@ export async function POST(request: Request) {
       }
       const result = await client.query<{ completed_at: string }>(
         `UPDATE experiment_sessions SET status = 'completed', completed_at = COALESCE(completed_at, now()), last_activity_at = now(),
+           coze_conversation_id = COALESCE(coze_conversation_id, $3),
            metadata = metadata || $2::jsonb
          WHERE id = $1 AND active_request_id IS NULL RETURNING completed_at`,
         [session.id, JSON.stringify({
@@ -35,17 +38,24 @@ export async function POST(request: Request) {
           transcript_message_count: input.data.messages.length,
           transcript_turn_count: new Set(input.data.messages.map((message) => message.turnIndex)).size,
           completion_source: "configured_limit",
-        })],
+        }), runtime?.session.publicId === session.publicId ? runtime.session.cozeConversationId : null],
       );
       if (!result.rows[0]) throw new ApiError(409, "SESSION_BUSY", "请等待 AI 完成本次回复后再整理记录。");
       return result.rows[0].completed_at;
     });
 
-    return NextResponse.json(await buildSessionPayload({
+    const response = NextResponse.json(await buildSessionPayload({
       ...session,
       status: "completed",
       activeRequestId: null,
       lastActivityAt: completedAt,
     }));
+    if (runtime) {
+      runtime.session.status = "completed";
+      runtime.session.lastActivityAt = completedAt;
+      delete runtime.pendingRequest;
+      setRuntimeCookie(response, runtime);
+    }
+    return response;
   } catch (error) { return errorResponse(error); }
 }
