@@ -225,3 +225,15 @@ test("welcome copy is presentation-only and never becomes a recorded message", a
   assert.match(workspace, /className="conversation-welcome"/);
   assert.doesNotMatch(workspace, /message-row assistant"><div className="bubble"><p className="welcome-title"/);
 });
+
+test("assistant display name is editable even when optional task content is hidden", async () => {
+  const adminWorkspace = await readFile("app/admin/workspace.tsx", "utf8");
+  const contentStart = adminWorkspace.indexOf("function ContentSettings");
+  const limitsStart = adminWorkspace.indexOf("function LimitSettings");
+  const storageStart = adminWorkspace.indexOf("function StorageSettings");
+  assert.ok(contentStart >= 0 && limitsStart > contentStart && storageStart > limitsStart);
+  assert.doesNotMatch(adminWorkspace.slice(contentStart, limitsStart), /assistantName|开场欢迎语/);
+  assert.match(adminWorkspace.slice(limitsStart, storageStart), /学生端 AI 显示/);
+  assert.match(adminWorkspace.slice(limitsStart, storageStart), /assistantName/);
+  assert.match(adminWorkspace.slice(limitsStart, storageStart), /welcome/);
+});
