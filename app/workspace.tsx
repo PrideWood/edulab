@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm";
 import type { StoredMessage } from "@/db/schema";
 import type { ExperimentConfig } from "@/config/experiment";
 import type { ParticipantProfile, SessionPayload } from "@/lib/client-types";
+import { buildTranscriptExport, safeExportSegment } from "@/lib/transcript-export";
 
 const OUTBOX_PREFIX = "edulab_pending_message:";
 const TRANSCRIPT_PREFIX = "edulab_transcript:";
@@ -570,53 +571,15 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     if (!session) return;
     const transcript = messageLedgerRef.current;
     const exportedAt = new Date().toISOString();
-    const turnCount = new Set(transcript.map((message) => message.turnIndex)).size;
-    const record = {
-      schemaVersion: 2,
+    const record = buildTranscriptExport({
       exportedAt,
-      participant: { code: session.participantCode },
-      session: {
-        id: session.id,
-        status: session.status,
-        startedAt: session.startedAt,
-        lastActivityAt: session.lastActivityAt,
-        cozeConversationId: session.cozeConversationId,
-        experimentRunId: session.experimentRunId,
-        agentId: session.agentId,
-      },
-      experiment: {
-        id: experiment.id,
-        label: experiment.label,
-        title: experiment.title,
-        assistantName: experiment.assistantName,
-        welcomeMessage: experiment.welcome,
-      },
-      storage: {
-        databaseMessagesEnabled: controls?.databaseMessagesEnabled ?? true,
-        browserBackupIncluded: true,
-      },
-      integrity: {
-        messageCount: transcript.length,
-        turnCount,
-        participantMessageCount: transcript.filter((message) => message.role === "user").length,
-        assistantMessageCount: transcript.filter((message) => message.role === "assistant").length,
-      },
-      messages: transcript.map((message, index) => ({
-        order: index + 1,
-        sequenceNo: message.sequenceNo,
-        turnIndex: message.turnIndex,
-        role: message.role,
-        content: message.content,
-        sentAt: message.sentAt,
-        replyStartedAt: message.replyStartedAt,
-        replyCompletedAt: message.replyCompletedAt,
-        latencyMs: message.latencyMs,
-        clientRequestId: message.clientRequestId,
-        cozeMessageId: message.cozeMessageId,
-        cozeChatId: message.cozeChatId,
-      })),
-    };
-    const safeParticipant = session.participantCode.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 50) || "participant";
+      session,
+      experiment,
+      databaseMessagesEnabled: controls?.databaseMessagesEnabled ?? true,
+      browserBackupIncluded: true,
+      messages: transcript,
+    });
+    const safeParticipant = safeExportSegment(session.participantCode, "participant");
     const stamp = exportedAt.replaceAll(":", "-").replace(".", "-");
     downloadFile(`EduLab_${safeParticipant}_${stamp}.json`, JSON.stringify(record, null, 2), "application/json;charset=utf-8");
   }

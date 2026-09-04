@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { ExperimentSettings } from "@/lib/experiment-settings";
 
 type Section = "participants" | "content" | "limits" | "storage" | "ai";
@@ -130,7 +130,7 @@ export function AdminWorkspace() {
 
       <section className="admin-main">
         <header className="admin-header"><div><p className="admin-kicker">{section === "participants" ? "研究数据" : "实验配置"}</p><h1>{sections.find((item) => item.id === section)?.label}</h1></div><div className="admin-header-actions">{section === "participants" ? <><span className="save-state">身份信息与对话记录分开保存</span><button className="admin-refresh" onClick={loadParticipants} disabled={participantsLoading}>{participantsLoading ? "读取中…" : "刷新"}</button></> : section === "ai" ? <span className="save-state">场次切换只影响之后进入的参与者</span> : <><span className={error ? "save-state error" : "save-state"}>{error || status || "设置只影响新创建的会话"}</span><button className="admin-save" onClick={save} disabled={saving}>{saving ? "保存中…" : "保存设置"}</button></>}</div></header>
-        <div className="admin-content">
+        <div className={`admin-content ${section === "ai" ? "wide" : ""}`}>
           {section === "participants" && <ParticipantDirectory participants={participants} loading={participantsLoading} error={participantsError} onDeleted={(participantId) => setParticipants((current) => current.filter((participant) => participant.id !== participantId))} />}
           {section === "content" && <ContentSettings settings={settings} update={updateExperiment} />}
           {section === "limits" && <LimitSettings settings={settings} updateExperiment={updateExperiment} updateLimits={updateLimits} />}
@@ -145,6 +145,27 @@ export function AdminWorkspace() {
 function formatDate(value: string | null) {
   if (!value) return "—";
   return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
+}
+
+function downloadResponse(response: Response, blob: Blob, fallbackFilename: string) {
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? fallbackFilename;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function SelectionCheckbox({ checked, indeterminate = false, label, disabled = false, onChange }: {
+  checked: boolean; indeterminate?: boolean; label: string; disabled?: boolean; onChange: () => void;
+}) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (ref.current) ref.current.indeterminate = indeterminate; }, [indeterminate]);
+  return <input ref={ref} className="directory-checkbox" type="checkbox" checked={checked} disabled={disabled} aria-label={label} onChange={onChange} />;
 }
 
 function DangerConfirmation({ title, description, expectedValue, expectedLabel, busy, error, onCancel, onConfirm }: {
@@ -170,6 +191,47 @@ function ParticipantDirectory({ participants, loading, error, onDeleted }: {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
   const [deleteStatus, setDeleteStatus] = useState("");
+  const [selectedParticipantIds, setSelectedParticipantIds] = useState<string[]>([]);
+  const [exporting, setExporting] = useState<"interactions_zip" | "identity_csv" | null>(null);
+  const [exportError, setExportError] = useState("");
+  const [exportStatus, setExportStatus] = useState("");
+  const availableParticipantIds = new Set(participants.map((participant) => participant.id));
+  const availableSelection = selectedParticipantIds.filter((id) => availableParticipantIds.has(id));
+  const selectedSet = new Set(availableSelection);
+  const allSelected = participants.length > 0 && participants.every((participant) => selectedSet.has(participant.id));
+
+  function toggleParticipant(participantId: string) {
+    setSelectedParticipantIds((current) => current.includes(participantId)
+      ? current.filter((id) => id !== participantId)
+      : [...current, participantId]);
+  }
+
+  function toggleAll() {
+    setSelectedParticipantIds(allSelected ? [] : participants.map((participant) => participant.id));
+  }
+
+  async function exportSelected(kind: "interactions_zip" | "identity_csv") {
+    if (availableSelection.length === 0 || exporting) return;
+    if (kind === "identity_csv" && !window.confirm(`身份对应表包含姓名或学号等敏感信息。确认导出已选择的 ${availableSelection.length} 位参与者身份信息吗？`)) return;
+    setExporting(kind); setExportError(""); setExportStatus("");
+    try {
+      const response = await fetch("/api/admin/exports", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind, participantIds: availableSelection }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => null);
+        throw new Error(data?.error?.message ?? "导出失败，请稍后重试。");
+      }
+      downloadResponse(response, await response.blob(), kind === "interactions_zip" ? "EduLab_interactions.zip" : "EduLab_identity_mapping.csv");
+      setExportStatus(kind === "interactions_zip"
+        ? `已导出 ${availableSelection.length} 位参与者的数据库交互记录。`
+        : `已导出 ${availableSelection.length} 位参与者的身份对应表。`);
+    } catch (exportFailure) {
+      setExportError(exportFailure instanceof Error ? exportFailure.message : "导出失败，请稍后重试。");
+    } finally { setExporting(null); }
+  }
 
   async function removeParticipant(confirmationCode: string) {
     if (!pendingDelete) return;
@@ -187,6 +249,7 @@ function ParticipantDirectory({ participants, loading, error, onDeleted }: {
         channel.close();
       }
       onDeleted(pendingDelete.id);
+      setSelectedParticipantIds((current) => current.filter((id) => id !== pendingDelete.id));
       setDeleteStatus(`参与者 ${pendingDelete.participantCode} 的数据库记录已永久删除。`);
       setPendingDelete(null);
     } catch (removeError) { setDeleteError(removeError instanceof Error ? removeError.message : "删除失败。"); }
@@ -195,9 +258,12 @@ function ParticipantDirectory({ participants, loading, error, onDeleted }: {
 
   return <div className="settings-stack">
     {deleteStatus && <p className="agent-success" role="status">{deleteStatus}</p>}
+    {exportStatus && <p className="agent-success" role="status">{exportStatus}</p>}
+    {exportError && <p className="directory-error" role="alert">{exportError}</p>}
     <section className="settings-card participant-directory">
       <div className="settings-card-head"><div><h2>参与者身份对应表</h2><p>姓名和学号经过加密后存储，并通过内部 Participant ID 与会话关联。聊天记录和学生导出的 JSON 不包含这些直接身份信息。</p></div><span className="secure-badge">仅管理员可见</span></div>
-      {error ? <p className="directory-error" role="alert">{error}</p> : loading && participants.length === 0 ? <p className="directory-empty">正在读取参与者信息…</p> : participants.length === 0 ? <p className="directory-empty">还没有参与者进入实验。</p> : <div className="directory-table-wrap"><table className="directory-table"><thead><tr><th>Participant ID</th><th>姓名</th><th>学号</th><th>对话</th><th>轮次</th><th>最后活动</th><th>操作</th></tr></thead><tbody>{participants.map((participant) => <tr key={participant.id}><td><code>{participant.participantCode}</code></td><td>{participant.fullName || <span className="missing-value">未填写</span>}</td><td>{participant.studentNumber || <span className="missing-value">未填写</span>}</td><td>{participant.sessionCount}</td><td>{participant.turnCount}</td><td>{formatDate(participant.lastActivityAt)}</td><td><button className="table-danger" onClick={() => { setDeleteError(""); setPendingDelete(participant); }}>删除记录</button></td></tr>)}</tbody></table></div>}
+      {participants.length > 0 && <div className="participant-export-toolbar"><div><strong>已选择 {availableSelection.length} 位</strong><span>交互记录只包含数据库中已经完成上传的内容</span></div><div><button className="participant-export-button" disabled={availableSelection.length === 0 || Boolean(exporting)} onClick={() => void exportSelected("interactions_zip")}>{exporting === "interactions_zip" ? "正在整理…" : "导出交互记录 (.zip)"}</button><button className="participant-identity-export" disabled={availableSelection.length === 0 || Boolean(exporting)} onClick={() => void exportSelected("identity_csv")}>{exporting === "identity_csv" ? "正在整理…" : "导出身份对应表 (.csv)"}</button></div></div>}
+      {error ? <p className="directory-error" role="alert">{error}</p> : loading && participants.length === 0 ? <p className="directory-empty">正在读取参与者信息…</p> : participants.length === 0 ? <p className="directory-empty">还没有参与者进入实验。</p> : <div className="directory-table-wrap"><table className="directory-table"><thead><tr><th className="directory-select-cell"><SelectionCheckbox checked={allSelected} indeterminate={availableSelection.length > 0 && !allSelected} label="全选当前列表中的参与者" disabled={Boolean(exporting)} onChange={toggleAll} /></th><th>Participant ID</th><th>姓名</th><th>学号</th><th>对话</th><th>轮次</th><th>最后活动</th><th>操作</th></tr></thead><tbody>{participants.map((participant) => <tr key={participant.id}><td className="directory-select-cell"><SelectionCheckbox checked={selectedSet.has(participant.id)} label={`选择参与者 ${participant.participantCode}`} disabled={Boolean(exporting)} onChange={() => toggleParticipant(participant.id)} /></td><td><code>{participant.participantCode}</code></td><td>{participant.fullName || <span className="missing-value">未填写</span>}</td><td>{participant.studentNumber || <span className="missing-value">未填写</span>}</td><td>{participant.sessionCount}</td><td>{participant.turnCount}</td><td>{formatDate(participant.lastActivityAt)}</td><td><button className="table-danger" disabled={Boolean(exporting)} onClick={() => { setDeleteError(""); setPendingDelete(participant); }}>删除记录</button></td></tr>)}</tbody></table></div>}
     </section>
     <div className="security-note"><strong>访谈联系时如何对应</strong><p>交互数据继续使用 Participant ID。研究者只在需要联系参与者时，通过此表将 Participant ID 对应到姓名或学号，避免直接身份信息进入 AI 对话和导出文件。</p></div>
     {pendingDelete && <DangerConfirmation title={`删除 ${pendingDelete.participantCode} 的全部数据库记录？`} description={`将永久删除该参与者的身份对应、${pendingDelete.sessionCount} 个会话、${pendingDelete.turnCount} 个轮次、消息和智能体分配。此操作无法撤销。对应实验页面在返回前台或再次操作时会退出旧会话并清除该参与者的浏览器本地记录。`} expectedValue={pendingDelete.participantCode} expectedLabel="Participant ID" busy={deleting} error={deleteError} onCancel={() => setPendingDelete(null)} onConfirm={(confirmation) => void removeParticipant(confirmation)} />}
@@ -236,6 +302,8 @@ function AgentRunSettings() {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [pendingAgentDelete, setPendingAgentDelete] = useState<AgentSummary | null>(null);
+  const [agentDeleteError, setAgentDeleteError] = useState("");
   const [runName, setRunName] = useState("");
   const [assignmentMode, setAssignmentMode] = useState<"fixed" | "balanced_random">("fixed");
   const [fixedAgentId, setFixedAgentId] = useState("");
@@ -265,7 +333,7 @@ function AgentRunSettings() {
   }
 
   async function removeAgent(agent: AgentSummary, confirmationName: string) {
-    setBusy(true); setError(""); setStatus("");
+    setBusy(true); setError(""); setStatus(""); setAgentDeleteError("");
     try {
       const response = await fetch("/api/admin/agent-control", {
         method: "DELETE", headers: { "Content-Type": "application/json" },
@@ -273,9 +341,12 @@ function AgentRunSettings() {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error?.message ?? "删除失败。");
-      setControl(data.control as AgentControl); setStatus(`智能体“${agent.internalName}”已永久删除。`);
+      setControl(data.control as AgentControl); setStatus(`智能体“${agent.internalName}”已永久删除。`); setPendingAgentDelete(null);
       return true;
-    } catch (removeError) { setError(removeError instanceof Error ? removeError.message : "删除失败。"); return false; }
+    } catch (removeError) {
+      const message = removeError instanceof Error ? removeError.message : "删除失败。";
+      setError(message); setAgentDeleteError(message); return false;
+    }
     finally { setBusy(false); }
   }
 
@@ -299,20 +370,28 @@ function AgentRunSettings() {
     </section>
 
     <section className="settings-card">
-      <div className="settings-card-head"><div><h2>Coze 智能体配置</h2><p>内部名称只在后台和研究数据中使用；学生端统一显示为学习助理。Token 加密保存且不会回显。</p></div><button className="admin-refresh" onClick={() => setAdding(true)} disabled={busy}>新增智能体</button></div>
-      <div className="agent-config-list">{control.agents.map((agent) => <AgentEditor key={`${agent.id}-${agent.updatedAt}`} agent={agent} locked={activeAgentIds.has(agent.id)} busy={busy} onDelete={(confirmationName) => removeAgent(agent, confirmationName)} onSave={(value) => post({ action: "save_agent", agent: value }, `智能体“${value.internalName}”已保存。`)} />)}{adding && <AgentEditor agent={null} locked={false} busy={busy} onCancel={() => setAdding(false)} onSave={(value) => post({ action: "save_agent", agent: value }, `智能体“${value.internalName}”已添加。`)} />}</div>
+      <div className="settings-card-head"><div><h2>Coze 智能体配置</h2><p>每个智能体占一行，可直接修改连接信息。学生端显示名称在“交互规则”中统一设置；Token 加密保存且不会回显。</p></div><button className="admin-refresh" onClick={() => setAdding(true)} disabled={busy || adding}>新增智能体</button></div>
+      <div className="agent-table-wrap"><table className="agent-table"><thead><tr><th>内部名称</th><th>API 地址</th><th>Bot ID</th><th>API Token</th><th>启用</th><th>状态</th><th>操作</th></tr></thead><tbody>{control.agents.map((agent) => <AgentTableRow key={`${agent.id}-${agent.updatedAt}`} agent={agent} locked={activeAgentIds.has(agent.id)} busy={busy} onDelete={() => { setAgentDeleteError(""); setPendingAgentDelete(agent); }} onSave={(value) => post({ action: "save_agent", agent: value }, `智能体“${value.internalName}”已保存。`)} />)}{adding && <AgentTableRow key="new-agent" agent={null} locked={false} busy={busy} onCancel={() => setAdding(false)} onSave={(value) => post({ action: "save_agent", agent: value }, `智能体“${value.internalName}”已添加。`)} />}</tbody></table></div>
     </section>
     <div className="security-note"><strong>聊天期间不读取数据库配置</strong><p>学生进入场次时，服务端会把已选智能体和限制生成加密、HttpOnly 的运行配置。之后发送消息直接调用 Coze；对话正文保存在浏览器，并在结束、切换参与者或关闭页面时上传数据库备份。</p></div>
+    {pendingAgentDelete && <DangerConfirmation title={`删除智能体“${pendingAgentDelete.internalName}”？`} description="将永久删除该智能体的 API 地址、Bot ID 和加密 Token。只有从未被场次或历史会话引用的智能体才能删除，此操作无法撤销。" expectedValue={pendingAgentDelete.internalName} expectedLabel="智能体名称" busy={busy} error={agentDeleteError} onCancel={() => setPendingAgentDelete(null)} onConfirm={(confirmation) => void removeAgent(pendingAgentDelete, confirmation)} />}
   </div>;
 }
 
-function AgentEditor({ agent, locked, busy, onSave, onDelete, onCancel }: { agent: AgentSummary | null; locked: boolean; busy: boolean; onSave: (value: { id?: string; internalName: string; baseUrl: string; botId: string; token?: string; enabled: boolean }) => void; onDelete?: (confirmationName: string) => Promise<boolean>; onCancel?: () => void }) {
+function AgentTableRow({ agent, locked, busy, onSave, onDelete, onCancel }: { agent: AgentSummary | null; locked: boolean; busy: boolean; onSave: (value: { id?: string; internalName: string; baseUrl: string; botId: string; token?: string; enabled: boolean }) => void; onDelete?: () => void; onCancel?: () => void }) {
   const [internalName, setInternalName] = useState(agent?.internalName ?? "");
   const [baseUrl, setBaseUrl] = useState(agent?.baseUrl ?? "https://api.coze.cn");
   const [botId, setBotId] = useState(agent?.botId ?? "");
   const [token, setToken] = useState("");
   const [enabled, setEnabled] = useState(agent?.enabled ?? true);
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [deleteError, setDeleteError] = useState("");
-  return <div className={`agent-config-card ${locked ? "locked" : ""}`}><div className="agent-config-title"><strong>{agent?.internalName || "新智能体"}</strong><span>{locked ? "当前场次已锁定" : agent?.hasReferences ? "已有历史关联，只能停用" : agent?.hasToken ? "Token 已配置" : "需要 Token"}</span></div><div className="form-grid"><label><span>内部名称</span><input value={internalName} onChange={(event) => setInternalName(event.target.value)} disabled={locked} placeholder="例如：智能体 B" /></label><label><span>API 地址</span><input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} disabled={locked} /></label><label className="wide"><span>Bot ID</span><input value={botId} onChange={(event) => setBotId(event.target.value)} disabled={locked} placeholder="Coze Bot ID" /></label><label className="wide"><span>API Token</span><input type="password" value={token} onChange={(event) => setToken(event.target.value)} disabled={locked} autoComplete="new-password" placeholder={agent?.hasToken ? "留空则保持现有 Token" : "输入 Coze API Token"} /></label><label className="agent-enabled"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} disabled={locked} /><span>允许用于新场次</span></label></div><div className="agent-editor-actions">{agent && onDelete && <button className="admin-danger-secondary" disabled={busy || locked || agent.hasReferences} title={agent.hasReferences ? "已有场次或历史会话引用，不能删除；可以取消启用后保存" : undefined} onClick={() => { setDeleteError(""); setDeleteOpen(true); }}>删除智能体</button>}{onCancel && <button className="admin-refresh" onClick={onCancel}>取消</button>}<button className="admin-save" disabled={busy || locked || !internalName.trim() || !botId.trim() || (!agent?.hasToken && !token.trim())} onClick={() => onSave({ ...(agent ? { id: agent.id } : {}), internalName, baseUrl, botId, ...(token.trim() ? { token } : {}), enabled })}>保存智能体</button></div>{deleteOpen && agent && onDelete && <DangerConfirmation title={`删除智能体“${agent.internalName}”？`} description="将永久删除该智能体的 API 地址、Bot ID 和加密 Token。只有从未被场次或历史会话引用的智能体才能删除，此操作无法撤销。" expectedValue={agent.internalName} expectedLabel="智能体名称" busy={busy} error={deleteError} onCancel={() => setDeleteOpen(false)} onConfirm={(confirmation) => { void onDelete(confirmation).then((deleted) => { if (deleted) setDeleteOpen(false); else setDeleteError("删除未完成，请查看页面上方的原因。"); }); }} />}</div>;
+  const state = locked ? "当前场次" : agent?.hasReferences ? "已有历史" : agent?.hasToken ? "已配置" : agent ? "缺少 Token" : "待添加";
+  return <tr className={locked ? "agent-row-locked" : undefined}>
+    <td><input className="agent-table-input agent-name-input" aria-label={`${agent?.internalName ?? "新智能体"}内部名称`} value={internalName} onChange={(event) => setInternalName(event.target.value)} disabled={locked} placeholder="例如：智能体 B" /></td>
+    <td><input className="agent-table-input agent-api-input" aria-label={`${agent?.internalName ?? "新智能体"} API 地址`} value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} disabled={locked} /></td>
+    <td><input className="agent-table-input agent-bot-input" aria-label={`${agent?.internalName ?? "新智能体"} Bot ID`} value={botId} onChange={(event) => setBotId(event.target.value)} disabled={locked} placeholder="Coze Bot ID" /></td>
+    <td><input className="agent-table-input agent-token-input" aria-label={`${agent?.internalName ?? "新智能体"} API Token`} type="password" value={token} onChange={(event) => setToken(event.target.value)} disabled={locked} autoComplete="new-password" placeholder={agent?.hasToken ? "留空保留原 Token" : "输入 Token"} /></td>
+    <td className="agent-enabled-cell"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} disabled={locked} aria-label={`${internalName || "新智能体"}允许用于新场次`} /></td>
+    <td><span className={`agent-row-status ${locked ? "locked" : agent && !agent.hasToken ? "warning" : ""}`} title={agent?.hasReferences ? "已有场次或历史会话引用，不能永久删除；可以取消启用后保存" : undefined}>{state}</span></td>
+    <td><div className="agent-row-actions">{agent && onDelete && <button className="agent-row-delete" disabled={busy || locked || agent.hasReferences} title={agent.hasReferences ? "已有场次或历史会话引用，不能删除；可以取消启用后保存" : undefined} onClick={onDelete}>删除</button>}{onCancel && <button className="agent-row-cancel" onClick={onCancel} disabled={busy}>取消</button>}<button className="agent-row-save" disabled={busy || locked || !internalName.trim() || !botId.trim() || (!agent?.hasToken && !token.trim())} onClick={() => onSave({ ...(agent ? { id: agent.id } : {}), internalName, baseUrl, botId, ...(token.trim() ? { token } : {}), enabled })}>保存</button></div></td>
+  </tr>;
 }

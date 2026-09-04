@@ -237,3 +237,46 @@ test("assistant display name is editable even when optional task content is hidd
   assert.match(adminWorkspace.slice(limitsStart, storageStart), /assistantName/);
   assert.match(adminWorkspace.slice(limitsStart, storageStart), /welcome/);
 });
+
+test("admin can batch export selected interactions separately from identity data", async () => {
+  const route = await readFile("app/api/admin/exports/route.ts", "utf8");
+  const exportSource = await readFile("lib/admin-export.ts", "utf8");
+  const sharedFormat = await readFile("lib/transcript-export.ts", "utf8");
+  const studentWorkspace = await readFile("app/workspace.tsx", "utf8");
+  const adminWorkspace = await readFile("app/admin/workspace.tsx", "utf8");
+  assert.match(route, /assertSameOrigin\(request\)/);
+  assert.match(route, /getAuthenticatedAdmin/);
+  assert.match(route, /interactions_zip/);
+  assert.match(route, /identity_csv/);
+  assert.match(route, /application\/zip/);
+  assert.match(route, /private, no-store/);
+  assert.match(exportSource, /manifest\.json/);
+  assert.match(exportSource, /possibly_incomplete/);
+  assert.match(exportSource, /participant\.identity\.export/);
+  assert.match(exportSource, /experiment\.records\.export/);
+  assert.match(exportSource, /role, content, sent_at/);
+  assert.match(exportSource, /turn_index/);
+  assert.match(sharedFormat, /participantMessageCount/);
+  assert.match(sharedFormat, /assistantMessageCount/);
+  assert.match(studentWorkspace, /buildTranscriptExport/);
+  assert.match(exportSource, /buildTranscriptExport/);
+  assert.match(adminWorkspace, /全选当前列表中的参与者/);
+  assert.match(adminWorkspace, /导出交互记录 \(\.zip\)/);
+  assert.match(adminWorkspace, /身份对应表包含姓名或学号等敏感信息/);
+});
+
+test("admin agent configuration uses a compact editable table", async () => {
+  const adminWorkspace = await readFile("app/admin/workspace.tsx", "utf8");
+  const adminStyles = await readFile("app/admin/admin.css", "utf8");
+  assert.match(adminWorkspace, /className="agent-table"/);
+  assert.match(adminWorkspace, /section === "ai" \? "wide"/);
+  assert.match(adminWorkspace, /<th>API 地址<\/th>/);
+  assert.match(adminWorkspace, /<th>Bot ID<\/th>/);
+  assert.match(adminWorkspace, /<th>API Token<\/th>/);
+  assert.match(adminWorkspace, /function AgentTableRow/);
+  assert.match(adminWorkspace, /agent-row-save/);
+  assert.match(adminWorkspace, /agent-row-delete/);
+  assert.doesNotMatch(adminWorkspace, /agent-config-card/);
+  assert.match(adminStyles, /\.agent-table-wrap \{[^}]*max-height: 460px;[^}]*overflow: auto;/);
+  assert.match(adminStyles, /\.agent-table th \{[^}]*position: sticky;/);
+});
