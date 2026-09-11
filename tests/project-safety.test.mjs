@@ -27,6 +27,18 @@ test("access code protects student pages and APIs without exposing the secret", 
   assert.doesNotMatch(formSource, /NEXT_PUBLIC/);
 });
 
+test("student experiment requests fullscreen from a user gesture and restores it after exit", async () => {
+  const controller = await readFile("app/fullscreen-controller.tsx", "utf8");
+  const accessForm = await readFile("app/access/access-code-form.tsx", "utf8");
+  const workspace = await readFile("app/workspace.tsx", "utf8");
+  assert.match(controller, /document\.documentElement\.requestFullscreen/);
+  assert.match(controller, /navigationUI: "hide"/);
+  assert.match(controller, /fullscreenchange/);
+  assert.match(controller, /进入全屏实验/);
+  assert.match(accessForm, /requestExperimentFullscreen\(\)/);
+  assert.match(workspace, /<FullscreenController \/>/);
+});
+
 test("database preserves message ordering and request idempotency", async () => {
   const migration = await readFile("db/migrations/0001_initial.sql", "utf8");
   assert.match(migration, /UNIQUE \(session_id, sequence_no\)/);

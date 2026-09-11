@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import { requestExperimentFullscreen } from "../fullscreen-controller";
 
 export function AccessCodeForm({ configured, nextPath }: { configured: boolean; nextPath: string }) {
   const [accessCode, setAccessCode] = useState("");
@@ -13,6 +14,9 @@ export function AccessCodeForm({ configured, nextPath }: { configured: boolean; 
     setSubmitting(true);
     setError("");
     try {
+      // Fullscreen must be requested while the submit click still counts as a user gesture.
+      // The experiment workspace will offer a fallback if navigation exits fullscreen.
+      await requestExperimentFullscreen();
       const response = await fetch("/api/access/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

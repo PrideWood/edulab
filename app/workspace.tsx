@@ -7,6 +7,7 @@ import type { StoredMessage } from "@/db/schema";
 import type { ExperimentConfig } from "@/config/experiment";
 import type { ParticipantProfile, SessionPayload } from "@/lib/client-types";
 import { buildTranscriptExport, safeExportSegment } from "@/lib/transcript-export";
+import { FullscreenController } from "./fullscreen-controller";
 
 const OUTBOX_PREFIX = "edulab_pending_message:";
 const TRANSCRIPT_PREFIX = "edulab_transcript:";
@@ -677,6 +678,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
 
   return (
     <main className="app-shell">
+      <FullscreenController />
       <section className={`workspace conversation-workspace ${sidebarCollapsed ? "sidebar-collapsed" : ""}`} aria-label="AI 对话工作区">
         <aside className="conversation-sidebar" aria-label="对话列表">
           <div className="conversation-sidebar-head">
