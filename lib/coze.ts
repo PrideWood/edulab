@@ -149,6 +149,8 @@ export async function runCozeChatWithoutDatabase(input: {
   turnIndex: number;
   userSequence: number;
   timeoutMs?: number;
+  signal?: AbortSignal;
+  autoSaveHistory?: boolean;
 }) {
   const client = new CozeAPI({
     token: input.token,
@@ -156,25 +158,26 @@ export async function runCozeChatWithoutDatabase(input: {
     axiosOptions: { timeout: 15_000 },
   });
   const requestedAt = new Date();
+  const requestOptions = input.signal ? { signal: input.signal } : undefined;
   const chat = await client.chat.create({
     bot_id: input.botId,
     user_id: input.cozeUserId,
     conversation_id: input.cozeConversationId ?? undefined,
-    auto_save_history: true,
+    auto_save_history: input.autoSaveHistory ?? true,
     additional_messages: [{ role: RoleType.User, type: "question", content: input.content, content_type: "text" }],
     meta_data: { edulab_session: input.sessionPublicId, edulab_request: input.clientRequestId },
-  });
+  }, requestOptions);
   const deadline = Date.now() + (input.timeoutMs ?? 45_000);
   let current = chat;
   while (!TERMINAL.has(current.status) && Date.now() < deadline) {
     await delay(400);
-    current = await client.chat.retrieve(chat.conversation_id, chat.id);
+    current = await client.chat.retrieve(chat.conversation_id, chat.id, requestOptions);
   }
   if (!TERMINAL.has(current.status)) {
     return { pending: true as const, chat: current, messages: [] as StoredMessage[] };
   }
   if (current.status !== ChatStatus.COMPLETED) throw chatFailure(current);
-  const cozeMessages = await client.chat.messages.list(current.conversation_id, current.id);
+  const cozeMessages = await client.chat.messages.list(current.conversation_id, current.id, requestOptions);
   if (!Array.isArray(cozeMessages)) {
     throw new CozeChatError("INVALID_MESSAGE_RESPONSE", "Coze returned no message list for the completed chat");
   }
@@ -189,6 +192,46 @@ export async function runCozeChatWithoutDatabase(input: {
     metadata: { user_sequence: input.userSequence, user_content: input.content },
   }, cozeMessages, input.userSequence + 1, completedAt, input.content);
   return { pending: false as const, chat: current, messages };
+}
+
+export async function testCozeConnection(input: {
+  token: string;
+  baseUrl: string;
+  botId: string;
+  timeoutMs?: number;
+}) {
+  const timeoutMs = input.timeoutMs ?? 20_000;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const testId = randomUUID();
+  try {
+    const result = await runCozeChatWithoutDatabase({
+      token: input.token,
+      baseUrl: input.baseUrl,
+      botId: input.botId,
+      cozeUserId: "edulab_admin_test",
+      cozeConversationId: null,
+      sessionPublicId: `admin-test-${testId}`,
+      clientRequestId: testId,
+      content: "Reply with OK.",
+      turnIndex: 1,
+      userSequence: 1,
+      timeoutMs,
+      signal: controller.signal,
+      autoSaveHistory: true,
+    });
+    if (result.pending) {
+      controller.abort();
+      throw Object.assign(new Error("Coze connectivity test timed out"), { code: "COZE_TEST_TIMEOUT" });
+    }
+  } catch (error) {
+    if (controller.signal.aborted && (error as { code?: string }).code !== "COZE_TEST_TIMEOUT") {
+      throw Object.assign(new Error("Coze connectivity test timed out"), { code: "COZE_TEST_TIMEOUT" });
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function recoverCozeChatWithoutDatabase(input: {

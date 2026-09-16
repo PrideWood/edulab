@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { formatAgentTestFailure } from "../lib/agent-test-error.js";
+import { formatParticipantCode, isTestParticipantName } from "../lib/participant-code.js";
 
 test("secrets are documented as environment variables and ignored by git", async () => {
   const envExample = await readFile(".env.example", "utf8");
@@ -36,7 +38,18 @@ test("student experiment requests fullscreen from a user gesture and restores it
   assert.match(controller, /fullscreenchange/);
   assert.match(controller, /进入全屏实验/);
   assert.match(accessForm, /requestExperimentFullscreen\(\)/);
-  assert.match(workspace, /<FullscreenController \/>/);
+  assert.match(workspace, /<FullscreenController fullscreenState=\{fullscreenState\}/);
+});
+
+test("student composer focuses only when it first becomes available or a sent turn settles", async () => {
+  const workspace = await readFile("app/workspace.tsx", "utf8");
+  assert.match(workspace, /composerInputRef = useRef<HTMLTextAreaElement>/);
+  assert.match(workspace, /input\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(workspace, /window\.requestAnimationFrame/);
+  assert.match(workspace, /restoreComposerFocusRef\.current = true/);
+  assert.match(workspace, /hasAutoFocusedComposerRef\.current && !restoreComposerFocusRef\.current/);
+  assert.match(workspace, /composerFormRef\.current\?\.contains/);
+  assert.match(workspace, /ref=\{composerInputRef\}/);
 });
 
 test("database preserves message ordering and request idempotency", async () => {
@@ -217,12 +230,14 @@ test("participant identity is separately encrypted and required before chat", as
 
 test("shared experiment entry creates a sequential participant only after identity submission", async () => {
   const migration = await readFile("db/migrations/0007_sequential_participant_codes.sql", "utf8");
+  const testCodeMigration = await readFile("db/migrations/0009_test_participant_codes.sql", "utf8");
   const sessionRoute = await readFile("app/api/sessions/route.ts", "utf8");
   const workspace = await readFile("app/workspace.tsx", "utf8");
   assert.match(sessionRoute, /participantCode: z\.string\(\).*\.optional\(\)/);
   assert.match(migration, /participant_code_counters/);
   assert.match(sessionRoute, /formatParticipantCode/);
-  assert.match(sessionRoute, /padStart\(3, "0"\)/);
+  assert.match(testCodeMigration, /test_last_value bigint NOT NULL DEFAULT 0/);
+  assert.match(testCodeMigration, /GREATEST\(participant_code_counters\.test_last_value, EXCLUDED\.test_last_value\)/);
   assert.match(sessionRoute, /saveParticipantProfileWithClient/);
   assert.match(sessionRoute, /requestedParticipantCode && !verifyParticipantAccess/);
   assert.match(workspace, /response\.status === 401/);
@@ -230,6 +245,25 @@ test("shared experiment entry creates a sequential participant only after identi
   assert.match(workspace, /profile: \{ fullName: profileFullName, studentNumber: profileStudentNumber \}/);
   assert.doesNotMatch(workspace, /body: JSON\.stringify\(\{\}\)/);
   assert.doesNotMatch(workspace, /请使用研究者提供的完整实验链接进入/);
+});
+
+test("test participant names use an independent atomic T-number sequence", async () => {
+  const initialMigration = await readFile("db/migrations/0001_initial.sql", "utf8");
+  const sessionRoute = await readFile("app/api/sessions/route.ts", "utf8");
+  assert.equal(isTestParticipantName("测试"), true);
+  assert.equal(isTestParticipantName(" test "), true);
+  assert.equal(isTestParticipantName("TEST"), true);
+  assert.equal(isTestParticipantName("Ceshi"), true);
+  assert.equal(isTestParticipantName("Test Zhang"), false);
+  assert.equal(isTestParticipantName("测试人员"), false);
+  assert.equal(isTestParticipantName("张三"), false);
+  assert.equal(formatParticipantCode("T", 1), "T001");
+  assert.equal(formatParticipantCode("T", 2), "T002");
+  assert.equal(formatParticipantCode("P", 1), "P001");
+  assert.match(sessionRoute, /test_last_value = participant_code_counters\.test_last_value \+ 1/);
+  assert.match(sessionRoute, /last_value = participant_code_counters\.last_value \+ 1/);
+  assert.match(sessionRoute, /ON CONFLICT \(experiment_id, external_code\) DO NOTHING/);
+  assert.match(initialMigration, /UNIQUE \(experiment_id, external_code\)/);
 });
 
 test("welcome copy is presentation-only and never becomes a recorded message", async () => {
@@ -291,4 +325,38 @@ test("admin agent configuration uses a compact editable table", async () => {
   assert.doesNotMatch(adminWorkspace, /agent-config-card/);
   assert.match(adminStyles, /\.agent-table-wrap \{[^}]*max-height: 460px;[^}]*overflow: auto;/);
   assert.match(adminStyles, /\.agent-table th \{[^}]*position: sticky;/);
+});
+
+test("admin can test each agent draft through the real Coze path without experiment writes", async () => {
+  const adminWorkspace = await readFile("app/admin/workspace.tsx", "utf8");
+  const agentRoute = await readFile("app/api/admin/agent-control/route.ts", "utf8");
+  const cozeSource = await readFile("lib/coze.ts", "utf8");
+  assert.match(adminWorkspace, /测试连通/);
+  assert.match(adminWorkspace, /测试中…/);
+  assert.match(adminWorkspace, /testingRef\.current/);
+  assert.match(adminWorkspace, /action: "test_agent"/);
+  assert.match(adminWorkspace, /\.\.\.\(token\.trim\(\) \? \{ token \} : \{\}\)/);
+  assert.match(agentRoute, /resolveAgentTestConnection/);
+  assert.match(agentRoute, /testCozeConnection/);
+  assert.match(agentRoute, /timeoutMs: 20_000/);
+  assert.doesNotMatch(agentRoute, /INSERT INTO (?:participants|experiment_sessions|chat_requests|messages)/);
+  assert.match(cozeSource, /runCozeChatWithoutDatabase/);
+  assert.match(cozeSource, /content: "Reply with OK\."/);
+  assert.match(cozeSource, /autoSaveHistory: true/);
+  assert.match(cozeSource, /controller\.abort\(\)/);
+});
+
+test("agent connection failures are specific and redact API keys", () => {
+  const secret = "pat_super_secret_value";
+  assert.equal(formatAgentTestFailure({ status: 401, message: secret }, { secret }), "API Key 无效或已过期（401 Unauthorized）。");
+  assert.match(formatAgentTestFailure({ status: 403 }), /权限不足.*403 Forbidden/);
+  assert.match(formatAgentTestFailure({ status: 404, message: "unknown bot" }), /Bot ID.*404 Not Found.*unknown bot/);
+  assert.match(formatAgentTestFailure({ status: 429 }), /额度受限.*429 Too Many Requests/);
+  assert.match(formatAgentTestFailure({ status: 500, message: "upstream unavailable" }), /服务端错误.*upstream unavailable/);
+  assert.match(formatAgentTestFailure({ name: "APIConnectionError", message: "Connection error" }), /网络连接失败/);
+  assert.match(formatAgentTestFailure({ status: 500, message: "connect ECONNREFUSED 127.0.0.1:1" }), /网络连接失败/);
+  assert.match(formatAgentTestFailure({ code: "COZE_TEST_TIMEOUT" }), /连接超时/);
+  const redacted = formatAgentTestFailure({ message: `provider echoed ${secret}` }, { secret });
+  assert.doesNotMatch(redacted, new RegExp(secret));
+  assert.match(redacted, /已隐藏/);
 });

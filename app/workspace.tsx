@@ -1,13 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { StoredMessage } from "@/db/schema";
 import type { ExperimentConfig } from "@/config/experiment";
 import type { ParticipantProfile, SessionPayload } from "@/lib/client-types";
 import { buildTranscriptExport, safeExportSegment } from "@/lib/transcript-export";
-import { FullscreenController } from "./fullscreen-controller";
+import { FullscreenController, useFullscreenState } from "./fullscreen-controller";
 
 const OUTBOX_PREFIX = "edulab_pending_message:";
 const TRANSCRIPT_PREFIX = "edulab_transcript:";
@@ -174,11 +174,16 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   const [participantSwitching, setParticipantSwitching] = useState(false);
   const [profileError, setProfileError] = useState("");
   const [finalizationRetry, setFinalizationRetry] = useState(0);
+  const fullscreenState = useFullscreenState();
   const messagesViewRef = useRef<HTMLDivElement>(null);
+  const composerFormRef = useRef<HTMLFormElement>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
   const messageLedgerRef = useRef<StoredMessage[]>([]);
   const activeSessionRef = useRef<SessionPayload["session"] | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const automaticCompletionRef = useRef<string | null>(null);
+  const hasAutoFocusedComposerRef = useRef(false);
+  const restoreComposerFocusRef = useRef(false);
 
   const clearInvalidatedSession = useCallback((notice: string) => {
     const previousSession = activeSessionRef.current;
@@ -202,6 +207,8 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     setProfileError(notice);
     setProfileOpen(true);
     setLoading(false);
+    hasAutoFocusedComposerRef.current = false;
+    restoreComposerFocusRef.current = false;
     window.history.replaceState({}, "", window.location.pathname);
   }, []);
 
@@ -282,6 +289,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   }, [applyPayload, releaseInvalidatedSession]);
 
   const sendWithId = useCallback(async (content: string, clientRequestId: string) => {
+    restoreComposerFocusRef.current = true;
     setError(null);
     setRetryContent(null);
     setPending(true);
@@ -437,10 +445,40 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   const timeExpired = remainingSeconds === 0;
   const messageLimitReached = controls?.remainingMessages === 0;
   const canChat = Boolean(participantProfile && session?.status === "active" && controls?.chatEnabled && !timeExpired && !messageLimitReached);
+  const fullscreenReady = fullscreenState === "fullscreen" || fullscreenState === "unsupported";
+  const composerAvailable = Boolean(canChat && !loading && !pending && !profileOpen && fullscreenReady);
   const limitText = [
     controls?.remainingMessages === null || controls?.remainingMessages === undefined ? null : `剩余 ${controls.remainingMessages} 次`,
     remainingSeconds === null ? null : `剩余 ${Math.floor(remainingSeconds / 60)}:${String(remainingSeconds % 60).padStart(2, "0")}`,
   ].filter(Boolean).join(" · ");
+
+  const focusComposer = useCallback(() => {
+    return window.requestAnimationFrame(() => {
+      const input = composerInputRef.current;
+      if (!input || input.disabled) return;
+      input.focus({ preventScroll: true });
+      hasAutoFocusedComposerRef.current = true;
+      restoreComposerFocusRef.current = false;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!composerAvailable) return;
+    if (hasAutoFocusedComposerRef.current && !restoreComposerFocusRef.current) return;
+    const frame = focusComposer();
+    return () => window.cancelAnimationFrame(frame);
+  }, [composerAvailable, focusComposer]);
+
+  function handleWorkspacePointerDown(event: ReactPointerEvent<HTMLElement>) {
+    if (!pending || !restoreComposerFocusRef.current) return;
+    if (composerFormRef.current?.contains(event.target as Node)) return;
+    restoreComposerFocusRef.current = false;
+  }
+
+  function handleFullscreenEntered() {
+    restoreComposerFocusRef.current = true;
+    if (!profileOpen && !loading && !pending && canChat) focusComposer();
+  }
 
   useEffect(() => {
     function warnBeforeLeaving(event: BeforeUnloadEvent) {
@@ -664,6 +702,8 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
       setError(null);
       setTaskOpen(false);
       setProfileOpen(true);
+      hasAutoFocusedComposerRef.current = false;
+      restoreComposerFocusRef.current = false;
       window.history.replaceState({}, "", window.location.pathname);
     } catch (switchError) {
       if (isInvalidSessionError(switchError)) {
@@ -677,8 +717,8 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   }
 
   return (
-    <main className="app-shell">
-      <FullscreenController />
+    <main className="app-shell" onPointerDownCapture={handleWorkspacePointerDown}>
+      <FullscreenController fullscreenState={fullscreenState} onEntered={handleFullscreenEntered} />
       <section className={`workspace conversation-workspace ${sidebarCollapsed ? "sidebar-collapsed" : ""}`} aria-label="AI 对话工作区">
         <aside className="conversation-sidebar" aria-label="对话列表">
           <div className="conversation-sidebar-head">
@@ -709,8 +749,8 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
             {session?.status === "completed" && <div className="completed-card">这个对话已经结束。你可以在左侧查看其他对话。</div>}
           </div>
           <div className="composer-wrap">
-            <form className="composer" onSubmit={submit}>
-              <textarea aria-label="输入消息" placeholder={!participantProfile && session ? "请先填写参与者信息" : !canChat && !loading ? "本次交流已结束" : "输入你的问题或想法…"} rows={1} value={text} maxLength={controls?.maxMessageChars} onChange={(event) => setText(event.target.value)} onKeyDown={onComposerKeyDown} disabled={loading || pending || !canChat} />
+            <form className="composer" onSubmit={submit} ref={composerFormRef}>
+              <textarea ref={composerInputRef} aria-label="输入消息" placeholder={!participantProfile && session ? "请先填写参与者信息" : !canChat && !loading ? "本次交流已结束" : "输入你的问题或想法…"} rows={1} value={text} maxLength={controls?.maxMessageChars} onChange={(event) => setText(event.target.value)} onKeyDown={onComposerKeyDown} disabled={loading || pending || !canChat} />
               <button className="send-button" type="submit" disabled={!text.trim() || loading || pending || !canChat} aria-label="发送消息">↑</button>
             </form>
             <p className="composer-help"><span>按 Enter 发送 · Shift + Enter 换行</span>{controls && <span>{Array.from(text).length} / {controls.maxMessageChars} 字</span>}</p>

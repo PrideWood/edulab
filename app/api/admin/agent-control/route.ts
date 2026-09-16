@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { experiment } from "@/config/experiment";
-import { activateExperimentRun, closeActiveExperimentRun, deleteAgentConfig, getAgentControl, saveAgentConfig } from "@/lib/agent-control";
+import { activateExperimentRun, closeActiveExperimentRun, deleteAgentConfig, getAgentControl, resolveAgentTestConnection, saveAgentConfig } from "@/lib/agent-control";
 import { assertSameOrigin, getAuthenticatedAdmin } from "@/lib/admin-auth";
+import { formatAgentTestFailure } from "@/lib/agent-test-error";
+import { testCozeConnection } from "@/lib/coze";
 import { ApiError, errorResponse } from "@/lib/http";
 
 const httpsUrl = z.url().refine((value) => {
@@ -20,6 +22,15 @@ const inputSchema = z.discriminatedUnion("action", [
       botId: z.string().trim().min(1).max(200),
       token: z.string().trim().max(2000).optional(),
       enabled: z.boolean(),
+    }),
+  }),
+  z.object({
+    action: z.literal("test_agent"),
+    agent: z.object({
+      id: z.uuid().optional(),
+      baseUrl: httpsUrl,
+      botId: z.string().trim().min(1).max(200),
+      token: z.string().trim().max(2000).optional(),
     }),
   }),
   z.object({
@@ -64,7 +75,15 @@ export async function POST(request: Request) {
     if (!admin) throw new ApiError(401, "ADMIN_REQUIRED", "请先登录管理后台。");
     const input = inputSchema.safeParse(await request.json());
     if (!input.success) throw new ApiError(400, "INVALID_AGENT_CONTROL", input.error.issues[0]?.message ?? "智能体或场次设置无效。");
-    if (input.data.action === "save_agent") {
+    if (input.data.action === "test_agent") {
+      const connection = await resolveAgentTestConnection({ ...input.data.agent, experimentId: experiment.id });
+      try {
+        await testCozeConnection({ ...connection, timeoutMs: 20_000 });
+      } catch (error) {
+        throw new ApiError(502, "AGENT_CONNECTION_FAILED", formatAgentTestFailure(error, { secret: connection.token }));
+      }
+      return NextResponse.json({ test: { ok: true, message: "连接成功" } });
+    } else if (input.data.action === "save_agent") {
       await saveAgentConfig({ ...input.data.agent, experimentId: experiment.id }, admin.id);
     } else if (input.data.action === "activate_run") {
       await activateExperimentRun({ ...input.data.run, experimentId: experiment.id }, admin.id);
@@ -72,7 +91,13 @@ export async function POST(request: Request) {
       await closeActiveExperimentRun(experiment.id, admin.id);
     }
     return NextResponse.json({ control: await getAgentControl(experiment.id) });
-  } catch (error) { return errorResponse(controlError(error)); }
+  } catch (error) {
+    const controlled = controlError(error);
+    if (controlled instanceof Error && controlled.message === "COZE_TOKEN_NOT_CONFIGURED") {
+      return errorResponse(new ApiError(400, "COZE_TOKEN_NOT_CONFIGURED", "尚未配置 API Key，请输入 Token 后再测试。"));
+    }
+    return errorResponse(controlled);
+  }
 }
 
 export async function DELETE(request: Request) {

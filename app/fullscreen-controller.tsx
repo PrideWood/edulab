@@ -2,7 +2,7 @@
 
 import { useState, useSyncExternalStore } from "react";
 
-type FullscreenState = "unsupported" | "windowed" | "fullscreen";
+export type FullscreenState = "checking" | "unsupported" | "windowed" | "fullscreen";
 
 function subscribeToFullscreen(callback: () => void) {
   document.addEventListener("fullscreenchange", callback);
@@ -15,7 +15,11 @@ function getFullscreenState(): FullscreenState {
 }
 
 function getServerFullscreenState(): FullscreenState {
-  return "unsupported";
+  return "checking";
+}
+
+export function useFullscreenState() {
+  return useSyncExternalStore(subscribeToFullscreen, getFullscreenState, getServerFullscreenState);
 }
 
 export async function requestExperimentFullscreen() {
@@ -30,8 +34,13 @@ export async function requestExperimentFullscreen() {
   }
 }
 
-export function FullscreenController() {
-  const fullscreenState = useSyncExternalStore(subscribeToFullscreen, getFullscreenState, getServerFullscreenState);
+export function FullscreenController({
+  fullscreenState,
+  onEntered,
+}: {
+  fullscreenState: FullscreenState;
+  onEntered?: () => void;
+}) {
   const [requesting, setRequesting] = useState(false);
   const [requestFailed, setRequestFailed] = useState(false);
 
@@ -41,6 +50,7 @@ export function FullscreenController() {
     const entered = await requestExperimentFullscreen();
     setRequesting(false);
     setRequestFailed(!entered);
+    if (entered) onEntered?.();
   }
 
   if (fullscreenState !== "windowed") return null;

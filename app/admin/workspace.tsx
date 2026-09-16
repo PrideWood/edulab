@@ -384,14 +384,59 @@ function AgentTableRow({ agent, locked, busy, onSave, onDelete, onCancel }: { ag
   const [botId, setBotId] = useState(agent?.botId ?? "");
   const [token, setToken] = useState("");
   const [enabled, setEnabled] = useState(agent?.enabled ?? true);
+  const [testResult, setTestResult] = useState<{ kind: "testing" | "success" | "error"; message: string } | null>(null);
+  const testingRef = useRef(false);
   const state = locked ? "当前场次" : agent?.hasReferences ? "已有历史" : agent?.hasToken ? "已配置" : agent ? "缺少 Token" : "待添加";
+
+  function updateDraft(update: () => void) {
+    update();
+    setTestResult(null);
+  }
+
+  async function testConnection() {
+    if (testingRef.current) return;
+    testingRef.current = true;
+    setTestResult({ kind: "testing", message: "正在发起真实 AI 请求…" });
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await fetch("/api/admin/agent-control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          action: "test_agent",
+          agent: {
+            ...(agent ? { id: agent.id } : {}),
+            baseUrl,
+            botId,
+            ...(token.trim() ? { token } : {}),
+          },
+        }),
+      });
+      const data = await response.json().catch(() => null) as { test?: { message?: string }; error?: { message?: string } } | null;
+      if (!response.ok) throw new Error(data?.error?.message ?? `连接失败（HTTP ${response.status}）。`);
+      setTestResult({ kind: "success", message: `✓ ${data?.test?.message ?? "连接成功"}` });
+    } catch (testError) {
+      const message = testError instanceof DOMException && testError.name === "AbortError"
+        ? "连接超时，请检查网络、Base URL 或服务状态。"
+        : testError instanceof Error ? testError.message : "连接失败，请检查当前配置。";
+      setTestResult({ kind: "error", message: `✕ 连接失败：${message}` });
+    } finally {
+      window.clearTimeout(timeout);
+      testingRef.current = false;
+    }
+  }
+
+  const testing = testResult?.kind === "testing";
+  const canTest = Boolean(baseUrl.trim() && botId.trim() && (token.trim() || agent?.hasToken));
   return <tr className={locked ? "agent-row-locked" : undefined}>
-    <td><input className="agent-table-input agent-name-input" aria-label={`${agent?.internalName ?? "新智能体"}内部名称`} value={internalName} onChange={(event) => setInternalName(event.target.value)} disabled={locked} placeholder="例如：智能体 B" /></td>
-    <td><input className="agent-table-input agent-api-input" aria-label={`${agent?.internalName ?? "新智能体"} API 地址`} value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} disabled={locked} /></td>
-    <td><input className="agent-table-input agent-bot-input" aria-label={`${agent?.internalName ?? "新智能体"} Bot ID`} value={botId} onChange={(event) => setBotId(event.target.value)} disabled={locked} placeholder="Coze Bot ID" /></td>
-    <td><input className="agent-table-input agent-token-input" aria-label={`${agent?.internalName ?? "新智能体"} API Token`} type="password" value={token} onChange={(event) => setToken(event.target.value)} disabled={locked} autoComplete="new-password" placeholder={agent?.hasToken ? "留空保留原 Token" : "输入 Token"} /></td>
-    <td className="agent-enabled-cell"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} disabled={locked} aria-label={`${internalName || "新智能体"}允许用于新场次`} /></td>
-    <td><span className={`agent-row-status ${locked ? "locked" : agent && !agent.hasToken ? "warning" : ""}`} title={agent?.hasReferences ? "已有场次或历史会话引用，不能永久删除；可以取消启用后保存" : undefined}>{state}</span></td>
-    <td><div className="agent-row-actions">{agent && onDelete && <button className="agent-row-delete" disabled={busy || locked || agent.hasReferences} title={agent.hasReferences ? "已有场次或历史会话引用，不能删除；可以取消启用后保存" : undefined} onClick={onDelete}>删除</button>}{onCancel && <button className="agent-row-cancel" onClick={onCancel} disabled={busy}>取消</button>}<button className="agent-row-save" disabled={busy || locked || !internalName.trim() || !botId.trim() || (!agent?.hasToken && !token.trim())} onClick={() => onSave({ ...(agent ? { id: agent.id } : {}), internalName, baseUrl, botId, ...(token.trim() ? { token } : {}), enabled })}>保存</button></div></td>
+    <td><input className="agent-table-input agent-name-input" aria-label={`${agent?.internalName ?? "新智能体"}内部名称`} value={internalName} onChange={(event) => updateDraft(() => setInternalName(event.target.value))} disabled={locked} placeholder="例如：智能体 B" /></td>
+    <td><input className="agent-table-input agent-api-input" aria-label={`${agent?.internalName ?? "新智能体"} API 地址`} value={baseUrl} onChange={(event) => updateDraft(() => setBaseUrl(event.target.value))} disabled={locked} /></td>
+    <td><input className="agent-table-input agent-bot-input" aria-label={`${agent?.internalName ?? "新智能体"} Bot ID`} value={botId} onChange={(event) => updateDraft(() => setBotId(event.target.value))} disabled={locked} placeholder="Coze Bot ID" /></td>
+    <td><input className="agent-table-input agent-token-input" aria-label={`${agent?.internalName ?? "新智能体"} API Token`} type="password" value={token} onChange={(event) => updateDraft(() => setToken(event.target.value))} disabled={locked} autoComplete="new-password" placeholder={agent?.hasToken ? "留空使用已保存 Token" : "输入 Token"} /></td>
+    <td className="agent-enabled-cell"><input type="checkbox" checked={enabled} onChange={(event) => updateDraft(() => setEnabled(event.target.checked))} disabled={locked} aria-label={`${internalName || "新智能体"}允许用于新场次`} /></td>
+    <td><div className="agent-status-stack"><span className={`agent-row-status ${locked ? "locked" : agent && !agent.hasToken ? "warning" : ""}`} title={agent?.hasReferences ? "已有场次或历史会话引用，不能永久删除；可以取消启用后保存" : undefined}>{state}</span>{testResult && <span className={`agent-test-result ${testResult.kind}`} role={testResult.kind === "error" ? "alert" : "status"}>{testResult.message}</span>}</div></td>
+    <td><div className="agent-row-actions"><button type="button" className="agent-row-test" disabled={busy || testing || !canTest} title={!canTest ? "请填写 API 地址、Bot ID 和 API Token 后再测试" : "使用当前行中尚未保存的值发起真实请求"} onClick={() => void testConnection()}>{testing ? "测试中…" : "测试连通"}</button>{agent && onDelete && <button type="button" className="agent-row-delete" disabled={busy || testing || locked || agent.hasReferences} title={agent.hasReferences ? "已有场次或历史会话引用，不能删除；可以取消启用后保存" : undefined} onClick={onDelete}>删除</button>}{onCancel && <button type="button" className="agent-row-cancel" onClick={onCancel} disabled={busy || testing}>取消</button>}<button type="button" className="agent-row-save" disabled={busy || testing || locked || !internalName.trim() || !botId.trim() || (!agent?.hasToken && !token.trim())} onClick={() => onSave({ ...(agent ? { id: agent.id } : {}), internalName, baseUrl, botId, ...(token.trim() ? { token } : {}), enabled })}>保存</button></div></td>
   </tr>;
 }

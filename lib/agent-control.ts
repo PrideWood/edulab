@@ -232,6 +232,36 @@ export async function saveAgentConfig(input: {
   });
 }
 
+export async function resolveAgentTestConnection(input: {
+  experimentId: string;
+  id?: string;
+  baseUrl: string;
+  botId: string;
+  token?: string;
+}) {
+  let token = input.token?.trim() ?? "";
+  if (!token && input.id) {
+    const current = await query<AgentRow>(
+      `SELECT id, experiment_id, internal_name, coze_api_base_url, coze_bot_id,
+         coze_token_ciphertext, coze_token_iv, coze_token_tag, enabled, updated_at
+       FROM ai_agent_configs WHERE id = $1 AND experiment_id = $2`,
+      [input.id, input.experimentId],
+    );
+    const agent = current.rows[0];
+    if (!agent) throw new Error("AGENT_NOT_FOUND");
+    if (agent.coze_token_ciphertext && agent.coze_token_iv && agent.coze_token_tag) {
+      token = decryptSecret({
+        ciphertext: agent.coze_token_ciphertext,
+        iv: agent.coze_token_iv,
+        tag: agent.coze_token_tag,
+      });
+    }
+  }
+  token ||= process.env.COZE_API_TOKEN ?? "";
+  if (!token) throw new Error("COZE_TOKEN_NOT_CONFIGURED");
+  return { token, baseUrl: input.baseUrl, botId: input.botId };
+}
+
 export async function activateExperimentRun(input: {
   experimentId: string;
   name: string;
