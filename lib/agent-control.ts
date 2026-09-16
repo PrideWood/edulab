@@ -13,6 +13,7 @@ export interface AgentConfigSummary {
   baseUrl: string;
   botId: string;
   hasToken: boolean;
+  tokenSource: "database" | "environment" | "missing";
   enabled: boolean;
   hasReferences: boolean;
   updatedAt: string;
@@ -63,6 +64,7 @@ function mapAgent(row: AgentRow): AgentConfigSummary {
     baseUrl: row.coze_api_base_url,
     botId: row.coze_bot_id,
     hasToken: Boolean(row.coze_token_ciphertext || process.env.COZE_API_TOKEN),
+    tokenSource: row.coze_token_ciphertext ? "database" : process.env.COZE_API_TOKEN ? "environment" : "missing",
     enabled: row.enabled,
     hasReferences: Boolean(row.has_references),
     updatedAt: row.updated_at,
@@ -250,11 +252,15 @@ export async function resolveAgentTestConnection(input: {
     const agent = current.rows[0];
     if (!agent) throw new Error("AGENT_NOT_FOUND");
     if (agent.coze_token_ciphertext && agent.coze_token_iv && agent.coze_token_tag) {
-      token = decryptSecret({
-        ciphertext: agent.coze_token_ciphertext,
-        iv: agent.coze_token_iv,
-        tag: agent.coze_token_tag,
-      });
+      try {
+        token = decryptSecret({
+          ciphertext: agent.coze_token_ciphertext,
+          iv: agent.coze_token_iv,
+          tag: agent.coze_token_tag,
+        });
+      } catch {
+        throw new Error("AGENT_TOKEN_DECRYPT_FAILED");
+      }
     }
   }
   token ||= process.env.COZE_API_TOKEN ?? "";

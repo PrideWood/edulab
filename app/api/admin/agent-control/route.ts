@@ -15,6 +15,7 @@ const httpsUrl = z.url().refine((value) => {
 const inputSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("save_agent"),
+    testAfterSave: z.boolean().optional(),
     agent: z.object({
       id: z.uuid().optional(),
       internalName: z.string().trim().min(1).max(100),
@@ -53,6 +54,7 @@ const deleteSchema = z.object({
 function controlError(error: unknown) {
   const message = error instanceof Error ? error.message : "";
   if (message === "AGENT_NOT_FOUND") return new ApiError(404, message, "找不到这个智能体配置。");
+  if (message === "AGENT_TOKEN_DECRYPT_FAILED") return new ApiError(409, message, "数据库中的 Token 无法解密。请确认本地与 Vercel 的 SETTINGS_ENCRYPTION_KEY 一致且未更换；也可重新输入 Token 并保存。");
   if (message === "ACTIVE_AGENT_LOCKED") return new ApiError(409, message, "当前场次正在使用这个智能体。请先结束场次，再修改配置。");
   if (message === "AGENT_HAS_REFERENCES") return new ApiError(409, message, "这个智能体已被场次或历史会话引用，不能删除。可以将它停用，避免用于新场次。");
   if (message === "AGENT_CONFIRMATION_MISMATCH") return new ApiError(400, message, "输入的智能体名称不一致，未执行删除。");
@@ -80,11 +82,28 @@ export async function POST(request: Request) {
       try {
         await testCozeConnection({ ...connection, timeoutMs: 20_000 });
       } catch (error) {
-        throw new ApiError(502, "AGENT_CONNECTION_FAILED", formatAgentTestFailure(error, { secret: connection.token }));
+        const upstream = error as { status?: number; code?: string };
+        const status = upstream.code === "COZE_TEST_TIMEOUT" ? 504
+          : upstream.status && [400, 401, 403, 404, 408, 429].includes(upstream.status) ? 422 : 502;
+        throw new ApiError(status, "AGENT_CONNECTION_FAILED", formatAgentTestFailure(error, { secret: connection.token }));
       }
       return NextResponse.json({ test: { ok: true, message: "连接成功" } });
     } else if (input.data.action === "save_agent") {
-      await saveAgentConfig({ ...input.data.agent, experimentId: experiment.id }, admin.id);
+      const saved = await saveAgentConfig({ ...input.data.agent, experimentId: experiment.id }, admin.id);
+      if (input.data.testAfterSave) {
+        // Read back the committed credential: never test the submitted draft here.
+        const connection = await resolveAgentTestConnection({
+          id: saved.id, experimentId: experiment.id, baseUrl: saved.baseUrl, botId: saved.botId,
+        });
+        let test;
+        try {
+          await testCozeConnection({ ...connection, timeoutMs: 20_000 });
+          test = { ok: true, message: "配置已保存，数据库 Token 连接成功。" };
+        } catch (error) {
+          test = { ok: false, message: "配置已保存，但连接失败：" + formatAgentTestFailure(error, { secret: connection.token }) };
+        }
+        return NextResponse.json({ control: await getAgentControl(experiment.id), test });
+      }
     } else if (input.data.action === "activate_run") {
       await activateExperimentRun({ ...input.data.run, experimentId: experiment.id }, admin.id);
     } else {
