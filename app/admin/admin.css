@@ -199,3 +199,38 @@
   .participant-export-toolbar { align-items: stretch; flex-direction: column; }
   .participant-export-toolbar > div:last-child { flex-wrap: wrap; }
 }
+
+@media (max-width: 850px) {
+  .admin-sidebar { padding: 12px; overflow: visible; }
+  .admin-brand { padding: 0 4px 10px; }
+  .admin-nav { display: flex; overflow-x: auto; gap: 6px; padding-bottom: 4px; }
+  .admin-nav button { width: auto; flex: 0 0 auto; min-height: 44px; padding: 10px 14px; white-space: nowrap; }
+  .admin-header { min-height: 80px; padding: 18px; flex-wrap: wrap; gap: 12px; }
+  .admin-header-actions { flex-wrap: wrap; }
+  .admin-content { padding: 18px 12px 40px; }
+  .settings-card { min-width: 0; padding: 16px; }
+  .settings-card-head { flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
+  .form-grid, .active-run-summary, .limit-grid { grid-template-columns: minmax(0, 1fr); }
+  .active-run-summary button, .run-activate-button { width: 100%; }
+  .admin-shell button { min-height: 44px; }
+  .admin-shell input:not([type="checkbox"]), .admin-shell textarea, .admin-shell select,
+  .admin-login-card input, .danger-dialog input { font-size: 16px; }
+  .agent-table-wrap { max-height: none; overflow: visible; border: 0; scrollbar-gutter: auto; }
+  .agent-table { display: block; min-width: 0; width: 100%; }
+  .agent-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .agent-table tbody { display: grid; gap: 16px; }
+  .agent-table tr { display: block; min-width: 0; border: 1px solid #dce4df; border-radius: 12px; overflow: hidden; }
+  .agent-table td { display: block; padding: 10px 12px; border: 0; text-align: left; }
+  .agent-table td::before { content: attr(data-label); display: block; margin-bottom: 6px; color: #65756b; font-size: 12px; font-weight: 650; }
+  .agent-table-input { height: 44px; }
+  .agent-table td[data-label="内部名称"] { background: #f1f6f3; }
+  .agent-row-actions { display: flex; flex-wrap: wrap; justify-content: stretch; }
+  .agent-row-actions button { flex: 1; font-size: 13px; padding: 10px; }
+  .agent-test-result { font-size: 12px; display: block; margin-top: 4px; }
+  .agent-enabled-cell input { width: 22px; height: 22px; }
+  .agent-choice-field label { min-height: 44px; }
+  .danger-dialog { width: 100%; padding: 20px; }
+  .danger-dialog-actions { flex-wrap: wrap; }
+  .admin-login-page { padding: 16px; }
+  .admin-login-card { padding: 24px; }
+}

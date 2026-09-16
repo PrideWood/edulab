@@ -56,7 +56,7 @@ function controlError(error: unknown) {
   if (message === "AGENT_NOT_FOUND") return new ApiError(404, message, "找不到这个智能体配置。");
   if (message === "AGENT_TOKEN_DECRYPT_FAILED") return new ApiError(409, message, "数据库中的 Token 无法解密。请确认本地与 Vercel 的 SETTINGS_ENCRYPTION_KEY 一致且未更换；也可重新输入 Token 并保存。");
   if (message === "ACTIVE_AGENT_LOCKED") return new ApiError(409, message, "当前场次正在使用这个智能体。请先结束场次，再修改配置。");
-  if (message === "AGENT_HAS_REFERENCES") return new ApiError(409, message, "这个智能体已被场次或历史会话引用，不能删除。可以将它停用，避免用于新场次。");
+  if (message === "AGENT_HAS_REFERENCES") return new ApiError(409, message, "这个智能体仍有关联参与者记录或未结束场次。请先清理相关记录并结束场次，再尝试删除。");
   if (message === "AGENT_CONFIRMATION_MISMATCH") return new ApiError(400, message, "输入的智能体名称不一致，未执行删除。");
   if (message === "INVALID_RUN_AGENTS") return new ApiError(400, message, "请选择符合分配规则且已经启用的智能体。");
   return error;

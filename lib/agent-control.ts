@@ -95,6 +95,9 @@ export async function getAgentControl(experimentId: string) {
              SELECT 1 FROM experiment_runs run
              WHERE run.experiment_id = agent.experiment_id
                AND (run.fixed_agent_id = agent.id OR agent.id = ANY(run.random_agent_ids))
+               AND (run.status <> 'closed'
+                 OR EXISTS (SELECT 1 FROM participant_agent_assignments a WHERE a.experiment_run_id = run.id)
+                 OR EXISTS (SELECT 1 FROM experiment_sessions s WHERE s.experiment_run_id = run.id))
            )
            OR EXISTS (
              SELECT 1 FROM participant_agent_assignments assignment
@@ -145,6 +148,9 @@ export async function deleteAgentConfig(input: {
            SELECT 1 FROM experiment_runs run
            WHERE run.experiment_id = $1
              AND (run.fixed_agent_id = $2 OR $2 = ANY(run.random_agent_ids))
+             AND (run.status <> 'closed'
+               OR EXISTS (SELECT 1 FROM participant_agent_assignments a WHERE a.experiment_run_id = run.id)
+               OR EXISTS (SELECT 1 FROM experiment_sessions s WHERE s.experiment_run_id = run.id))
          )
          OR EXISTS (
            SELECT 1 FROM participant_agent_assignments assignment
@@ -160,10 +166,19 @@ export async function deleteAgentConfig(input: {
     );
     if (references.rows[0]?.exists) throw new Error("AGENT_HAS_REFERENCES");
 
+    const emptyRuns = await client.query(
+      `DELETE FROM experiment_runs run
+       WHERE run.experiment_id = $1 AND run.status = 'closed'
+         AND (run.fixed_agent_id = $2 OR $2 = ANY(run.random_agent_ids))
+         AND NOT EXISTS (SELECT 1 FROM participant_agent_assignments a WHERE a.experiment_run_id = run.id)
+         AND NOT EXISTS (SELECT 1 FROM experiment_sessions s WHERE s.experiment_run_id = run.id)
+       RETURNING run.id, run.name, run.assignment_mode, run.fixed_agent_id, run.random_agent_ids`,
+      [input.experimentId, input.agentId],
+    );
     await client.query(
       `INSERT INTO admin_audit_log (id, admin_user_id, action, experiment_id, before_data)
        VALUES ($1,$2,'ai.agent.delete',$3,$4::jsonb)`,
-      [randomUUID(), adminUserId, input.experimentId, JSON.stringify(mapAgent(agent))],
+      [randomUUID(), adminUserId, input.experimentId, JSON.stringify({ ...mapAgent(agent), removedEmptyRuns: emptyRuns.rows })],
     );
     await client.query(
       `DELETE FROM ai_agent_configs WHERE id = $1 AND experiment_id = $2`,
@@ -282,7 +297,7 @@ export async function activateExperimentRun(input: {
     if (selectedIds.length < (input.assignmentMode === "fixed" ? 1 : 2)) throw new Error("INVALID_RUN_AGENTS");
     const valid = await client.query<{ id: string }>(
       `SELECT id FROM ai_agent_configs
-       WHERE experiment_id = $1 AND enabled = true AND id = ANY($2::uuid[])`,
+       WHERE experiment_id = $1 AND enabled = true AND id = ANY($2::uuid[]) FOR SHARE`,
       [input.experimentId, selectedIds],
     );
     if (valid.rows.length !== selectedIds.length) throw new Error("INVALID_RUN_AGENTS");
