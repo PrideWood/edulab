@@ -322,9 +322,19 @@ test("admin agent configuration uses a compact editable table", async () => {
   assert.match(adminWorkspace, /function AgentTableRow/);
   assert.match(adminWorkspace, /agent-row-save/);
   assert.match(adminWorkspace, /agent-row-delete/);
+  assert.doesNotMatch(adminWorkspace, /Token 已加密保存在数据库/);
   assert.doesNotMatch(adminWorkspace, /agent-config-card/);
   assert.match(adminStyles, /\.agent-table-wrap \{[^}]*max-height: 460px;[^}]*overflow: auto;/);
+  assert.match(adminStyles, /\.agent-table \{[^}]*min-width: 820px;/);
+  assert.match(adminStyles, /\.agent-table-wrap \{[^}]*overflow-x: auto;/);
   assert.match(adminStyles, /\.agent-table th \{[^}]*position: sticky;/);
+});
+
+test("admin sidebar omits the redundant experiment version card", async () => {
+  const adminWorkspace = await readFile("app/admin/workspace.tsx", "utf8");
+  const adminStyles = await readFile("app/admin/admin.css", "utf8");
+  assert.doesNotMatch(adminWorkspace, /className="admin-context"/);
+  assert.doesNotMatch(adminStyles, /\.admin-context/);
 });
 
 test("admin can test each agent draft through the real Coze path without experiment writes", async () => {

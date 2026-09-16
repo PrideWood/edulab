@@ -2,10 +2,6 @@
 .admin-sidebar { min-height: 0; padding: 28px 20px 22px; display: flex; flex-direction: column; overflow-y: auto; color: #eaf1ed; background: #17241e; }
 .admin-brand { padding: 0 8px 26px; display: flex; align-items: center; gap: 11px; font-weight: 730; letter-spacing: -.02em; }
 .admin-brand-mark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; color: #173b2c; background: #b8dec9; }
-.admin-context { margin: 4px 0 24px; padding: 18px; border: 1px solid rgba(218, 235, 226, .12); border-radius: 15px; background: rgba(255,255,255,.045); }
-.admin-context p { margin: 0 0 11px; color: #93a79c; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; }
-.admin-context strong { display: block; font-size: 14px; }
-.admin-context span { display: block; margin-top: 5px; color: #82978c; font-size: 11px; }
 .admin-nav { display: grid; gap: 6px; }
 .admin-nav button { width: 100%; padding: 12px 11px; display: flex; align-items: center; gap: 12px; border: 0; border-radius: 12px; color: #9eb0a7; background: transparent; text-align: left; }
 .admin-nav button > span { width: 26px; color: #6f8479; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
@@ -112,17 +108,17 @@
 .agent-choice-field legend { padding: 0 6px; color: #4e5b54; font-size: 12px; font-weight: 650; }
 .agent-choice-field label { display: flex; grid-template-columns: auto 1fr; align-items: center; gap: 7px; }
 .run-activate-button { margin-top: 18px; }
-.agent-table-wrap { max-width: 100%; max-height: 460px; overflow: auto; border: 1px solid #dce4df; border-radius: 12px; scrollbar-gutter: stable; }
-.agent-table { width: 100%; min-width: 1120px; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: 11px; }
-.agent-table th { position: sticky; top: 0; z-index: 2; padding: 10px 9px; border-bottom: 1px solid #dce4df; color: #728078; background: #f5f8f6; font-size: 10px; font-weight: 700; text-align: left; white-space: nowrap; }
-.agent-table th:nth-child(1) { width: 130px; }
-.agent-table th:nth-child(2) { width: 190px; }
-.agent-table th:nth-child(3) { width: 160px; }
-.agent-table th:nth-child(4) { width: 170px; }
-.agent-table th:nth-child(5) { width: 55px; text-align: center; }
-.agent-table th:nth-child(6) { width: 205px; }
-.agent-table th:nth-child(7) { width: 230px; }
-.agent-table td { padding: 9px; border-bottom: 1px solid #e5ebe7; background: white; vertical-align: middle; }
+.agent-table-wrap { width: 100%; max-width: 100%; max-height: 460px; overflow: auto; border: 1px solid #dce4df; border-radius: 12px; scrollbar-gutter: stable; overscroll-behavior-inline: contain; }
+.agent-table { width: 100%; min-width: 820px; border-collapse: separate; border-spacing: 0; table-layout: fixed; font-size: 11px; }
+.agent-table th { position: sticky; top: 0; z-index: 2; padding: 9px 6px; border-bottom: 1px solid #dce4df; color: #728078; background: #f5f8f6; font-size: 10px; font-weight: 700; text-align: left; white-space: nowrap; }
+.agent-table th:nth-child(1) { width: 100px; }
+.agent-table th:nth-child(2) { width: 140px; }
+.agent-table th:nth-child(3) { width: 105px; }
+.agent-table th:nth-child(4) { width: 130px; }
+.agent-table th:nth-child(5) { width: 44px; text-align: center; }
+.agent-table th:nth-child(6) { width: 115px; }
+.agent-table th:nth-child(7) { width: 186px; }
+.agent-table td { padding: 7px 6px; border-bottom: 1px solid #e5ebe7; background: white; vertical-align: middle; }
 .agent-table tbody tr:last-child td { border-bottom: 0; }
 .agent-table tbody tr:hover td { background: #fafcfb; }
 .agent-table tbody tr.agent-row-locked td { background: #f2f5f3; }
@@ -139,13 +135,16 @@
 .agent-test-result.success { color: #287049; }
 .agent-test-result.error { color: #a1483d; }
 .agent-test-result.testing { color: #65736b; }
-.agent-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
-.agent-row-actions button { padding: 7px 9px; border-radius: 8px; font-size: 10px; font-weight: 680; white-space: nowrap; }
+.agent-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+.agent-row-actions button { padding: 7px 6px; border-radius: 8px; font-size: 10px; font-weight: 680; white-space: nowrap; }
 .agent-row-save { border: 1px solid #337657; color: white; background: #337657; }
 .agent-row-test { border: 1px solid #9db9aa; color: #2f684c; background: #f5faf7; }
 .agent-row-delete { border: 1px solid #e1b8b2; color: #9b4036; background: white; }
 .agent-row-cancel { border: 1px solid #cad7cf; color: #53675c; background: white; }
 .agent-row-actions button:disabled { cursor: default; opacity: .45; }
+.agent-config-details > summary { cursor: pointer; min-height: 44px; font-weight: 650; line-height: 1.6; overflow-wrap: anywhere; }
+.agent-config-details > summary span { display: block; color: #738078; font-size: 12px; font-weight: 400; }
+.agent-config-details[open] > summary { margin-bottom: 20px; }
 .danger-dialog-backdrop { position: fixed; inset: 0; z-index: 1000; padding: 22px; display: grid; place-items: center; overflow-y: auto; background: rgba(18,29,23,.56); backdrop-filter: blur(3px); }
 .danger-dialog { width: min(490px, 100%); padding: 28px; display: grid; gap: 20px; border: 1px solid #ebc8c2; border-radius: 20px; background: white; box-shadow: 0 24px 80px rgba(42,24,20,.24); }
 .danger-dialog-icon { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 50%; color: white; background: #b34c41; font-size: 20px; font-weight: 800; }
@@ -182,7 +181,7 @@
   .admin-shell { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
   .admin-sidebar { min-height: auto; padding: 18px; }
   .admin-brand { padding-bottom: 15px; }
-  .admin-context, .admin-sidebar-footer { display: none; }
+  .admin-sidebar-footer { display: none; }
   .admin-nav { grid-template-columns: repeat(5, 1fr); }
   .admin-nav button { justify-content: center; }
   .admin-nav button > span, .admin-nav button small { display: none; }
@@ -201,6 +200,19 @@
 }
 
 @media (max-width: 850px) {
+  html:has(.admin-shell), html:has(.admin-login-page), html:has(.admin-loading) { height: auto; overflow: auto; }
+  body:has(.admin-shell), body:has(.admin-login-page), body:has(.admin-loading) { height: auto; overflow: visible; background: #f5f7f5; }
+  .admin-shell { display: block; width: 100%; max-width: 100%; height: auto; min-height: 100dvh; overflow: visible; }
+  .admin-main { width: 100%; overflow: visible; scrollbar-gutter: auto; }
+  .admin-sidebar, .admin-nav, .admin-header, .admin-content, .settings-stack,
+  .agent-table-wrap, .agent-table tbody, .settings-card-head > div, .form-grid label,
+  .form-grid select, .agent-choice-field { min-width: 0; max-width: 100%; }
+  .settings-stack, .agent-table tbody { grid-template-columns: minmax(0, 1fr); }
+  .admin-content.wide { width: 100%; }
+  .admin-shell strong, .admin-shell p { overflow-wrap: anywhere; }
+  .agent-row-actions { min-width: 0; }
+  .agent-row-actions button { min-width: 0; white-space: normal; }
+  .admin-login-page { height: auto; min-height: 100dvh; overflow: visible; }
   .admin-sidebar { padding: 12px; overflow: visible; }
   .admin-brand { padding: 0 4px 10px; }
   .admin-nav { display: flex; overflow-x: auto; gap: 6px; padding-bottom: 4px; }
@@ -215,18 +227,13 @@
   .admin-shell button { min-height: 44px; }
   .admin-shell input:not([type="checkbox"]), .admin-shell textarea, .admin-shell select,
   .admin-login-card input, .danger-dialog input { font-size: 16px; }
-  .agent-table-wrap { max-height: none; overflow: visible; border: 0; scrollbar-gutter: auto; }
-  .agent-table { display: block; min-width: 0; width: 100%; }
-  .agent-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-  .agent-table tbody { display: grid; gap: 16px; }
-  .agent-table tr { display: block; min-width: 0; border: 1px solid #dce4df; border-radius: 12px; overflow: hidden; }
-  .agent-table td { display: block; padding: 10px 12px; border: 0; text-align: left; }
-  .agent-table td::before { content: attr(data-label); display: block; margin-bottom: 6px; color: #65756b; font-size: 12px; font-weight: 650; }
-  .agent-table-input { height: 44px; }
-  .agent-table td[data-label="内部名称"] { background: #f1f6f3; }
-  .agent-row-actions { display: flex; flex-wrap: wrap; justify-content: stretch; }
-  .agent-row-actions button { flex: 1; font-size: 13px; padding: 10px; }
-  .agent-test-result { font-size: 12px; display: block; margin-top: 4px; }
+  .agent-table-wrap { max-height: none; overflow-x: auto; overflow-y: visible; border: 1px solid #dce4df; scrollbar-gutter: auto; -webkit-overflow-scrolling: touch; }
+  .agent-table { width: 820px; min-width: 820px; }
+  .agent-table th { position: static; }
+  .agent-table-input { height: 44px; font-size: 16px; }
+  .agent-row-actions { flex-wrap: nowrap; }
+  .agent-row-actions button { flex: 0 0 auto; min-height: 44px; font-size: 12px; padding: 9px 7px; white-space: nowrap; }
+  .agent-test-result { font-size: 11px; }
   .agent-enabled-cell input { width: 22px; height: 22px; }
   .agent-choice-field label { min-height: 44px; }
   .danger-dialog { width: 100%; padding: 20px; }
