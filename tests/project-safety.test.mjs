@@ -235,7 +235,7 @@ test("shared experiment entry creates a sequential participant only after identi
   const workspace = await readFile("app/workspace.tsx", "utf8");
   assert.match(sessionRoute, /participantCode: z\.string\(\).*\.optional\(\)/);
   assert.match(migration, /participant_code_counters/);
-  assert.match(sessionRoute, /formatParticipantCode/);
+  assert.match(sessionRoute, /createParticipantWithAvailableCode/);
   assert.match(testCodeMigration, /test_last_value bigint NOT NULL DEFAULT 0/);
   assert.match(testCodeMigration, /GREATEST\(participant_code_counters\.test_last_value, EXCLUDED\.test_last_value\)/);
   assert.match(sessionRoute, /saveParticipantProfileWithClient/);
@@ -247,9 +247,9 @@ test("shared experiment entry creates a sequential participant only after identi
   assert.doesNotMatch(workspace, /请使用研究者提供的完整实验链接进入/);
 });
 
-test("test participant names use an independent atomic T-number sequence", async () => {
+test("participant codes reuse the smallest gap with independent concurrency locks", async () => {
   const initialMigration = await readFile("db/migrations/0001_initial.sql", "utf8");
-  const sessionRoute = await readFile("app/api/sessions/route.ts", "utf8");
+  const allocator = await readFile("lib/participant-code-allocation.ts", "utf8");
   assert.equal(isTestParticipantName("测试"), true);
   assert.equal(isTestParticipantName(" test "), true);
   assert.equal(isTestParticipantName("TEST"), true);
@@ -260,9 +260,10 @@ test("test participant names use an independent atomic T-number sequence", async
   assert.equal(formatParticipantCode("T", 1), "T001");
   assert.equal(formatParticipantCode("T", 2), "T002");
   assert.equal(formatParticipantCode("P", 1), "P001");
-  assert.match(sessionRoute, /test_last_value = participant_code_counters\.test_last_value \+ 1/);
-  assert.match(sessionRoute, /last_value = participant_code_counters\.last_value \+ 1/);
-  assert.match(sessionRoute, /ON CONFLICT \(experiment_id, external_code\) DO NOTHING/);
+  assert.match(allocator, /pg_advisory_xact_lock/);
+  assert.match(allocator, /row_number\(\) OVER \(ORDER BY number\)/);
+  assert.match(allocator, /WHERE number <> expected/);
+  assert.match(allocator, /ON CONFLICT \(experiment_id, external_code\) DO NOTHING/);
   assert.match(initialMigration, /UNIQUE \(experiment_id, external_code\)/);
 });
 

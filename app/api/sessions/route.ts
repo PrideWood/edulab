@@ -9,7 +9,8 @@ import { buildSessionPayload } from "@/lib/session-payload";
 import { hashSecret, newSessionSecret, normalizeParticipantCode, SESSION_COOKIE, verifyParticipantAccess } from "@/lib/security";
 import { buildSessionSnapshot, getExperimentSettings } from "@/lib/experiment-settings";
 import { getParticipantProfile, saveParticipantProfileWithClient } from "@/lib/participant-profile";
-import { formatParticipantCode, isTestParticipantName } from "@/lib/participant-code";
+import { isTestParticipantName } from "@/lib/participant-code";
+import { createParticipantWithAvailableCode } from "@/lib/participant-code-allocation";
 import { assignAgentWithClient } from "@/lib/agent-control";
 import { createRuntimeSession, getRuntimeControls, getRuntimeSession, setRuntimeCookie } from "@/lib/runtime-session";
 import { CozeChatError, formatCozeError, recoverCozeChatWithoutDatabase } from "@/lib/coze";
@@ -139,36 +140,9 @@ export async function POST(request: Request) {
         participantCode = requestedParticipantCode;
       } else {
         const codePrefix = isTestParticipantName(input.data.profile?.fullName ?? "") ? "T" : "P";
-        while (true) {
-          const nextValue = codePrefix === "T"
-            ? (await client.query<{ value: string }>(
-              `INSERT INTO participant_code_counters (experiment_id, last_value, test_last_value) VALUES ($1, 0, 1)
-               ON CONFLICT (experiment_id) DO UPDATE SET
-                 test_last_value = participant_code_counters.test_last_value + 1,
-                 updated_at = now()
-               RETURNING test_last_value AS value`,
-              [experiment.id],
-            )).rows[0].value
-            : (await client.query<{ value: string }>(
-              `INSERT INTO participant_code_counters (experiment_id, last_value) VALUES ($1, 1)
-               ON CONFLICT (experiment_id) DO UPDATE SET
-                 last_value = participant_code_counters.last_value + 1,
-                 updated_at = now()
-               RETURNING last_value AS value`,
-              [experiment.id],
-            )).rows[0].value;
-          participantCode = formatParticipantCode(codePrefix, nextValue);
-          const participant = await client.query<{ id: string }>(
-            `INSERT INTO participants (id, experiment_id, external_code) VALUES ($1, $2, $3)
-             ON CONFLICT (experiment_id, external_code) DO NOTHING
-             RETURNING id`,
-            [randomUUID(), experiment.id, participantCode],
-          );
-          if (participant.rows[0]) {
-            participantId = participant.rows[0].id;
-            break;
-          }
-        }
+        const participant = await createParticipantWithAvailableCode(client, experiment.id, codePrefix);
+        participantId = participant.participantId;
+        participantCode = participant.participantCode;
       }
       if (input.data.profile) {
         await saveParticipantProfileWithClient(
