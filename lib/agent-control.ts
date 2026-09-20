@@ -366,7 +366,7 @@ export async function assignAgentWithClient(
   const run = await client.query<RunRow & { experiment_id: string }>(
     `SELECT id, experiment_id, name, status, assignment_mode, fixed_agent_id,
        random_agent_ids, opened_at, closed_at, created_at
-     FROM experiment_runs WHERE experiment_id = $1 AND status = 'active' FOR UPDATE`,
+     FROM experiment_runs WHERE experiment_id = $1 AND status = 'active' FOR SHARE`,
     [experimentId],
   );
   const active = run.rows[0];
@@ -382,6 +382,8 @@ export async function assignAgentWithClient(
     if (active.assignment_mode === "fixed") {
       agentId = active.fixed_agent_id;
     } else {
+      // Serialize only balanced assignment; fixed-agent entrants can share the run.
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`edulab:assignment:${active.id}`]);
       const selected = await client.query<{ id: string }>(
         `SELECT candidate.id
          FROM unnest($2::uuid[]) AS candidate(id)

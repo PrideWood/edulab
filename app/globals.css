@@ -99,7 +99,8 @@ h1 { margin: 0; font-size: clamp(27px, 3vw, 38px); line-height: 1.14; letter-spa
 .assistant-name { margin: 0; font-size: 14px; font-weight: 720; }
 .assistant-status { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
 .session-actions { display: flex; align-items: center; gap: 9px; }
-.export-actions { display: flex; align-items: center; gap: 6px; }
+.export-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; min-width: 0; gap: 6px; }
+.export-actions [role="status"] { flex-basis: 100%; font-size: 12px; overflow-wrap: anywhere; text-align: right; }
 .export-actions button { padding: 7px 10px; border: 1px solid #cfdad3; border-radius: 9px; color: #526058; background: white; font-size: 11px; white-space: nowrap; }
 .export-actions button:hover { color: var(--accent-dark); border-color: #9eb9aa; }
 .export-actions button:disabled { cursor: default; opacity: .45; }

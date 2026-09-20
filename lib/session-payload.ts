@@ -7,12 +7,14 @@ import { getLatestFailedRequest, listMessages, mergeStoredMessages } from "@/lib
 import { getParticipantProfile } from "@/lib/participant-profile";
 import type { AuthenticatedSession } from "@/lib/session";
 
-export async function buildSessionPayload(session: AuthenticatedSession) {
+export async function buildSessionPayload(session: AuthenticatedSession, options: { includeMessages?: boolean } = {}) {
   let pending = Boolean(session.activeRequestId);
   let transientMessages: StoredMessage[] = [];
-  const storedMessages = await listMessages(session.id);
+  const storedMessages = options.includeMessages === false ? [] : await listMessages(session.id);
   try {
-    const recovery = await recoverPendingRequest(session);
+    const recovery = options.includeMessages === false
+      ? { pending: false, messages: [] }
+      : await recoverPendingRequest(session);
     pending = recovery.pending;
     transientMessages = recovery.messages;
   } catch (error) {

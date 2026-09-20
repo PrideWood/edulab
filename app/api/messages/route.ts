@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { beginChatRequest, CozeChatError, createCozeChat, finalizeCompletedRequest, formatCozeError, getUnstoredCompletedRequestMessages, markRequestFailed, recoverPendingRequest, runCozeChatWithoutDatabase, waitForCozeChat } from "@/lib/coze";
+import { beginChatRequest, CozeChatError, createCozeChat, finalizeCompletedRequest, formatCozeError, getUnstoredCompletedRequestMessages, markRequestFailed, recoverPendingRequest, runCozeChatWithoutDatabase, recoverCozeChatWithoutDatabase, waitForCozeChat } from "@/lib/coze";
 import type { StoredMessage } from "@/db/schema";
 import { ApiError, errorResponse } from "@/lib/http";
 import { getLatestFailedRequest, listMessages, mergeStoredMessages } from "@/lib/messages";
@@ -40,6 +40,13 @@ function runtimePayload(context: RuntimeSessionContext, pending: boolean, messag
 }
 
 async function postWithoutDatabase(context: RuntimeSessionContext, input: z.infer<typeof inputSchema>) {
+  if (context.pendingRequest?.clientRequestId === input.clientRequestId) {
+    return NextResponse.json(runtimePayload(context, true), { status: 202 });
+  }
+  if (context.lastCompletedRequest?.clientRequestId === input.clientRequestId) {
+    const recovered = await recoverCozeChatWithoutDatabase({ token: context.agent.token, baseUrl: context.agent.baseUrl, ...context.lastCompletedRequest });
+    return NextResponse.json(runtimePayload(context, recovered.pending, recovered.messages));
+  }
   const controls = getRuntimeControls(context);
   if (!context.profile) throw new ApiError(409, "PARTICIPANT_PROFILE_REQUIRED", "请先填写参与者信息。");
   if (context.session.status !== "active") throw new ApiError(409, "SESSION_COMPLETED", "本次实验已经结束，不能再发送消息。");
@@ -51,6 +58,7 @@ async function postWithoutDatabase(context: RuntimeSessionContext, input: z.infe
 
   const turnIndex = input.turnIndex ?? (context.conversationTurnCount ?? 0) + 1;
   const userSequence = input.userSequence ?? turnIndex * 2 - 1;
+  const requestedAt = new Date().toISOString();
   const result = await runCozeChatWithoutDatabase({
     token: context.agent.token,
     baseUrl: context.agent.baseUrl,
@@ -62,6 +70,8 @@ async function postWithoutDatabase(context: RuntimeSessionContext, input: z.infe
     content: input.content,
     turnIndex,
     userSequence,
+    startOnly: true,
+    signal: AbortSignal.timeout(20_000),
   });
   const now = new Date().toISOString();
   const next: RuntimeSessionContext = {
@@ -79,7 +89,7 @@ async function postWithoutDatabase(context: RuntimeSessionContext, input: z.infe
       userSequence,
       chatId: result.chat.id,
       conversationId: result.chat.conversation_id,
-      requestedAt: now,
+      requestedAt,
     };
   } else {
     next.usedMessages = context.usedMessages + 1;

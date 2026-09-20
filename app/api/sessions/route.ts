@@ -17,6 +17,7 @@ import { CozeChatError, formatCozeError, recoverCozeChatWithoutDatabase } from "
 import type { StoredMessage } from "@/db/schema";
 
 export const runtime = "nodejs";
+export const maxDuration = 120;
 
 const profileSchema = z.object({
   fullName: z.string().trim().max(100),
@@ -44,30 +45,36 @@ export async function GET() {
     if (runtime) {
       let messages: StoredMessage[] = [];
       let pending = Boolean(runtime.pendingRequest);
-      if (runtime.pendingRequest) {
+      const recoverable = runtime.pendingRequest ?? runtime.lastCompletedRequest;
+      if (recoverable) {
         try {
           const recovered = await recoverCozeChatWithoutDatabase({
             token: runtime.agent.token,
             baseUrl: runtime.agent.baseUrl,
-            ...runtime.pendingRequest,
+            ...recoverable,
           });
           pending = recovered.pending;
           messages = recovered.messages;
           runtime.session.cozeConversationId = recovered.chat.conversation_id;
           runtime.session.lastActivityAt = new Date().toISOString();
-          if (!recovered.pending) {
+          if (!recovered.pending && runtime.pendingRequest) {
             runtime.usedMessages += 1;
             runtime.conversationTurnCount = Math.max(runtime.conversationTurnCount ?? 0, runtime.pendingRequest.turnIndex);
+            runtime.lastCompletedRequest = runtime.pendingRequest;
             delete runtime.pendingRequest;
           }
         } catch (error) {
-          delete runtime.pendingRequest;
           if (error instanceof CozeChatError) {
+            delete runtime.pendingRequest;
             const failed = NextResponse.json({ error: { code: "COZE_FAILED", message: formatCozeError(error) } }, { status: 502 });
             setRuntimeCookie(failed, runtime);
             return failed;
           }
-          throw error;
+          // A temporary network/429 failure must retain the provider IDs.
+          // The client will poll again without creating another chat.
+          const retry = NextResponse.json({ error: { code: "COZE_RECOVERY_RETRY", message: "AI 回复查询暂时中断，正在重试。" } }, { status: 503, headers: { "Retry-After": "3" } });
+          setRuntimeCookie(retry, runtime);
+          return retry;
         }
       }
       const response = NextResponse.json({
@@ -139,10 +146,12 @@ export async function POST(request: Request) {
         participantId = participant.rows[0].id;
         participantCode = requestedParticipantCode;
       } else {
-        const codePrefix = isTestParticipantName(input.data.profile?.fullName ?? "") ? "T" : "P";
-        const participant = await createParticipantWithAvailableCode(client, experiment.id, codePrefix);
-        participantId = participant.participantId;
-        participantCode = participant.participantCode;
+        participantId = randomUUID();
+        participantCode = `__pending_${participantId}`;
+        // Uncommitted placeholder permits profile/assignment work in parallel.
+        // The final P/T code is allocated immediately before COMMIT.
+        await client.query(`INSERT INTO participants (id, experiment_id, external_code) VALUES ($1,$2,$3)`,
+          [participantId, experiment.id, participantCode]);
       }
       if (input.data.profile) {
         await saveParticipantProfileWithClient(
@@ -172,6 +181,11 @@ export async function POST(request: Request) {
           `edulab_${publicId.replaceAll("-", "")}`, settings.version, JSON.stringify(snapshot), startedAt,
           assignedAgent.runId, assignedAgent.agentId],
       );
+      if (!requestedParticipantCode) {
+        const codePrefix = isTestParticipantName(input.data.profile?.fullName ?? "") ? "T" : "P";
+        const numbered = await createParticipantWithAvailableCode(client, experiment.id, codePrefix, participantId);
+        participantCode = numbered.participantCode;
+      }
       return { participantId, participantCode, assignedAgent, snapshot };
     });
 

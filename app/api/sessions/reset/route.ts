@@ -7,9 +7,10 @@ import { ApiError, errorResponse } from "@/lib/http";
 import { getAuthenticatedSession } from "@/lib/session";
 import { SESSION_COOKIE } from "@/lib/security";
 import { clearRuntimeCookie, getRuntimeSession } from "@/lib/runtime-session";
-import { persistTranscript, transcriptInputSchema } from "@/lib/transcript";
+import { persistTranscript, transcriptInputSchema, verifyStoredTranscript } from "@/lib/transcript";
 
 export const runtime = "nodejs";
+export const maxDuration = 120;
 
 export async function POST(request: Request) {
   try {
@@ -33,6 +34,7 @@ export async function POST(request: Request) {
     const input = transcriptInputSchema.safeParse(await request.json().catch(() => ({ messages: [] })));
     if (!input.success) throw new ApiError(400, "INVALID_TRANSCRIPT", input.error.issues[0]?.message ?? "本地对话记录格式无效。");
     const state = await getSessionControls(session);
+    if (runtime?.pendingRequest) throw new ApiError(409, "SESSION_BUSY", "请等待 AI 完成本次回复后再切换参与者。");
 
     await transaction(async (client) => {
       const busy = await client.query<{ exists: boolean }>(
@@ -46,10 +48,14 @@ export async function POST(request: Request) {
       if (busy.rows[0]?.exists) throw new ApiError(409, "SESSION_BUSY", "请等待 AI 完成本次回复后再切换参与者。");
 
       if (state.controls.databaseMessagesEnabled) {
-        await persistTranscript(client, session.id, input.data.messages, {
-          requireComplete: true,
-          storageMode: "participant_switch",
-        });
+        if (input.data.storedMessageCount !== undefined) {
+          await verifyStoredTranscript(client, session.id, input.data.storedMessageCount);
+        } else {
+          await persistTranscript(client, session.id, input.data.messages, {
+            requireComplete: true,
+            storageMode: "participant_switch",
+          });
+        }
       }
 
       await client.query(

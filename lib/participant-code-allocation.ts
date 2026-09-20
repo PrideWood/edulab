@@ -2,7 +2,6 @@ import "server-only";
 
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
-import { formatParticipantCode } from "@/lib/participant-code";
 
 type ParticipantCodePrefix = "P" | "T";
 
@@ -10,6 +9,7 @@ export async function createParticipantWithAvailableCode(
   client: PoolClient,
   experimentId: string,
   prefix: ParticipantCodePrefix,
+  existingParticipantId?: string,
 ) {
   // Serialize allocations for one experiment and prefix. The lock lives until
   // the surrounding transaction commits or rolls back, so concurrent students
@@ -20,13 +20,12 @@ export async function createParticipantWithAvailableCode(
   );
 
   while (true) {
-    const available = await client.query<{ value: string }>(
+    const participant = await client.query<{ id: string; external_code: string }>(
       `WITH used_codes AS (
-         SELECT DISTINCT substring(external_code FROM 2)::bigint AS number
+         SELECT DISTINCT substring(external_code FROM 2)::numeric AS number
          FROM participants
          WHERE experiment_id = $1
-           AND external_code ~ ('^' || $2 || '[0-9]+$')
-           AND substring(external_code FROM 2)::bigint > 0
+           AND external_code ~ ('^' || $2 || '[0-9]*[1-9][0-9]*$')
        ), ordered_codes AS (
          SELECT number, row_number() OVER (ORDER BY number)::bigint AS expected
          FROM used_codes
@@ -37,22 +36,22 @@ export async function createParticipantWithAvailableCode(
          ORDER BY expected
          LIMIT 1
        )
-       SELECT COALESCE(
+       , candidate AS (SELECT COALESCE(
          (SELECT expected FROM first_gap),
          (SELECT count(*)::bigint + 1 FROM ordered_codes),
          1
-       )::text AS value`,
-      [experimentId, prefix],
-    );
-    const participantCode = formatParticipantCode(prefix, available.rows[0]?.value ?? 1);
-    const participant = await client.query<{ id: string }>(
-      `INSERT INTO participants (id, experiment_id, external_code) VALUES ($1, $2, $3)
+       )::text AS value)
+       ${existingParticipantId ? `UPDATE participants SET external_code = $2 || lpad(candidate.value, GREATEST(3, length(candidate.value)), '0')
+       FROM candidate WHERE id=$3 AND experiment_id=$1
+       RETURNING id, external_code` : `INSERT INTO participants (id, experiment_id, external_code)
+       SELECT $3, $1, $2 || lpad(value, GREATEST(3, length(value)), '0') FROM candidate
        ON CONFLICT (experiment_id, external_code) DO NOTHING
-       RETURNING id`,
-      [randomUUID(), experimentId, participantCode],
+       RETURNING id, external_code`}`,
+      [experimentId, prefix, existingParticipantId ?? randomUUID()],
     );
     if (participant.rows[0]) {
-      return { participantId: participant.rows[0].id, participantCode };
+      return { participantId: participant.rows[0].id, participantCode: participant.rows[0].external_code };
     }
+    if (existingParticipantId) throw new Error("PARTICIPANT_NOT_FOUND");
   }
 }

@@ -5,10 +5,11 @@ import { getSessionControls } from "@/lib/experiment-limits";
 import { ApiError, errorResponse } from "@/lib/http";
 import { getAuthenticatedSession } from "@/lib/session";
 import { buildSessionPayload } from "@/lib/session-payload";
-import { persistTranscript, transcriptInputSchema } from "@/lib/transcript";
+import { persistTranscript, transcriptInputSchema, verifyStoredTranscript } from "@/lib/transcript";
 import { getRuntimeSession, setRuntimeCookie } from "@/lib/runtime-session";
 
 export const runtime = "nodejs";
+export const maxDuration = 120;
 
 export async function POST(request: Request) {
   try {
@@ -20,13 +21,20 @@ export async function POST(request: Request) {
     if (!input.success) throw new ApiError(400, "INVALID_TRANSCRIPT", input.error.issues[0]?.message ?? "本地对话记录格式无效。");
     const state = await getSessionControls(session);
     const runtime = await getRuntimeSession();
+    if (runtime?.pendingRequest) throw new ApiError(409, "SESSION_BUSY", "请等待 AI 完成本次回复后再整理记录。");
 
     const completedAt = await transaction(async (client) => {
+      let turnCount = new Set(input.data.messages.map((message) => message.turnIndex)).size;
       if (state.controls.databaseMessagesEnabled) {
-        await persistTranscript(client, session.id, input.data.messages, {
-          requireComplete: true,
-          storageMode: "automatic_completion",
-        });
+        if (input.data.storedMessageCount !== undefined) {
+          const verified = await verifyStoredTranscript(client, session.id, input.data.storedMessageCount);
+          turnCount = verified.turns;
+        } else {
+          await persistTranscript(client, session.id, input.data.messages, {
+            requireComplete: true,
+            storageMode: "automatic_completion",
+          });
+        }
       }
       const result = await client.query<{ completed_at: string }>(
         `UPDATE experiment_sessions SET status = 'completed', completed_at = COALESCE(completed_at, now()), last_activity_at = now(),
@@ -35,8 +43,8 @@ export async function POST(request: Request) {
          WHERE id = $1 AND active_request_id IS NULL RETURNING completed_at`,
         [session.id, JSON.stringify({
           transcript_storage: state.controls.databaseMessagesEnabled ? "database_background_and_completion" : "browser_export_only",
-          transcript_message_count: input.data.messages.length,
-          transcript_turn_count: new Set(input.data.messages.map((message) => message.turnIndex)).size,
+          transcript_message_count: input.data.storedMessageCount ?? input.data.messages.length,
+          transcript_turn_count: turnCount,
           completion_source: "configured_limit",
         }), runtime?.session.publicId === session.publicId ? runtime.session.cozeConversationId : null],
       );
@@ -49,7 +57,7 @@ export async function POST(request: Request) {
       status: "completed",
       activeRequestId: null,
       lastActivityAt: completedAt,
-    }));
+    }, { includeMessages: false }));
     if (runtime) {
       runtime.session.status = "completed";
       runtime.session.lastActivityAt = completedAt;

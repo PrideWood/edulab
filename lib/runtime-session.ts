@@ -28,6 +28,7 @@ export interface RuntimeSessionContext {
   agent: AssignedAgentRuntime;
   usedMessages: number;
   conversationTurnCount: number;
+  lastCompletedRequest?: NonNullable<RuntimeSessionContext["pendingRequest"]>;
   pendingRequest?: {
     clientRequestId: string;
     turnIndex: number;
@@ -40,12 +41,15 @@ export interface RuntimeSessionContext {
 
 function encodeContext(context: RuntimeSessionContext) {
   const encrypted = encryptSecret(JSON.stringify(context));
-  return Buffer.from(JSON.stringify(encrypted), "utf8").toString("base64url");
+  return `v2.${[encrypted.iv, encrypted.tag, encrypted.ciphertext].map(value => Buffer.from(value, 'base64').toString('base64url')).join('.')}`;
 }
 
 function decodeContext(value: string): RuntimeSessionContext | null {
   try {
-    const encrypted = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as EncryptedSecret;
+    const parts = value.split('.');
+    const encrypted = parts[0] === 'v2' && parts.length === 4
+      ? { iv: Buffer.from(parts[1], 'base64url').toString('base64'), tag: Buffer.from(parts[2], 'base64url').toString('base64'), ciphertext: Buffer.from(parts[3], 'base64url').toString('base64') }
+      : JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as EncryptedSecret;
     const context = JSON.parse(decryptSecret(encrypted)) as RuntimeSessionContext;
     if (context.version !== 1 || !context.session?.publicId || !context.config || !context.agent?.botId || !context.agent?.token) return null;
     if (Date.parse(context.expiresAt) <= Date.now()) return null;
@@ -56,7 +60,13 @@ function decodeContext(value: string): RuntimeSessionContext | null {
 }
 
 export async function getRuntimeSession() {
-  return decodeContext((await cookies()).get(RUNTIME_COOKIE)?.value ?? "");
+  const jar = await cookies();
+  let value = jar.get(RUNTIME_COOKIE)?.value ?? "";
+  if (/^chunks:[1-3]$/.test(value)) {
+    const count = Number(value.slice(7));
+    value = Array.from({ length: count }, (_, i) => jar.get(`${RUNTIME_COOKIE}.${i}`)?.value ?? "").join("");
+  }
+  return decodeContext(value);
 }
 
 export function createRuntimeSession(input: {
@@ -89,16 +99,27 @@ export function createRuntimeSession(input: {
 }
 
 export function setRuntimeCookie(response: NextResponse, context: RuntimeSessionContext) {
-  response.cookies.set(RUNTIME_COOKIE, encodeContext(context), {
+  const encoded = encodeContext(context);
+  const chunks = encoded.match(/.{1,3500}/g) ?? [];
+  if (chunks.length > 3) throw new Error("实验配置过大，无法安全保存浏览器会话。请缩短配置内容。");
+  const options = {
     httpOnly: true,
-    sameSite: "lax",
+    sameSite: "lax" as const,
     secure: process.env.NODE_ENV === "production",
     path: "/",
     maxAge: RUNTIME_MAX_AGE_SECONDS,
-  });
+  };
+  response.cookies.set(RUNTIME_COOKIE, chunks.length === 1 ? encoded : `chunks:${chunks.length}`, options);
+  for (let i = 0; i < 3; i++) {
+    const value = chunks.length > 1 ? chunks[i] : undefined;
+    response.cookies.set(`${RUNTIME_COOKIE}.${i}`, value ?? "", { ...options, maxAge: value ? RUNTIME_MAX_AGE_SECONDS : 0 });
+  }
 }
 
 export function clearRuntimeCookie(response: NextResponse) {
+  for (let i = 0; i < 3; i++) response.cookies.set(`${RUNTIME_COOKIE}.${i}`, "", {
+    httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/", maxAge: 0,
+  });
   response.cookies.set(RUNTIME_COOKIE, "", {
     httpOnly: true,
     sameSite: "lax",

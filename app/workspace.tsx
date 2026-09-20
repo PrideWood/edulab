@@ -7,6 +7,7 @@ import type { StoredMessage } from "@/db/schema";
 import type { ExperimentConfig } from "@/config/experiment";
 import type { ParticipantProfile, SessionPayload } from "@/lib/client-types";
 import { buildTranscriptExport, safeExportSegment } from "@/lib/transcript-export";
+import { uploadTranscript } from "@/lib/transcript-upload";
 import { FullscreenController, useFullscreenState } from "./fullscreen-controller";
 
 const OUTBOX_PREFIX = "edulab_pending_message:";
@@ -66,7 +67,9 @@ function writeLocalTranscript(activeSession: SessionPayload["session"], messages
       updatedAt: new Date().toISOString(),
       messages,
     }));
-  } catch { /* The in-memory ledger and export remain available if browser storage is unavailable. */ }
+  } catch {
+    window.dispatchEvent(new Event("edulab-storage-error"));
+  }
 }
 
 function transcriptUploadBody(messages: StoredMessage[]) {
@@ -99,7 +102,8 @@ function downloadFile(filename: string, content: string, type: string) {
 }
 
 async function readResponse(response: Response): Promise<SessionPayload> {
-  const data = await response.json();
+  const data = await response.json().catch(() => null);
+  if (!data) throw new ClientApiError(response.status, "INVALID_RESPONSE", "服务响应中断，请稍后重试；本地记录仍保留。");
   if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "请求失败，请稍后重试。");
   return data;
 }
@@ -161,6 +165,11 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [storageError, setStorageError] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState("");
+  const uploadRef = useRef(false);
+  const sendingRef = useRef(false);
   const [retryContent, setRetryContent] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -271,11 +280,19 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   const pollUntilSettled = useCallback(async () => {
     const expectedSessionId = sessionIdRef.current;
     if (!expectedSessionId) return;
-    for (let attempt = 0; attempt < 45; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+    const deadline = Date.now() + 5 * 60_000;
+    for (let attempt = 0; attempt < 100 && Date.now() < deadline; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(5000, 1500 + attempt * 150) + Math.random() * 700));
       if (sessionIdRef.current !== expectedSessionId) return;
-      const response = await fetch("/api/sessions", { cache: "no-store" });
-      const payload = await readResponse(response);
+      let payload: SessionPayload;
+      try {
+        const response = await fetch("/api/sessions", { cache: "no-store", signal: AbortSignal.timeout(35000) });
+        payload = await readResponse(response);
+      } catch (pollError) {
+        if (pollError instanceof ClientApiError && pollError.status < 500 && pollError.status !== 429) throw pollError;
+        if (pollError instanceof ClientApiError && pollError.code === "COZE_FAILED") throw pollError;
+        continue;
+      }
       if (sessionIdRef.current !== expectedSessionId || payload.session.id !== expectedSessionId) {
         await releaseInvalidatedSession();
         return;
@@ -289,15 +306,20 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   }, [applyPayload, releaseInvalidatedSession]);
 
   const sendWithId = useCallback(async (content: string, clientRequestId: string) => {
+    if (sendingRef.current || uploadRef.current) return;
+    const activeSessionId = sessionIdRef.current;
+    if (!activeSessionId) return;
+    sendingRef.current = true;
+    try {
     restoreComposerFocusRef.current = true;
     setError(null);
     setRetryContent(null);
+    setUploadStatus("");
     setPending(true);
-    const activeSessionId = sessionIdRef.current;
-    if (!activeSessionId) return;
     const turnIndex = Math.max(0, ...messageLedgerRef.current.map((message) => message.turnIndex ?? 0)) + 1;
     const userSequence = Math.max(0, ...messageLedgerRef.current.filter((message) => message.sequenceNo < Number.MAX_SAFE_INTEGER).map((message) => message.sequenceNo)) + 1;
-    localStorage.setItem(outboxKey(activeSessionId), JSON.stringify({ content, clientRequestId }));
+    try { localStorage.setItem(outboxKey(activeSessionId), JSON.stringify({ content, clientRequestId })); }
+    catch { setStorageError(true); }
     if (!messageLedgerRef.current.some((message) => message.clientRequestId === clientRequestId)) {
       const optimisticMessage: StoredMessage = {
         id: `pending-${clientRequestId}`,
@@ -317,6 +339,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
       const response = await fetch("/api/messages", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content, clientRequestId, turnIndex, userSequence }),
+        signal: AbortSignal.timeout(30000),
       });
       const payload = await readResponse(response);
       if (sessionIdRef.current !== activeSessionId || payload.session.id !== activeSessionId) {
@@ -342,6 +365,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
         if (recovered.pending) await pollUntilSettled();
       } catch { /* Keep the saved outbox for a later retry. */ }
     }
+    } finally { sendingRef.current = false; }
   }, [applyPayload, pollUntilSettled, releaseInvalidatedSession]);
 
   useEffect(() => {
@@ -385,7 +409,8 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
         if (outbox && !payload.pending && payload.session.status === "active") {
           const saved = JSON.parse(outbox) as { content?: string; clientRequestId?: string };
           if (saved.content && saved.clientRequestId && !payload.messages.some((message) => message.clientRequestId === saved.clientRequestId)) {
-            await sendWithId(saved.content, saved.clientRequestId);
+            setRetryContent(saved.content);
+            setError("上一条消息尚未确认回复，请先检查记录，再决定是否重新发送。");
           }
         }
       } catch (initialError) {
@@ -396,7 +421,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     }
     void initialize();
     return () => { cancelled = true; };
-  }, [applyPayload, pollUntilSettled, refreshConversations, sendWithId]);
+  }, [applyPayload, pollUntilSettled, refreshConversations]);
 
   useEffect(() => {
     let checking = false;
@@ -481,6 +506,12 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   }
 
   useEffect(() => {
+    const onStorageError = () => setStorageError(true);
+    window.addEventListener("edulab-storage-error", onStorageError);
+    return () => window.removeEventListener("edulab-storage-error", onStorageError);
+  }, []);
+
+  useEffect(() => {
     function warnBeforeLeaving(event: BeforeUnloadEvent) {
       if (activeSessionRef.current?.status !== "active" || messageLedgerRef.current.length === 0) return;
       event.preventDefault();
@@ -489,6 +520,8 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     function uploadBeforeLeaving() {
       if (activeSessionRef.current?.status !== "active" || messageLedgerRef.current.length === 0) return;
       const body = transcriptUploadBody(messageLedgerRef.current);
+      // A full transcript above this size cannot fit the unload queue.
+      if (new Blob([body]).size > 48_000) return;
       const accepted = navigator.sendBeacon("/api/sessions/checkpoint", new Blob([body], { type: "application/json" }));
       if (!accepted) {
         void fetch("/api/sessions/checkpoint", {
@@ -508,30 +541,38 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   }, []);
 
   useEffect(() => {
-    if (!session || session.status !== "active" || pending || (!timeExpired && !messageLimitReached)) return;
+    if (!session || session.status !== "active" || pending || uploading || (!timeExpired && !messageLimitReached)) return;
     if (automaticCompletionRef.current === session.id) return;
     automaticCompletionRef.current = session.id;
+    uploadRef.current = true;
+    setUploading(true);
     void (async () => {
       try {
+        if (controls?.databaseMessagesEnabled) await uploadTranscript(session.id, messageLedgerRef.current);
         const payload = await readResponse(await fetch("/api/sessions/complete", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: transcriptUploadBody(messageLedgerRef.current),
+          body: controls?.databaseMessagesEnabled
+            ? JSON.stringify({ messages: [], storedMessageCount: messageLedgerRef.current.length })
+            : transcriptUploadBody(messageLedgerRef.current),
+          signal: AbortSignal.timeout(90000),
         }));
         applyPayload(payload);
         await refreshConversations().catch(() => undefined);
       } catch {
-        automaticCompletionRef.current = null;
         setError("云端交互记录暂未完成最终整理，本地记录仍已保留，系统将自动重试。");
-        window.setTimeout(() => setFinalizationRetry((value) => value + 1), 5000);
-      }
+        window.setTimeout(() => {
+          automaticCompletionRef.current = null;
+          setFinalizationRetry((value) => value + 1);
+        }, 5000 + Math.random() * 5000);
+      } finally { uploadRef.current = false; setUploading(false); }
     })();
-  }, [applyPayload, finalizationRetry, messageLimitReached, pending, refreshConversations, session, timeExpired]);
+  }, [applyPayload, controls?.databaseMessagesEnabled, finalizationRetry, messageLimitReached, pending, refreshConversations, session, timeExpired, uploading]);
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     const content = text.trim();
-    if (!content || pending || !canChat) return;
+    if (!content || pending || !canChat || uploadRef.current || participantSwitching) return;
     setText("");
     await sendWithId(content, crypto.randomUUID());
   }
@@ -585,7 +626,8 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   }
 
   async function changeConversation(action: { action: "create" } | { action: "switch"; sessionId: string }) {
-    if (pending || conversationBusy || (action.action === "switch" && action.sessionId === session?.id)) return;
+    if (pending || conversationBusy || uploadRef.current || (action.action === "switch" && action.sessionId === session?.id)) return;
+    setUploadStatus("");
     setConversationBusy(true);
     setError(null);
     try {
@@ -604,6 +646,24 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
       }
       setError(conversationError instanceof Error ? conversationError.message : "暂时无法切换对话。");
     } finally { setConversationBusy(false); }
+  }
+
+  async function submitRecords() {
+    if (!session || pending || conversationBusy || participantSwitching || uploadRef.current) return;
+    uploadRef.current = true;
+    setUploading(true); setUploadStatus("正在提交…");
+    try {
+      await uploadAllRecords();
+      setUploadStatus("交互记录已提交");
+    } catch (uploadError) {
+      setUploadStatus(uploadError instanceof Error ? uploadError.message : "提交失败，请重试或下载交互记录。");
+    } finally { uploadRef.current = false; setUploading(false); }
+  }
+
+  async function uploadAllRecords() {
+    if (!session || !controls?.databaseMessagesEnabled) return;
+    const ids = new Set([session.id, ...conversations.map(item => item.id)]);
+    for (const id of ids) await uploadTranscript(id, id === session.id ? messageLedgerRef.current : readLocalTranscript(id));
   }
 
   function exportTranscript() {
@@ -670,17 +730,22 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   }
 
   async function startNextParticipant() {
-    if (!session || pending || participantSwitching) return;
+    if (!session || pending || participantSwitching || uploadRef.current) return;
     const confirmed = window.confirm("仅在实验人员要求时使用。系统将保存当前参与者的交互记录并退出，然后由下一位参与者填写信息。确认继续吗？");
     if (!confirmed) return;
+    uploadRef.current = true;
+    setUploading(true);
     setParticipantSwitching(true);
     setProfileError("");
     try {
       if (controls?.databaseMessagesEnabled === false) exportParticipantArchive();
+      else await uploadAllRecords();
       const response = await fetch("/api/sessions/reset", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: transcriptUploadBody(messageLedgerRef.current),
+        body: controls?.databaseMessagesEnabled
+          ? JSON.stringify({ messages: [], storedMessageCount: messageLedgerRef.current.length })
+          : transcriptUploadBody(messageLedgerRef.current),
       });
       const data = await response.json();
       if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "暂时无法切换参与者。");
@@ -713,6 +778,8 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
       setProfileError(switchError instanceof Error ? switchError.message : "暂时无法切换参与者。");
     } finally {
       setParticipantSwitching(false);
+      uploadRef.current = false;
+      setUploading(false);
     }
   }
 
@@ -735,7 +802,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
             <div className="assistant-title"><div className="assistant-avatar" aria-hidden="true">AI</div><div><p className="assistant-name">{experiment.assistantName}</p><p className="assistant-status">{!participantProfile && session ? "请先填写参与者信息" : session?.status === "completed" || timeExpired || messageLimitReached ? "本次对话已结束" : pending ? "正在思考…" : limitText || "在线"}</p></div></div>
             <div className="session-actions">
               {experiment.taskVisible && <button className="task-toggle-button" onClick={() => setTaskOpen((value) => !value)}>{taskOpen ? "关闭说明" : "任务说明"}</button>}
-              <div className="export-actions"><button onClick={exportTranscript} disabled={!session || messages.length === 0}>下载交互记录</button></div>
+              <div className="export-actions"><button onClick={exportTranscript} disabled={!session || messages.length === 0}>下载交互记录</button>{controls?.databaseMessagesEnabled && <button onClick={() => void submitRecords()} disabled={!session || pending || uploading || messages.length === 0}>{uploading ? "提交中…" : "提交交互记录"}</button>}<span role="status">{uploadStatus}</span></div>
             </div>
           </header>
           <div className="messages" ref={messagesViewRef} aria-live="polite">
@@ -744,6 +811,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
             {messages.length === 0 && !loading && <div className="conversation-welcome" role="note"><p className="welcome-title">你好，我是{experiment.assistantName}。</p><p className="welcome-copy">{experiment.welcome}</p></div>}
             {messages.map((message) => <div className={`message-row ${message.role}`} key={message.id}><div className="message-stack"><div className="bubble"><MessageBody message={message} /></div><div className={`message-time ${message.role}`}>{timeLabel(message.sentAt)}</div></div></div>)}
             {pending && <div className="message-row assistant"><div className="bubble typing" aria-label="AI 正在回复"><span /><span /><span /></div></div>}
+            {storageError && <div className="error-card" role="alert">本机保存空间不可用，请先下载交互记录并联系实验人员，暂勿刷新或关闭页面。</div>}
             {error && <div className="error-card" role="alert"><span>{error}</span>{retryContent && <button onClick={() => sendWithId(retryContent, crypto.randomUUID())} disabled={pending}>重新发送</button>}</div>}
             {loading && <div className="loading-note">正在准备实验会话…</div>}
             {session?.status === "completed" && <div className="completed-card">这个对话已经结束。你可以在左侧查看其他对话。</div>}

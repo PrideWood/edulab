@@ -151,6 +151,7 @@ export async function runCozeChatWithoutDatabase(input: {
   timeoutMs?: number;
   signal?: AbortSignal;
   autoSaveHistory?: boolean;
+  startOnly?: boolean;
 }) {
   const client = new CozeAPI({
     token: input.token,
@@ -167,10 +168,13 @@ export async function runCozeChatWithoutDatabase(input: {
     additional_messages: [{ role: RoleType.User, type: "question", content: input.content, content_type: "text" }],
     meta_data: { edulab_session: input.sessionPublicId, edulab_request: input.clientRequestId },
   }, requestOptions);
+  // Return the provider IDs immediately for student requests. The browser can
+  // recover this chat after refresh instead of holding a 60-second invocation.
+  if (input.startOnly) return { pending: true as const, chat, messages: [] as StoredMessage[] };
   const deadline = Date.now() + (input.timeoutMs ?? 45_000);
   let current = chat;
   while (!TERMINAL.has(current.status) && Date.now() < deadline) {
-    await delay(400);
+    await delay(1200 + Math.floor(Math.random() * 600));
     current = await client.chat.retrieve(chat.conversation_id, chat.id, requestOptions);
   }
   if (!TERMINAL.has(current.status)) {
