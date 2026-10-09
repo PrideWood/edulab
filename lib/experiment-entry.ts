@@ -20,13 +20,13 @@ export async function getExperimentEntry(token: string): Promise<ExperimentEntry
   if (!normalized) throw new ApiError(404, "ENTRY_NOT_FOUND", "实验链接不存在，请检查教师提供的链接。");
   type EntryRow = { id: string; experiment_id: string; entry_token: string; status: ExperimentEntry["status"]; config_snapshot: ExperimentSessionSnapshot | null };
   const result = await query<EntryRow>(
-    "SELECT id, experiment_id, entry_token, status, config_snapshot FROM experiment_runs WHERE entry_token=$1", [normalized]);
+    "SELECT id, experiment_id, entry_token, status, config_snapshot FROM experiment_runs WHERE entry_token=$1 AND entry_deleted_at IS NULL", [normalized]);
   let row = result.rows[0];
   // Only legacy links need an alias lookup; current four-character links use
   // the existing unique index. The session remains bound to the same run.
   if (!row && normalized.length !== 4) {
     const legacy = await query<EntryRow>(`SELECT id, experiment_id, entry_token, status, config_snapshot
-      FROM experiment_runs WHERE metadata->'entry_token_aliases' ? $1`, [normalized]);
+      FROM experiment_runs WHERE entry_deleted_at IS NULL AND metadata->'entry_token_aliases' ? $1`, [normalized]);
     row = legacy.rows[0];
   }
   if (!row) throw new ApiError(404, "ENTRY_NOT_FOUND", "实验链接不存在，请检查教师提供的链接。");

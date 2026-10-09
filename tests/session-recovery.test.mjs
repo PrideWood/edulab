@@ -7,23 +7,25 @@ import ts from 'typescript';
 import pg from 'pg';
 import { z } from 'zod';
 import * as fflate from 'fflate';
+import { formatAgentTestFailure } from '../lib/agent-test-error.js';
 
 // Run actual application SQL against a disposable, uniquely named schema.
 // Every connection explicitly uses ONLY that schema; no public table is touched.
-async function harness(db) {
+async function harness(db, sharedSources) {
   const files = ['config/experiment.ts', 'lib/security.ts', 'lib/secret-crypto.ts',
     'lib/session.ts', 'lib/session-usage.ts', 'lib/session-write.ts', 'lib/http.ts', 'lib/admin-auth.ts',
     'lib/participant-profile.ts', 'lib/participant-code-allocation.ts', 'lib/agent-control.ts',
     'lib/experiment-settings.ts', 'lib/experiment-limits.ts', 'lib/messages.ts', 'lib/coze.ts',
     'lib/transcript.ts', 'lib/session-payload.ts', 'lib/runtime-session.ts', 'lib/session-draft.ts',
     'lib/participant-recovery.ts', 'lib/experiment-entry.ts', 'lib/entry-links.ts', 'lib/entry-token.ts', 'lib/experiments.ts',
-    'lib/admin-export.ts', 'lib/transcript-export.ts', 'lib/admin-records.ts', 'app/api/admin/experiments/route.ts', 'app/api/admin/participants/route.ts',
+    'lib/admin-export.ts', 'lib/transcript-export.ts', 'lib/admin-records.ts', 'app/api/admin/agent-control/route.ts', 'app/api/admin/experiments/route.ts', 'app/api/admin/participants/route.ts',
     'app/api/participant-profile/route.ts', 'app/api/sessions/reset/route.ts', 'lib/legacy-runtime.ts', 'app/api/sessions/route.ts',
     'app/api/sessions/resume/route.ts', 'app/api/sessions/draft/route.ts',
     'app/api/sessions/complete/route.ts', 'app/api/sessions/checkpoint/route.ts', 'app/api/messages/route.ts', 'app/api/conversations/route.ts'];
-  const sources = new Map(await Promise.all(files.map(async file => [file,
+  const sources = sharedSources ?? new Map(await Promise.all(files.map(async file => [file,
     ts.transpileModule(await readFile(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText])));
   const jar = new Map(), cache = new Map(), chats = new Map(), creates = [];
+  const forcedDraws = [];
   let providerPending = false;
   class CozeAPI {
     chat = {
@@ -41,7 +43,8 @@ async function harness(db) {
     };
   }
   const mocks = {
-    'server-only': {}, fflate, 'node:crypto': crypto, zod: { z }, '@/db': db,
+    'server-only': {}, fflate, 'node:crypto': { ...crypto, randomInt: max => forcedDraws.length ? forcedDraws.shift() : crypto.randomInt(max) }, zod: { z }, '@/db': db,
+    '@/lib/agent-test-error': { formatAgentTestFailure },
     '@/lib/participant-code': { isTestParticipantName: value => ['test','测试','ceshi'].includes(value.trim().toLowerCase()) },
     'next/headers': { cookies: async () => ({ get: key => jar.has(key) ? { value: jar.get(key) } : undefined }) },
     'next/server': { NextResponse: { json: (body, options = {}) => ({ body:JSON.parse(JSON.stringify(body)), status: options.status ?? 200, cookies: { set: (key, value, opts) => opts.maxAge === 0 ? jar.delete(key) : jar.set(key, value) } }) } },
@@ -63,7 +66,8 @@ async function harness(db) {
     return exports;
   }
   const request = (body, url = 'http://localhost/api/sessions') => ({ url, headers: new Headers({ origin:'http://localhost' }), json:async () => JSON.parse(JSON.stringify(body)) });
-  return { load, jar, request, creates, setPending:value => { providerPending = value; } };
+  return { load, jar, request, creates, sources, setPending:value => { providerPending = value; },
+    forceToken:value => forcedDraws.push(...[...value].map(char => 'abcdefghjkmnpqrstuvwxyz23456789'.indexOf(char))) };
 }
 
 test('recovery SQL integration preserves participants, context, drafts, assignments and idempotency', { skip: !process.env.DATABASE_URL }, async t => {
@@ -83,7 +87,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
     assert.equal((await pool.query('SELECT current_schema() AS name')).rows[0].name, schema);
     const migrations = (await readdir('db/migrations')).filter(file => file.endsWith('.sql')).sort();
     for (const file of migrations) await pool.query(await readFile(`db/migrations/${file}`, 'utf8'));
-    let failMessageWrite = false;
+    let failMessageWrite = false, failLinkDeleteAudit = false;
     const query = async (sql, values) => {
       if (failMessageWrite && /INSERT INTO messages/.test(sql)) throw new Error('synthetic database write failure');
       return pool.query(sql, values);
@@ -92,6 +96,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       const client = await pool.connect();
       const facade = { query:async (sql, values) => {
         if (failMessageWrite && /INSERT INTO messages/.test(sql)) throw new Error('synthetic database write failure');
+        if (failLinkDeleteAudit && /INSERT INTO admin_audit_log/.test(sql) && sql.includes('experiment.run.link.delete')) throw new Error('synthetic audit write failure');
         return client.query(sql, values);
       } };
       try { await client.query('BEGIN'); const value = await work(facade); await client.query('COMMIT'); return value; }
@@ -486,6 +491,140 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       const csv = await exp.buildIdentityMappingCsv({ experimentId:study.id,runId:groups[0].id,participantIds:[participantA],adminUserId:adminId });
       assert.ok(csv.content.includes('link-001'));
       assert.equal(csv.content.includes('link-002'),false);
+    });
+    const lifecycleApi = h.load('app/api/admin/agent-control/route.ts');
+    const adminRequest = (body,experimentId=study.id) => h.request(body,`http://localhost/api/admin/agent-control?experimentId=${experimentId}`);
+    await t.test('reopening requires admin, preserves the same link, snapshot and completed sessions', async () => {
+      h.jar.delete('edulab_admin');
+      assert.equal((await lifecycleApi.POST(adminRequest({ action:'reopen_run',runId:groups[0].id }))).status,401);
+      asAdmin();
+      assert.equal((await lifecycleApi.POST(adminRequest({ action:'reopen_run',runId:groups[0].id },otherStudy.id))).status,404);
+      const before = (await pool.query('SELECT config_snapshot,opened_at FROM experiment_runs WHERE id=$1',[groups[0].id])).rows[0];
+      const sessionsBefore = (await pool.query('SELECT * FROM experiment_sessions WHERE experiment_run_id=$1 ORDER BY id',[groups[0].id])).rows;
+      const response = await lifecycleApi.POST(adminRequest({ action:'reopen_run',runId:groups[0].id }));
+      assert.equal(response.status,200);
+      const run = response.body.control.runs.find(run => run.id === groups[0].id);
+      assert.equal(run.status,'active');
+      assert.equal(run.entryToken,groups[0].entryToken);
+      assert.equal(run.closedAt,null);
+      assert.deepEqual((await pool.query('SELECT config_snapshot,opened_at FROM experiment_runs WHERE id=$1',[run.id])).rows[0],before);
+      assert.deepEqual((await pool.query('SELECT * FROM experiment_sessions WHERE experiment_run_id=$1 ORDER BY id',[run.id])).rows,sessionsBefore);
+      assert.equal((await sessions.GET(scopedRequest(groups[0],{}))).body.session.status,'completed');
+    });
+    await t.test('simultaneous signups across fixed and balanced groups share one experiment-wide numbering sequence', async () => {
+      const browsers = await Promise.all(Array.from({ length:12 },() => harness(db,h.sources)));
+      const results = await Promise.all(browsers.map((browser,index) => {
+        const group = groups[index%3];
+        return browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'并发学生',studentNumber:`parallel-${index}` } },`http://localhost/api/sessions?entry=${group.entryToken}`));
+      }));
+      assert.ok(results.every(response => response.status === 201));
+      const codes = results.map(response => response.body.session.participantCode);
+      assert.equal(new Set(codes).size,12);
+      assert.deepEqual(codes.sort(),Array.from({ length:12 },(_,index) => `P${String(index+3).padStart(3,'0')}`));
+      results.forEach((response,index) => {
+        assert.equal(response.body.session.experimentRunId,groups[index%3].id);
+        if (index%3 !== 2) assert.equal(response.body.session.agentId,groups[index%3].fixedAgentId);
+      });
+      const counts = (await pool.query('SELECT count(*)::int AS n FROM participant_agent_assignments WHERE experiment_run_id=$1 GROUP BY agent_id',[groups[2].id])).rows;
+      assert.deepEqual(counts.map(row => row.n).sort(),[2,2]);
+      await assert.rejects(() => pool.query('INSERT INTO participants (id,experiment_id,external_code) VALUES ($1,$2,$3)',[crypto.randomUUID(),study.id,'P001']),error => error.code === '23505');
+    });
+    let staleB;
+    await t.test('link deletion rejects active enrollment, wrong confirmation and in-flight AI without changing records', async () => {
+      assert.equal((await lifecycleApi.POST(adminRequest({ action:'delete_run_link',runId:groups[1].id,confirmationCode:groups[1].entryToken }))).status,409);
+      assert.equal((await resume.POST(scopedRequest(groups[1],{ participantCode:'P002',identity:'link-002' },'/api/sessions/resume'))).status,200);
+      h.setPending(true);
+      assert.equal((await messages.POST(scopedRequest(groups[1],{ clientRequestId:crypto.randomUUID(),content:'等待中的回复' },'/api/messages'))).status,202);
+      assert.equal((await lifecycleApi.POST(adminRequest({ action:'close_active_run',runId:groups[1].id }))).status,200);
+      assert.equal((await lifecycleApi.POST(adminRequest({ action:'delete_run_link',runId:groups[1].id,confirmationCode:'wrong' }))).status,400);
+      const before = (await pool.query('SELECT * FROM experiment_sessions WHERE experiment_run_id=$1 ORDER BY id',[groups[1].id])).rows;
+      const rejected = await lifecycleApi.POST(adminRequest({ action:'delete_run_link',runId:groups[1].id,confirmationCode:groups[1].entryToken }));
+      assert.equal(rejected.status,409);
+      assert.equal(rejected.body.error.code,'RUN_BUSY');
+      assert.deepEqual((await pool.query('SELECT * FROM experiment_sessions WHERE experiment_run_id=$1 ORDER BY id',[groups[1].id])).rows,before);
+      assert.equal((await entries.getExperimentEntry(groups[1].entryToken)).runId,groups[1].id);
+      h.setPending(false);
+      assert.equal((await sessions.GET(scopedRequest(groups[1],{}))).body.messages.length,2);
+      staleB = await auth.getAuthenticatedSession(await entries.getExperimentEntry(groups[1].entryToken));
+    });
+    await t.test('continue enrollment validates original agents, is idempotent and does not restart numbering', async () => {
+      await pool.query('UPDATE ai_agent_configs SET enabled=false WHERE id=$1',[groups[1].fixedAgentId]);
+      const rejected = await lifecycleApi.POST(adminRequest({ action:'reopen_run',runId:groups[1].id }));
+      assert.equal(rejected.status,409);
+      assert.equal(rejected.body.error.code,'RUN_AGENT_UNAVAILABLE');
+      await pool.query('UPDATE ai_agent_configs SET enabled=true WHERE id=$1',[groups[1].fixedAgentId]);
+      const before = (await pool.query('SELECT config_snapshot,opened_at FROM experiment_runs WHERE id=$1',[groups[1].id])).rows[0];
+      for (let i=0;i<2;i++) assert.equal((await lifecycleApi.POST(adminRequest({ action:'reopen_run',runId:groups[1].id }))).status,200);
+      assert.deepEqual((await pool.query('SELECT config_snapshot,opened_at FROM experiment_runs WHERE id=$1',[groups[1].id])).rows[0],before);
+      assert.equal((await pool.query("SELECT count(*)::int AS n FROM admin_audit_log WHERE action='experiment.run.reopen' AND after_data->>'id'=$1",[groups[1].id])).rows[0].n,1);
+      const browser = await harness(db,h.sources);
+      const created = await browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'继续报名的学生',studentNumber:'parallel-continue' } },`http://localhost/api/sessions?entry=${groups[1].entryToken}`));
+      assert.equal(created.status,201);
+      assert.equal(created.body.session.participantCode,'P015');
+      assert.equal(created.body.session.agentId,groups[1].fixedAgentId);
+    });
+    await t.test('deleting a finished link frees its code, retains research data and revokes stale writes', async () => {
+      const revision = (await sessions.GET(scopedRequest(groups[1],{}))).body.draft.revision;
+      assert.equal((await draft.PUT(scopedRequest(groups[1],{ sessionId:linkedB.body.session.id,text:'保留的草稿',revision },'/api/sessions/draft'))).status,200);
+      assert.equal((await complete.POST(scopedRequest(groups[1],{ messages:[],storedMessageCount:2 },'/api/sessions/complete'))).status,200);
+      await pool.query(`UPDATE experiment_runs SET metadata=metadata || '{"entry_token_aliases":["qrst-2345"]}'::jsonb WHERE id=$1`,[groups[1].id]);
+      const preserved = async () => ({
+        participants:(await pool.query('SELECT * FROM participants WHERE experiment_id=$1 ORDER BY id',[study.id])).rows,
+        assignments:(await pool.query('SELECT * FROM participant_agent_assignments WHERE experiment_run_id=$1 ORDER BY id',[groups[1].id])).rows,
+        messages:(await pool.query('SELECT m.* FROM messages m JOIN experiment_sessions s ON s.id=m.session_id WHERE s.experiment_run_id=$1 ORDER BY m.id',[groups[1].id])).rows,
+        requests:(await pool.query('SELECT r.* FROM chat_requests r JOIN experiment_sessions s ON s.id=r.session_id WHERE s.experiment_run_id=$1 ORDER BY r.id',[groups[1].id])).rows,
+        sessions:(await pool.query('SELECT * FROM experiment_sessions WHERE experiment_run_id=$1 ORDER BY id',[groups[1].id])).rows,
+        snapshot:(await pool.query('SELECT config_snapshot,fixed_agent_id,random_agent_ids FROM experiment_runs WHERE id=$1',[groups[1].id])).rows,
+      });
+      const before = await preserved();
+      assert.equal((await lifecycleApi.POST(adminRequest({ action:'close_active_run',runId:groups[1].id }))).status,200);
+      assert.equal((await lifecycleApi.POST(adminRequest({ action:'delete_run_link',runId:groups[1].id,confirmationCode:groups[1].entryToken },otherStudy.id))).status,404);
+      failLinkDeleteAudit = true;
+      assert.equal((await lifecycleApi.POST(adminRequest({ action:'delete_run_link',runId:groups[1].id,confirmationCode:groups[1].entryToken }))).status,500);
+      failLinkDeleteAudit = false;
+      assert.deepEqual(await preserved(),before);
+      assert.equal((await entries.getExperimentEntry(groups[1].entryToken)).runId,groups[1].id);
+      const response = await lifecycleApi.POST(adminRequest({ action:'delete_run_link',runId:groups[1].id,confirmationCode:groups[1].entryToken.toUpperCase() }));
+      assert.equal(response.status,200);
+      const deleted = response.body.control.runs.find(run => run.id === groups[1].id);
+      assert.equal(deleted.entryToken,null);
+      assert.ok(deleted.entryDeletedAt);
+      assert.equal(deleted.status,'closed');
+      const after = await preserved();
+      for (const key of ['participants','assignments','messages','requests','snapshot']) assert.deepEqual(after[key],before[key]);
+      const content = session => Object.fromEntries(Object.entries(session).filter(([key]) => !["status","completed_at","session_secret_hash","metadata"].includes(key)));
+      assert.deepEqual(after.sessions.map(content),before.sessions.map(content));
+      assert.ok(after.sessions.every(session => session.status === 'completed' && session.completed_at));
+      for (const session of before.sessions.filter(session => session.status === 'completed')) assert.equal(after.sessions.find(row => row.id === session.id).completed_at.getTime(),session.completed_at.getTime());
+      assert.equal((await sessions.GET(scopedRequest(groups[1],{}))).status,404);
+      await assert.rejects(() => entries.getExperimentEntry('qrst2345'),error => error.code === 'ENTRY_NOT_FOUND');
+      assert.equal((await lifecycleApi.POST(adminRequest({ action:'reopen_run',runId:groups[1].id }))).status,409);
+      await assert.rejects(() => h.load('lib/session-write.ts').sessionTransaction(staleB,async () => {}),error => error.code === 'SESSION_REPLACED');
+      const directory = await h.load('app/api/admin/participants/route.ts').GET(h.request({},`http://localhost/api/admin/participants?experimentId=${study.id}&runId=${groups[1].id}`));
+      assert.equal(directory.status,200);
+      assert.equal(directory.body.participants.length,6);
+      const archive = await h.load('lib/admin-export.ts').buildInteractionArchive({ experimentId:study.id,runId:groups[1].id,participantIds:[participantB],adminUserId:adminId });
+      assert.equal(JSON.parse(fflate.strFromU8(fflate.unzipSync(archive.bytes)['manifest.json'])).messageCount,2);
+      const audit = (await pool.query("SELECT before_data,after_data FROM admin_audit_log WHERE action='experiment.run.link.delete' AND before_data->>'id'=$1",[groups[1].id])).rows[0];
+      assert.equal(audit.before_data.entryToken,groups[1].entryToken);
+      assert.deepEqual(audit.before_data.entryTokenAliases,['qrst-2345']);
+      assert.equal(audit.after_data.preservedSessionCount,6);
+    });
+    await t.test('a released four-character code can be allocated again without authenticating or merging old participants', async () => {
+      h.forceToken(groups[1].entryToken);
+      const replacement = await control.activateExperimentRun({ experimentId:study.id,name:'新的实验入口',assignmentMode:'fixed',fixedAgentId:groups[0].fixedAgentId,randomAgentIds:[],makeDefault:false },adminId);
+      assert.equal(replacement.entryToken,groups[1].entryToken);
+      assert.notEqual(replacement.id,groups[1].id);
+      assert.equal((await sessions.GET(scopedRequest(replacement,{}))).status,401);
+      assert.equal((await resume.POST(scopedRequest(replacement,{ participantCode:'P002',identity:'link-002' },'/api/sessions/resume'))).status,404);
+      const browser = await harness(db,h.sources);
+      const created = await browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'新入口学生',studentNumber:'parallel-reuse' } },`http://localhost/api/sessions?entry=${replacement.entryToken}`));
+      assert.equal(created.status,201);
+      assert.equal(created.body.session.participantCode,'P016');
+      assert.equal(created.body.session.experimentRunId,replacement.id);
+      assert.equal(created.body.session.agentId,groups[0].fixedAgentId);
+      const counts = (await pool.query('SELECT count(*)::int AS total,count(DISTINCT external_code)::int AS distinct_codes FROM participants WHERE experiment_id=$1',[study.id])).rows[0];
+      assert.deepEqual(counts,{ total:16,distinct_codes:16 });
     });
   } finally {
     if (pool) await pool.end();

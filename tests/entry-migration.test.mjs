@@ -61,6 +61,20 @@ test('entry migration preserves historical records, gives distinct short codes a
     // Applying the migration again keeps already shortened links stable.
     await client.query(await readFile('db/migrations/0012_four_character_entry_links.sql','utf8'));
     assert.deepEqual((await client.query('SELECT * FROM experiment_runs ORDER BY id')).rows,shortened);
+    const lifecycleSql = await readFile('db/migrations/0013_experiment_link_lifecycle.sql','utf8');
+    await client.query(lifecycleSql);
+    await client.query(lifecycleSql);
+    assert.deepEqual((await client.query('SELECT * FROM participants')).rows,originalParticipant);
+    assert.deepEqual((await client.query('SELECT * FROM experiment_sessions')).rows,originalSessions);
+    const migrated = (await client.query('SELECT * FROM experiment_runs ORDER BY id')).rows;
+    assert.deepEqual(migrated.map(run => Object.fromEntries(Object.entries(run).filter(([key]) => key !== "entry_deleted_at"))),shortened);
+    assert.ok(migrated.every(run => run.entry_deleted_at === null));
+    const released = migrated.find(run => run.id === activeId).entry_token;
+    await client.query("UPDATE experiment_runs SET status='closed',is_default=false,entry_token=NULL,entry_deleted_at=now() WHERE id=$1",[activeId]);
+    await client.query("INSERT INTO experiment_runs (id,experiment_id,name,status,assignment_mode,fixed_agent_id,entry_token) VALUES ($1,'legacy-study','复用入口码','active','fixed',$2,$3)",[randomUUID(),agentId,released]);
+    assert.deepEqual((await client.query('SELECT * FROM experiment_sessions')).rows,originalSessions);
+    await assert.rejects(() => client.query("UPDATE experiment_runs SET status='active' WHERE id=$1",[activeId]),error => error.code === '23514');
+    await assert.rejects(() => client.query("INSERT INTO experiment_runs (id,experiment_id,name,status,assignment_mode,fixed_agent_id,entry_token) VALUES ($1,'legacy-study','重复入口码','closed','fixed',$2,$3)",[randomUUID(),agentId,released]),error => error.code === '23505');
   } finally {
     await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     await client.end();

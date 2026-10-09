@@ -6,6 +6,7 @@ import { query, transaction } from "@/db";
 import { buildSessionSnapshot, getExperimentSettings } from "@/lib/experiment-settings";
 import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 import { createRunEntryToken } from "@/lib/entry-token";
+import { hashSecret } from "@/lib/security";
 
 export type AssignmentMode = "fixed" | "balanced_random";
 
@@ -31,7 +32,8 @@ export interface ExperimentRunSummary {
   openedAt: string | null;
   closedAt: string | null;
   createdAt: string;
-  entryToken: string;
+  entryToken: string | null;
+  entryDeletedAt: string | null;
   isDefault: boolean;
 }
 
@@ -59,7 +61,8 @@ interface RunRow {
   opened_at: string | null;
   closed_at: string | null;
   created_at: string;
-  entry_token: string;
+  entry_token: string | null;
+  entry_deleted_at: string | null;
   is_default: boolean;
 }
 
@@ -89,6 +92,7 @@ function mapRun(row: RunRow): ExperimentRunSummary {
     closedAt: row.closed_at,
     createdAt: row.created_at,
     entryToken: row.entry_token,
+    entryDeletedAt: row.entry_deleted_at ?? null,
     isDefault: row.is_default,
   };
 }
@@ -121,7 +125,7 @@ export async function getAgentControl(experimentId: string) {
     ),
     query<RunRow>(
       `SELECT id, name, status, assignment_mode, fixed_agent_id, random_agent_ids,
-         opened_at, closed_at, created_at, entry_token, is_default
+         opened_at, closed_at, created_at, entry_token, is_default, entry_deleted_at
        FROM experiment_runs WHERE experiment_id = $1
        ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'draft' THEN 1 ELSE 2 END, created_at DESC`,
       [experimentId],
@@ -321,7 +325,7 @@ export async function activateExperimentRun(input: {
          random_agent_ids, opened_at, updated_by, entry_token, is_default, config_snapshot
        ) VALUES ($1,$2,$3,'active',$4,$5,$6::uuid[],now(),$7,$8,$9,$10::jsonb)
        RETURNING id, name, status, assignment_mode, fixed_agent_id, random_agent_ids,
-         opened_at, closed_at, created_at, entry_token, is_default`,
+         opened_at, closed_at, created_at, entry_token, is_default, entry_deleted_at`,
       [randomUUID(), input.experimentId, input.name, input.assignmentMode,
         input.assignmentMode === "fixed" ? input.fixedAgentId : null,
         input.assignmentMode === "balanced_random" ? selectedIds : [], adminUserId, entryToken, makeDefault, JSON.stringify(snapshot)],
@@ -341,7 +345,7 @@ export async function closeActiveExperimentRun(experimentId: string, adminUserId
       `UPDATE experiment_runs SET status = 'closed', closed_at = now(), updated_at = now(), updated_by = $2
        WHERE experiment_id = $1 AND status = 'active' AND (($3::uuid IS NULL AND is_default=true) OR id=$3)
        RETURNING id, name, status, assignment_mode, fixed_agent_id, random_agent_ids,
-         opened_at, closed_at, created_at, entry_token, is_default`,
+         opened_at, closed_at, created_at, entry_token, is_default, entry_deleted_at`,
       [experimentId, adminUserId, runId ?? null],
     );
     if (closed.rows[0]) {
@@ -365,6 +369,79 @@ export interface AssignedAgentRuntime {
   baseUrl: string;
   botId: string;
   token: string;
+}
+
+const LIFECYCLE_RUN_SELECT = `SELECT id, name, status, assignment_mode, fixed_agent_id,
+  random_agent_ids, opened_at, closed_at, created_at, entry_token, is_default, entry_deleted_at,
+  metadata FROM experiment_runs WHERE id=$1 AND experiment_id=$2`;
+
+export async function reopenExperimentRun(experimentId: string, runId: string, adminUserId: string) {
+  return transaction(async (client) => {
+    const initial = (await client.query<RunRow>(LIFECYCLE_RUN_SELECT, [runId, experimentId])).rows[0];
+    if (!initial) throw new Error("RUN_NOT_FOUND");
+    if (initial.entry_deleted_at) throw new Error("RUN_ENTRY_DELETED");
+    const agentIds = initial.assignment_mode === "fixed"
+      ? (initial.fixed_agent_id ? [initial.fixed_agent_id] : []) : initial.random_agent_ids;
+    // Use the same agent-before-run lock order as activation and agent edits.
+    const valid = await client.query(`SELECT id FROM ai_agent_configs
+      WHERE experiment_id=$1 AND enabled=true AND id=ANY($2::uuid[]) FOR SHARE`, [experimentId, agentIds]);
+    if (!agentIds.length || valid.rows.length !== agentIds.length) throw new Error("RUN_AGENT_UNAVAILABLE");
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`edulab:run:${experimentId}`]);
+    const current = (await client.query<RunRow>(`${LIFECYCLE_RUN_SELECT} FOR UPDATE`, [runId, experimentId])).rows[0];
+    if (!current) throw new Error("RUN_NOT_FOUND");
+    if (current.entry_deleted_at) throw new Error("RUN_ENTRY_DELETED");
+    if (current.status === "active") return mapRun(current);
+    await client.query(`UPDATE experiment_runs SET status='active', closed_at=NULL,
+      opened_at=COALESCE(opened_at,now()), is_default=false, updated_at=now(), updated_by=$2 WHERE id=$1`, [runId, adminUserId]);
+    const after = (await client.query<RunRow>(LIFECYCLE_RUN_SELECT, [runId, experimentId])).rows[0];
+    await client.query(`INSERT INTO admin_audit_log (id,admin_user_id,action,experiment_id,before_data,after_data)
+      VALUES ($1,$2,'experiment.run.reopen',$3,$4::jsonb,$5::jsonb)`,
+    [randomUUID(),adminUserId,experimentId,JSON.stringify(mapRun(current)),JSON.stringify(mapRun(after))]);
+    return mapRun(after);
+  });
+}
+
+export async function deleteExperimentRunLink(input: {
+  experimentId: string; runId: string; confirmationCode: string;
+}, adminUserId: string) {
+  return transaction(async (client) => {
+    // Share the allocation lock so a released code is reused only after COMMIT.
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`edulab:run:${input.experimentId}`]);
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended('edulab:entry-links',0))");
+    const run = (await client.query<RunRow & { metadata: Record<string, unknown> }>(
+      `${LIFECYCLE_RUN_SELECT} FOR UPDATE`, [input.runId, input.experimentId])).rows[0];
+    if (!run) throw new Error("RUN_NOT_FOUND");
+    if (run.entry_deleted_at) throw new Error("RUN_ENTRY_DELETED");
+    if (run.status !== "closed") throw new Error("RUN_NOT_CLOSED");
+    if (input.confirmationCode.trim().toLowerCase() !== run.entry_token) throw new Error("RUN_CONFIRMATION_MISMATCH");
+    // Student writes and recovery hold these participant locks. Ending a run
+    // cannot race a new send, conversation creation, draft save or recovery.
+    await client.query(`SELECT p.id FROM participants p WHERE EXISTS (
+      SELECT 1 FROM experiment_sessions s WHERE s.participant_id=p.id AND s.experiment_run_id=$1)
+      ORDER BY p.id FOR UPDATE`, [input.runId]);
+    const sessions = await client.query<{ id: string; active_request_id: string | null }>(
+      "SELECT id,active_request_id FROM experiment_sessions WHERE experiment_run_id=$1 ORDER BY id FOR UPDATE", [input.runId]);
+    const busy = await client.query<{ exists: boolean }>(`SELECT EXISTS (
+      SELECT 1 FROM chat_requests request JOIN experiment_sessions s ON s.id=request.session_id
+      WHERE s.experiment_run_id=$1 AND request.status='in_progress') AS exists`, [input.runId]);
+    if (sessions.rows.some((session) => session.active_request_id) || busy.rows[0].exists) throw new Error("RUN_BUSY");
+    // The teacher confirms completion. Keep saved content, times, assignments
+    // and provider IDs, while revoking all old write credentials for this run.
+    await client.query(`UPDATE experiment_sessions SET status='completed',
+      completed_at=COALESCE(completed_at,now()), session_secret_hash=$2,
+      metadata=metadata || jsonb_build_object('entry_deleted_at',now()) || CASE WHEN status='active'
+        THEN '{"end_reason":"entry_deleted_by_admin","completion_source":"admin_entry_delete"}'::jsonb ELSE '{}'::jsonb END
+      WHERE experiment_run_id=$1`, [input.runId,hashSecret(randomUUID())]);
+    await client.query(`UPDATE experiment_runs SET entry_token=NULL, entry_deleted_at=now(),
+      is_default=false, updated_at=now(), updated_by=$2, metadata=metadata-'entry_token_aliases' WHERE id=$1`, [input.runId,adminUserId]);
+    const after = (await client.query<RunRow>(LIFECYCLE_RUN_SELECT, [input.runId, input.experimentId])).rows[0];
+    await client.query(`INSERT INTO admin_audit_log (id,admin_user_id,action,experiment_id,before_data,after_data)
+      VALUES ($1,$2,'experiment.run.link.delete',$3,$4::jsonb,$5::jsonb)`,
+    [randomUUID(),adminUserId,input.experimentId,
+      JSON.stringify({ ...mapRun(run),entryTokenAliases:run.metadata.entry_token_aliases ?? [] }),
+      JSON.stringify({ ...mapRun(after),preservedSessionCount:sessions.rows.length })]);
+    return mapRun(after);
+  });
 }
 
 export async function assignAgentWithClient(

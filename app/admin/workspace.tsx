@@ -19,7 +19,7 @@ type AgentSummary = {
 type RunSummary = {
   id: string; name: string; status: "draft" | "active" | "closed";
   assignmentMode: "fixed" | "balanced_random"; fixedAgentId: string | null;
-  entryToken: string; isDefault: boolean;
+  entryToken: string | null; entryDeletedAt: string | null; isDefault: boolean;
   randomAgentIds: string[]; openedAt: string | null; closedAt: string | null; createdAt: string;
 };
 type AgentControl = { agents: AgentSummary[]; runs: RunSummary[]; activeRun: RunSummary | null };
@@ -190,7 +190,7 @@ export function AdminWorkspace() {
         <header className="admin-header"><div><p className="admin-kicker">{section === "participants" ? "研究数据" : "实验配置"}</p><h1>{sections.find((item) => item.id === section)?.label}</h1></div><div className="admin-header-actions">{section === "participants" ? <><span className="save-state">身份信息与对话记录分开保存</span><button className="admin-refresh" onClick={() => void loadParticipants()} disabled={participantsLoading}>{participantsLoading ? "读取中…" : "刷新"}</button></> : section === "ai" ? <span className="save-state">各组链接固定对应智能体</span> : <><span className={error ? "save-state error" : "save-state"}>{error || status || "设置只影响新创建的会话"}</span><button className="admin-save" onClick={save} disabled={saving}>{saving ? "保存中…" : "保存设置"}</button></>}</div></header>
         <div className={`admin-content ${section === "ai" ? "wide" : ""}`}>
           {creatingExperiment && <section className="settings-card"><h2>新增实验</h2><p>复制当前实验的任务、规则与智能体配置；新实验的修改和数据独立保存，不复制被试记录或场次。</p><form className="new-experiment-form" onSubmit={addExperiment}><label>实验名称<input value={newExperimentName} maxLength={120} required onChange={(event) => setNewExperimentName(event.target.value)} /></label><button className="admin-save" disabled={saving || !newExperimentName.trim()}>创建实验</button></form>{error && <p role="alert">{error}</p>}</section>}
-          {section === "participants" && <label className="run-filter">查看分组入口<select value={runFilter} onChange={(event) => { setRunFilter(event.target.value); runFilterRef.current=event.target.value; setParticipants([]); void loadParticipants(); }}><option value="">全部分组</option>{runs.map((run) => <option key={run.id} value={run.id}>{run.name}</option>)}</select></label>}
+          {section === "participants" && <label className="run-filter">查看分组入口<select value={runFilter} onChange={(event) => { setRunFilter(event.target.value); runFilterRef.current=event.target.value; setParticipants([]); void loadParticipants(); }}><option value="">全部分组</option>{runs.map((run) => <option key={run.id} value={run.id}>{run.name}{run.entryDeletedAt ? "（链接已删除）" : ""}</option>)}</select></label>}
           {section === "participants" && <ParticipantDirectory key={`${settings.experiment.id}:${runFilter}`} experimentId={settings.experiment.id} runId={runFilter} participants={participants} loading={participantsLoading} error={participantsError} onDeleted={(participantId) => setParticipants((current) => current.filter((participant) => participant.id !== participantId))} />}
           {section === "content" && <ContentSettings settings={settings} update={updateExperiment} />}
           {section === "limits" && <LimitSettings settings={settings} updateExperiment={updateExperiment} updateLimits={updateLimits} />}
@@ -228,8 +228,8 @@ function SelectionCheckbox({ checked, indeterminate = false, label, disabled = f
   return <input ref={ref} className="directory-checkbox" type="checkbox" checked={checked} disabled={disabled} aria-label={label} onChange={onChange} />;
 }
 
-function DangerConfirmation({ title, description, expectedValue, expectedLabel, busy, error, onCancel, onConfirm }: {
-  title: string; description: string; expectedValue: string; expectedLabel: string;
+function DangerConfirmation({ title, description, expectedValue, expectedLabel, confirmLabel = "永久删除", busy, error, onCancel, onConfirm }: {
+  title: string; description: string; expectedValue: string; expectedLabel: string; confirmLabel?: string;
   busy: boolean; error: string; onCancel: () => void; onConfirm: (confirmation: string) => void;
 }) {
   const [confirmation, setConfirmation] = useState("");
@@ -239,7 +239,7 @@ function DangerConfirmation({ title, description, expectedValue, expectedLabel, 
       <div><p className="admin-kicker">危险操作</p><h2 id="danger-dialog-title">{title}</h2><p>{description}</p></div>
       <label><span>请输入{expectedLabel} <strong>{expectedValue}</strong> 以确认</span><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" /></label>
       {error && <p className="danger-dialog-error" role="alert">{error}</p>}
-      <div className="danger-dialog-actions"><button className="admin-refresh" onClick={onCancel} disabled={busy}>取消</button><button className="admin-danger" onClick={() => onConfirm(confirmation)} disabled={busy || confirmation !== expectedValue}>{busy ? "正在删除…" : "永久删除"}</button></div>
+      <div className="danger-dialog-actions"><button className="admin-refresh" onClick={onCancel} disabled={busy}>取消</button><button className="admin-danger" onClick={() => onConfirm(confirmation)} disabled={busy || confirmation !== expectedValue}>{busy ? "正在删除…" : confirmLabel}</button></div>
     </section>
   </div>;
 }
@@ -367,6 +367,10 @@ function AgentRunSettings({ experimentId, onRunsChanged }: { experimentId: strin
   const [pendingAgentDelete, setPendingAgentDelete] = useState<AgentSummary | null>(null);
   const [agentDeleteError, setAgentDeleteError] = useState("");
   const [copiedRunId, setCopiedRunId] = useState<string | null>(null);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const copyAttemptRef = useRef(0);
+  const [pendingRunDelete, setPendingRunDelete] = useState<RunSummary | null>(null);
+  const [runDeleteError, setRunDeleteError] = useState("");
   const [runName, setRunName] = useState("");
   const [assignmentMode, setAssignmentMode] = useState<"fixed" | "balanced_random">("fixed");
   const [fixedAgentId, setFixedAgentId] = useState("");
@@ -382,7 +386,11 @@ function AgentRunSettings({ experimentId, onRunsChanged }: { experimentId: strin
         if (mountedRef.current) { setControl(data.control as AgentControl); onRunsChanged(data.control.runs); }
       })
       .catch((loadError) => setError(loadError instanceof Error ? loadError.message : "无法读取智能体配置。"));
-    return () => { mountedRef.current = false; };
+    return () => {
+      mountedRef.current = false;
+      copyAttemptRef.current += 1;
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
   }, [endpoint, onRunsChanged]);
 
   async function post(body: unknown, success: string) {
@@ -426,17 +434,44 @@ function AgentRunSettings({ experimentId, onRunsChanged }: { experimentId: strin
   }
 
   async function copyGroupEntry(run: RunSummary) {
+    if (!run.entryToken || run.entryDeletedAt) return;
+    const attempt = ++copyAttemptRef.current;
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
     const invitation = buildEntryInvitation({ label: run.assignmentMode === "fixed" ? runAgentNames(run)[0] : run.name, url: `${window.location.origin}/join/${run.entryToken}` });
     setCopiedRunId(null);
     try {
       await navigator.clipboard.writeText(invitation);
+      if (!mountedRef.current || attempt !== copyAttemptRef.current) return;
       setCopiedRunId(run.id);
       setError(""); setStatus("");
-    } catch { setError("复制失败，请手动保存上方信息和链接。"); }
+      copyTimerRef.current = setTimeout(() => { setCopiedRunId(null); copyTimerRef.current = null; }, 3000);
+    } catch {
+      if (mountedRef.current && attempt === copyAttemptRef.current) setError("复制失败，请手动保存上方信息和链接。");
+    }
+  }
+
+  async function removeRunLink(run: RunSummary, confirmationCode: string) {
+    setBusy(true); setError(""); setStatus(""); setRunDeleteError("");
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete_run_link", runId: run.id, confirmationCode }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.error?.message ?? "删除链接失败。");
+      if (!mountedRef.current) return;
+      setControl(data.control as AgentControl); onRunsChanged(data.control.runs);
+      setPendingRunDelete(null); setStatus(`“${run.name}”的链接已删除，入口码已释放，实验记录已保留。`);
+    } catch (removeError) {
+      if (!mountedRef.current) return;
+      const message = removeError instanceof Error ? removeError.message : "删除链接失败。";
+      setError(message); setRunDeleteError(message);
+    } finally { if (mountedRef.current) setBusy(false); }
   }
 
   if (!control) return <div className="settings-stack"><section className="settings-card"><p>{error || "正在读取智能体和入口…"}</p></section></div>;
   const enabledAgents = control.agents.filter((agent) => agent.enabled && agent.hasToken);
+  const liveRuns = control.runs.filter((run) => !run.entryDeletedAt && run.entryToken);
   const activeAgentIds = new Set(control.runs.filter(run => run.status === "active").flatMap(run => run.assignmentMode === "fixed" ? (run.fixedAgentId ? [run.fixedAgentId] : []) : run.randomAgentIds));
 
   return <div className="settings-stack agent-run-settings">
@@ -449,12 +484,12 @@ function AgentRunSettings({ experimentId, onRunsChanged }: { experimentId: strin
     </section>
 
     <section className="settings-card">
-      <div className="settings-card-head"><div><h2>各组实验链接</h2><p>复制内容只包含识别名称和链接，不包含实验信息或分配方式。入口码为 4 个字符，支持大写输入；已停止报名的入口仍可恢复记录。</p></div></div>
-      <div className="run-link-list">{control.runs.length === 0 ? <p className="directory-empty">创建分组入口后，链接将显示在这里。</p> : control.runs.map((run) => <div className="run-link-row" key={run.id}>
+      <div className="settings-card-head"><div><h2>各组实验链接</h2><p>复制内容只包含识别名称和链接。入口码为 4 个字符，支持大写输入。停止新报名后仍可恢复记录，也可继续报名；确认实验结束后可删除链接并释放入口码。</p></div></div>
+      <div className="run-link-list">{liveRuns.length === 0 ? <p className="directory-empty">创建分组入口后，链接将显示在这里。</p> : liveRuns.map((run) => <div className="run-link-row" key={run.id}>
         <div><strong>{run.name}</strong><small>{run.status === "active" ? "开放中" : "已停止报名"} · {run.assignmentMode === "fixed" ? "固定智能体" : "均衡随机分配"} · {runAgentNames(run).join("、")}</small><code>/join/{run.entryToken}</code></div>
-        <button type="button" className="admin-refresh" onClick={() => void copyGroupEntry(run)}>复制智能体信息与链接</button>
-        {copiedRunId === run.id && <span className="entry-copy-success" role="status">复制成功</span>}
+        <button type="button" className={`admin-refresh entry-copy-button${copiedRunId === run.id ? " entry-copy-success" : ""}`} aria-live="polite" onClick={() => void copyGroupEntry(run)}>{copiedRunId === run.id ? "复制成功" : "复制智能体信息与链接"}</button>
         {run.status === "active" && <button type="button" className="admin-refresh" disabled={busy} onClick={() => { if (window.confirm(`停止“${run.name}”的新报名后，已有记录仍可恢复。确认继续吗？`)) void post({ action: "close_active_run", runId: run.id }, "已停止该组的新报名。"); }}>停止新报名</button>}
+        {run.status === "closed" && <><button type="button" className="admin-refresh" disabled={busy} onClick={() => void post({ action: "reopen_run", runId: run.id }, "已继续该组的报名，原链接和智能体配置保持有效。")}>继续报名</button><button type="button" className="admin-danger" disabled={busy} onClick={() => { setRunDeleteError(""); setPendingRunDelete(run); }}>删除链接</button></>}
       </div>)}</div>
     </section>
     <details className="settings-card agent-config-details">
@@ -464,6 +499,7 @@ function AgentRunSettings({ experimentId, onRunsChanged }: { experimentId: strin
     </details>
     <div className="security-note"><strong>实验条件随会话锁定</strong><p>进入链接后锁定对应场次、智能体与任务快照。更改其他实验或开放新场次不会改变已有会话，密钥始终保留在服务端。</p></div>
     {pendingAgentDelete && <DangerConfirmation title={`删除智能体“${pendingAgentDelete.internalName}”？`} description="将永久删除该智能体的 API 地址、Bot ID 和加密 Token。仅在没有参与者记录且没有未结束场次引用时可删除。关联的空白已结束场次将一并清理，操作无法撤销。" expectedValue={pendingAgentDelete.internalName} expectedLabel="智能体名称" busy={busy} error={agentDeleteError} onCancel={() => setPendingAgentDelete(null)} onConfirm={(confirmation) => void removeAgent(pendingAgentDelete, confirmation)} />}
+    {pendingRunDelete?.entryToken && <DangerConfirmation title={`确认“${pendingRunDelete.name}”的实验已结束并删除链接？`} description="此入口的未结束会话将标记为完成。被试编号、分组、草稿和对话记录会保留，仍可在参与者列表筛选和导出。原链接将失效，四位入口码可用于新链接；新链接不会关联原被试记录。删除后不能恢复此入口。" expectedValue={pendingRunDelete.entryToken} expectedLabel="入口码" confirmLabel="删除链接" busy={busy} error={runDeleteError} onCancel={() => setPendingRunDelete(null)} onConfirm={(confirmation) => void removeRunLink(pendingRunDelete, confirmation)} />}
   </div>;
 }
 

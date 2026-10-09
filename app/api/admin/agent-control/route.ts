@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getAdminExperimentId } from "@/lib/experiment-entry";
-import { activateExperimentRun, closeActiveExperimentRun, deleteAgentConfig, getAgentControl, resolveAgentTestConnection, saveAgentConfig } from "@/lib/agent-control";
+import { activateExperimentRun, closeActiveExperimentRun, deleteAgentConfig, deleteExperimentRunLink, getAgentControl, reopenExperimentRun, resolveAgentTestConnection, saveAgentConfig } from "@/lib/agent-control";
 import { assertSameOrigin, getAuthenticatedAdmin } from "@/lib/admin-auth";
 import { formatAgentTestFailure } from "@/lib/agent-test-error";
 import { testCozeConnection } from "@/lib/coze";
@@ -45,6 +45,8 @@ const inputSchema = z.discriminatedUnion("action", [
     }),
   }),
   z.object({ action: z.literal("close_active_run"), runId: z.uuid().optional() }),
+  z.object({ action: z.literal("reopen_run"), runId: z.uuid() }),
+  z.object({ action: z.literal("delete_run_link"), runId: z.uuid(), confirmationCode: z.string().trim().min(1).max(32) }),
 ]);
 
 const deleteSchema = z.object({
@@ -60,6 +62,12 @@ function controlError(error: unknown) {
   if (message === "AGENT_HAS_REFERENCES") return new ApiError(409, message, "这个智能体仍有关联参与者记录或未结束场次。请先清理相关记录并结束场次，再尝试删除。");
   if (message === "AGENT_CONFIRMATION_MISMATCH") return new ApiError(400, message, "输入的智能体名称不一致，未执行删除。");
   if (message === "INVALID_RUN_AGENTS") return new ApiError(400, message, "请选择符合分配规则且已经启用的智能体。");
+  if (message === "RUN_NOT_FOUND") return new ApiError(404, message, "找不到当前实验的这个入口。");
+  if (message === "RUN_ENTRY_DELETED") return new ApiError(409, message, "该链接已删除，无法继续报名，请创建新的入口。");
+  if (message === "RUN_NOT_CLOSED") return new ApiError(409, message, "请先停止新报名，再确认实验结束后删除链接。");
+  if (message === "RUN_CONFIRMATION_MISMATCH") return new ApiError(400, message, "输入的入口码不一致，未执行删除。");
+  if (message === "RUN_BUSY") return new ApiError(409, message, "此入口仍有 AI 回复正在生成，请等待回复完成后再删除链接。");
+  if (message === "RUN_AGENT_UNAVAILABLE") return new ApiError(409, message, "此入口使用的智能体已停用或不存在，请先检查配置。");
   return error;
 }
 
@@ -109,6 +117,10 @@ export async function POST(request: Request) {
       }
     } else if (input.data.action === "activate_run") {
       await activateExperimentRun({ ...input.data.run, experimentId: experimentId }, admin.id);
+    } else if (input.data.action === "reopen_run") {
+      await reopenExperimentRun(experimentId, input.data.runId, admin.id);
+    } else if (input.data.action === "delete_run_link") {
+      await deleteExperimentRunLink({ ...input.data,experimentId }, admin.id);
     } else {
       await closeActiveExperimentRun(experimentId, admin.id, input.data.runId);
     }
