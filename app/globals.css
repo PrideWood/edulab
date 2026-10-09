@@ -213,13 +213,13 @@ h1 { margin: 0; font-size: clamp(27px, 3vw, 38px); line-height: 1.14; letter-spa
   .fullscreen-dialog { padding: 30px 22px 24px; }
 }
 
-.participant-code-banner { display: flex; align-items: center; gap: 12px; padding: 12px 24px; border-bottom: 1px solid var(--line); background: var(--canvas); color: var(--ink); flex-wrap: wrap; }
-.participant-code-banner div { flex: 1; min-width: 200px; }
-.participant-code-banner strong { font-size: 14px; }
-.participant-code-banner small { display: block; margin-top: 4px; font-size: 12px; color: var(--muted); }
-.participant-code-banner button { padding: 6px 12px; border: 1px solid var(--line); background: white; border-radius: 8px; cursor: pointer; font-size: 12px; }
-.participant-code-banner > span, .draft-status { font-size: 12px; color: var(--muted); }
-.draft-status { margin: 4px 8px; }
+.participant-code-details { margin-top: 20px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--accent-soft); }
+.participant-code-details > p:first-child { margin: 0 0 6px; color: var(--muted); font-size: 12px; }
+.participant-code-details strong { display: block; color: var(--accent-dark); font-size: 24px; letter-spacing: .06em; }
+.participant-code-copy { padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--accent-dark); font-size: 12px; }
+.participant-code-details > span { margin-left: 10px; font-size: 12px; color: var(--muted); }
+.code-reminder-confirm { width: 100%; margin-top: 12px; }
+.draft-status { margin: 4px 8px; font-size: 12px; color: var(--muted); }
 .entry-tabs { display: flex; gap: 8px; margin: 16px 0; }
 .entry-tabs button { flex: 1; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--canvas); cursor: pointer; }
 .entry-tabs button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-dark); }

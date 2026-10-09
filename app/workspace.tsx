@@ -187,6 +187,9 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
   const [resumeCode, setResumeCode] = useState("");
   const [resumeIdentity, setResumeIdentity] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
+  const [codeReminderOpen, setCodeReminderOpen] = useState(false);
+  const remindedParticipantRef = useRef<string | null>(null);
+  const codeReminderCloseRef = useRef<HTMLButtonElement>(null);
   const [draftStatus, setDraftStatus] = useState("");
   const [draftConflict, setDraftConflict] = useState(false);
   const draftRef = useRef({ sessionId: "", text: "", savedText: "", revision: 0, conflict: false });
@@ -204,6 +207,13 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
   const hasAutoFocusedComposerRef = useRef(false);
   const restoreComposerFocusRef = useRef(false);
 
+  const remindParticipantCode = useCallback((participantCode: string) => {
+    if (remindedParticipantRef.current === participantCode) return;
+    remindedParticipantRef.current = participantCode;
+    setCopyStatus("");
+    setCodeReminderOpen(true);
+  }, []);
+
   const clearInvalidatedSession = useCallback((notice: string) => {
     const previousSession = activeSessionRef.current;
     if (previousSession && notice.includes("后台删除")) clearLocalParticipantData(previousSession.participantCode, previousSession.id);
@@ -216,6 +226,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
     setControls(null);
     setConversations([]);
     setParticipantProfile(null);
+    setCodeReminderOpen(false);
+    remindedParticipantRef.current = null;
     setProfileFullName("");
     setProfileStudentNumber("");
     setText("");
@@ -285,6 +297,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
       }
     }
     setParticipantProfile(payload.participantProfile);
+    if (payload.participantProfile) remindParticipantCode(payload.session.participantCode);
     if (!payload.participantProfile) setProfileOpen(true);
     const localMessages = readLocalTranscript(payload.session.id);
     const mergedMessages = mergeMessages(localMessages, changedSession ? [] : messageLedgerRef.current, payload.messages);
@@ -306,7 +319,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
         } catch { localStorage.removeItem(outboxKey(payload.session.id)); }
       }
     }
-  }, []);
+  }, [remindParticipantCode]);
 
   const saveDraft = useCallback(async () => {
     if (!databaseMessagesEnabledRef.current) return;
@@ -602,7 +615,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
   const messageLimitReached = controls?.remainingMessages === 0;
   const canChat = Boolean(participantProfile && session?.status === "active" && controls?.chatEnabled && !timeExpired && !messageLimitReached);
   const fullscreenReady = fullscreenState === "fullscreen" || fullscreenState === "unsupported";
-  const composerAvailable = Boolean(canChat && !loading && !pending && !profileOpen && fullscreenReady);
+  const composerAvailable = Boolean(canChat && !loading && !pending && !profileOpen && !codeReminderOpen && fullscreenReady);
   const limitText = [
     controls?.remainingMessages === null || controls?.remainingMessages === undefined ? null : `剩余 ${controls.remainingMessages} 次`,
     remainingSeconds === null ? null : `剩余 ${Math.floor(remainingSeconds / 60)}:${String(remainingSeconds % 60).padStart(2, "0")}`,
@@ -625,6 +638,16 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
     return () => window.cancelAnimationFrame(frame);
   }, [composerAvailable, focusComposer]);
 
+  useEffect(() => {
+    if (!codeReminderOpen || profileOpen || !fullscreenReady) return;
+    codeReminderCloseRef.current?.focus();
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setCodeReminderOpen(false);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [codeReminderOpen, profileOpen, fullscreenReady]);
+
   function handleWorkspacePointerDown(event: ReactPointerEvent<HTMLElement>) {
     if (!pending || !restoreComposerFocusRef.current) return;
     if (composerFormRef.current?.contains(event.target as Node)) return;
@@ -633,7 +656,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
 
   function handleFullscreenEntered() {
     restoreComposerFocusRef.current = true;
-    if (!profileOpen && !loading && !pending && canChat) focusComposer();
+    if (!profileOpen && !codeReminderOpen && !loading && !pending && canChat) focusComposer();
   }
 
   useEffect(() => {
@@ -756,6 +779,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
   }
 
   function openParticipantProfile() {
+    setCodeReminderOpen(false);
     setProfileFullName(participantProfile?.fullName ?? "");
     setProfileStudentNumber(participantProfile?.studentNumber ?? "");
     setProfileError("");
@@ -782,6 +806,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
       if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "参与者信息保存失败。");
       if (session) {
         setParticipantProfile(data.profile as ParticipantProfile);
+        remindParticipantCode(session.participantCode);
       } else {
         applyPayload(data as SessionPayload);
         await refreshConversations();
@@ -938,6 +963,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
       setControls(null);
       setConversations([]);
       setParticipantProfile(null);
+      setCodeReminderOpen(false);
+      remindedParticipantRef.current = null;
       setProfileFullName("");
       setProfileStudentNumber("");
       setText("");
@@ -961,6 +988,12 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
     }
   }
 
+  const participantCodeDetails = session && participantProfile && <div className="participant-code-details">
+    <p>你的实验编号</p><strong>{session.participantCode}</strong>
+    <p className="profile-hint">{controls?.databaseMessagesEnabled ? "请记住或保存该编号。意外关闭后，可用编号及原学号（或姓名）继续实验。" : "请保存编号；此实验未启用云端对话存储，请及时下载记录。"}</p>
+    <button type="button" className="participant-code-copy" onClick={copyParticipantCode}>复制编号</button><span role="status">{copyStatus}</span>
+  </div>;
+
   return (
     <main className="app-shell" onPointerDownCapture={handleWorkspacePointerDown}>
       <FullscreenController fullscreenState={fullscreenState} onEntered={handleFullscreenEntered} />
@@ -983,7 +1016,6 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
               <div className="export-actions"><button onClick={exportTranscript} disabled={!session || messages.length === 0}>下载交互记录</button>{controls?.databaseMessagesEnabled && <button onClick={() => void submitRecords()} disabled={!session || pending || uploading || messages.length === 0}>{uploading ? "提交中…" : "提交交互记录"}</button>}<span role="status">{uploadStatus}</span></div>
             </div>
           </header>
-          {session && participantProfile && <div className="participant-code-banner"><div><strong>你的实验编号：{session.participantCode}</strong><small>{controls?.databaseMessagesEnabled ? "请记住或保存该编号。意外关闭后，可用编号及原学号（或姓名）继续实验。" : "请保存编号；此实验未启用云端对话存储，请及时下载记录。"}</small></div><button onClick={copyParticipantCode}>复制编号</button><span role="status">{copyStatus}</span></div>}
           <div className="messages" ref={messagesViewRef} aria-live="polite">
             {taskOpen && experiment.taskVisible && <section className="inline-task-panel"><div className="inline-task-head"><div><small>任务说明</small><h2>{experiment.title}</h2></div><button onClick={() => setTaskOpen(false)} aria-label="关闭任务说明">×</button></div><p>{experiment.introduction}</p><ol>{experiment.requirements.map((item) => <li key={item}>{item}</li>)}</ol>{experiment.material && <div><strong>学习材料</strong><p>{experiment.material}</p></div>}{experiment.hint && <div><strong>提示</strong><p>{experiment.hint}</p></div>}</section>}
             <p className="day-label">{session ? `开始于 ${timeLabel(session.startedAt)}` : "新对话"}</p>
@@ -1006,9 +1038,18 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
           </div>
         </section>
       </section>
+      {codeReminderOpen && !profileOpen && participantCodeDetails && <div className="profile-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCodeReminderOpen(false); }}>
+        <section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="code-reminder-title">
+          <div className="profile-modal-head"><div><p>实验信息</p><h2 id="code-reminder-title">请保存你的实验编号</h2></div><button type="button" onClick={() => setCodeReminderOpen(false)} aria-label="关闭编号提醒">×</button></div>
+          {participantCodeDetails}
+          <p className="profile-hint">关闭后，可点击左下角参与者信息查看编号。</p>
+          <button ref={codeReminderCloseRef} className="profile-save code-reminder-confirm" type="button" onClick={() => setCodeReminderOpen(false)}>我已记下，继续实验</button>
+        </section>
+      </div>}
       {profileOpen && <div className="profile-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && participantProfile) setProfileOpen(false); }}>
         <section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title">
           <div className="profile-modal-head"><div><p>参与者信息</p><h2 id="profile-title">{participantProfile ? "查看或修改基本信息" : !session && entryMode === "resume" ? "继续之前的实验" : "开始前请填写基本信息"}</h2></div>{participantProfile && <button type="button" onClick={() => setProfileOpen(false)} aria-label="关闭">×</button>}</div>
+          {participantCodeDetails}
           {!session && <div className="entry-tabs" role="group" aria-label="实验入口"><button type="button" aria-pressed={entryMode === "new"} onClick={() => { setEntryMode("new"); setProfileError(""); }} disabled={profileSaving}>首次参加实验</button><button type="button" aria-pressed={entryMode === "resume"} onClick={() => { setEntryMode("resume"); setProfileError(""); }} disabled={profileSaving}>继续之前的实验</button></div>}
           {!session && entryMode === "resume" ? <form className="profile-form" onSubmit={resumeExperiment}>
             <label><span>实验编号</span><input value={resumeCode} onChange={(event) => setResumeCode(event.target.value)} maxLength={80} autoComplete="off" placeholder="例如 P001" required /></label>
