@@ -1,6 +1,7 @@
 import "server-only";
 
 import { query, transaction } from "@/db";
+import type { ExperimentEntry } from "@/lib/experiment-entry";
 import { experiment } from "@/config/experiment";
 import { ApiError } from "@/lib/http";
 import { profileFromRow } from "@/lib/participant-profile";
@@ -8,7 +9,8 @@ import { hashSecret, newSessionSecret, normalizeParticipantCode } from "@/lib/se
 import type { ExperimentSessionSnapshot } from "@/lib/experiment-settings";
 import type { AuthenticatedSession } from "@/lib/session";
 
-export async function recoverParticipant(code: string, identity: string) {
+export async function recoverParticipant(code: string, identity: string, entry?: ExperimentEntry | null) {
+  const experimentId = entry?.experimentId ?? experiment.id;
   const participantCode = normalizeParticipantCode(code);
   // Database-backed throttling also works across serverless instances. Never
   // store the submitted identity or IP in this table.
@@ -19,14 +21,14 @@ export async function recoverParticipant(code: string, identity: string) {
          THEN 1 ELSE participant_recovery_attempts.attempts + 1 END,
        window_started_at = CASE WHEN participant_recovery_attempts.window_started_at < now() - interval '15 minutes'
          THEN now() ELSE participant_recovery_attempts.window_started_at END
-     RETURNING attempts`, [hashSecret(`${experiment.id}:${participantCode}`)],
+     RETURNING attempts`, [hashSecret(`${experimentId}:${participantCode}`)],
   );
   if (attempt.rows[0].attempts > 5) throw new ApiError(429, "RECOVERY_RATE_LIMIT", "此编号恢复尝试过多，请等待 15 分钟或联系教师。");
 
   return transaction(async (client) => {
     const participant = await client.query<{ id: string }>(
       "SELECT id FROM participants WHERE experiment_id=$1 AND external_code=$2 FOR UPDATE",
-      [experiment.id, participantCode],
+      [experimentId, participantCode],
     );
     const invalid = () => new ApiError(404, "RECOVERY_NOT_FOUND", "编号不存在或身份校验不匹配，请检查编号及原学号（未填学号时使用原姓名）。");
     if (!participant.rows[0]) throw invalid();
@@ -40,9 +42,9 @@ export async function recoverParticipant(code: string, identity: string) {
       coze_conversation_id: string | null; active_request_id: string | null;
       started_at: string; last_activity_at: string; config_version: number | null;
       config_snapshot: ExperimentSessionSnapshot | null; session_secret_hash: string;
-    }>(`SELECT s.* FROM experiment_sessions s WHERE participant_id=$1 AND experiment_id=$2
+    }>(`SELECT s.* FROM experiment_sessions s WHERE participant_id=$1 AND experiment_id=$2 AND ($3::uuid IS NULL OR experiment_run_id=$3)
         ORDER BY COALESCE(s.public_id::text = (SELECT metadata->>'resume_session_id' FROM participants WHERE id=$1), false) DESC,
-          last_activity_at DESC, started_at DESC, id DESC LIMIT 1 FOR UPDATE`, [participantId, experiment.id]);
+          last_activity_at DESC, started_at DESC, id DESC LIMIT 1 FOR UPDATE`, [participantId, experimentId, entry?.runId ?? null]);
     const row = sessions.rows[0];
     if (!row) throw invalid();
     if (!row.config_snapshot) throw new ApiError(409, "RECOVERY_CONFIG_MISSING", "此历史实验缺少配置快照，请联系教师处理，系统不会重新分组。");
@@ -69,7 +71,7 @@ export async function recoverParticipant(code: string, identity: string) {
       WHERE participant_id=$1 AND session_secret_hash=$2`, [participantId, row.session_secret_hash, secretHash, row.id]);
     const session: AuthenticatedSession = {
       id: row.id, publicId: row.public_id, participantId, participantCode,
-      experimentId: experiment.id, status: row.status, cozeUserId: row.coze_user_id,
+      experimentId, status: row.status, cozeUserId: row.coze_user_id,
       cozeConversationId: row.coze_conversation_id, activeRequestId: row.active_request_id,
       startedAt: row.started_at, lastActivityAt: row.last_activity_at,
       configVersion: row.config_version, configSnapshot: row.config_snapshot, sessionSecretHash: secretHash,

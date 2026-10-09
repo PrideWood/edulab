@@ -32,6 +32,7 @@ export async function proxy(request: NextRequest) {
 export const config = {
   matcher: [
     "/",
+    "/join/:path*",
     "/api/sessions/:path*",
     "/api/messages/:path*",
     "/api/conversations/:path*",

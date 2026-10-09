@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { experiment } from "@/config/experiment";
+import { getAdminExperimentId } from "@/lib/experiment-entry";
 import { activateExperimentRun, closeActiveExperimentRun, deleteAgentConfig, getAgentControl, resolveAgentTestConnection, saveAgentConfig } from "@/lib/agent-control";
 import { assertSameOrigin, getAuthenticatedAdmin } from "@/lib/admin-auth";
 import { formatAgentTestFailure } from "@/lib/agent-test-error";
@@ -41,9 +41,10 @@ const inputSchema = z.discriminatedUnion("action", [
       assignmentMode: z.enum(["fixed", "balanced_random"]),
       fixedAgentId: z.uuid().nullable(),
       randomAgentIds: z.array(z.uuid()).max(20),
+      makeDefault: z.boolean().optional(),
     }),
   }),
-  z.object({ action: z.literal("close_active_run") }),
+  z.object({ action: z.literal("close_active_run"), runId: z.uuid().optional() }),
 ]);
 
 const deleteSchema = z.object({
@@ -62,11 +63,12 @@ function controlError(error: unknown) {
   return error;
 }
 
-export async function GET() {
+export async function GET(request?: Request) {
   try {
     const admin = await getAuthenticatedAdmin();
     if (!admin) throw new ApiError(401, "ADMIN_REQUIRED", "请先登录管理后台。");
-    return NextResponse.json({ control: await getAgentControl(experiment.id) });
+    const experimentId = await getAdminExperimentId(request);
+    return NextResponse.json({ control: await getAgentControl(experimentId) });
   } catch (error) { return errorResponse(error); }
 }
 
@@ -75,10 +77,11 @@ export async function POST(request: Request) {
     assertSameOrigin(request);
     const admin = await getAuthenticatedAdmin();
     if (!admin) throw new ApiError(401, "ADMIN_REQUIRED", "请先登录管理后台。");
+    const experimentId = await getAdminExperimentId(request);
     const input = inputSchema.safeParse(await request.json());
     if (!input.success) throw new ApiError(400, "INVALID_AGENT_CONTROL", input.error.issues[0]?.message ?? "智能体或场次设置无效。");
     if (input.data.action === "test_agent") {
-      const connection = await resolveAgentTestConnection({ ...input.data.agent, experimentId: experiment.id });
+      const connection = await resolveAgentTestConnection({ ...input.data.agent, experimentId: experimentId });
       try {
         await testCozeConnection({ ...connection, timeoutMs: 20_000 });
       } catch (error) {
@@ -89,11 +92,11 @@ export async function POST(request: Request) {
       }
       return NextResponse.json({ test: { ok: true, message: "连接成功" } });
     } else if (input.data.action === "save_agent") {
-      const saved = await saveAgentConfig({ ...input.data.agent, experimentId: experiment.id }, admin.id);
+      const saved = await saveAgentConfig({ ...input.data.agent, experimentId: experimentId }, admin.id);
       if (input.data.testAfterSave) {
         // Read back the committed credential: never test the submitted draft here.
         const connection = await resolveAgentTestConnection({
-          id: saved.id, experimentId: experiment.id, baseUrl: saved.baseUrl, botId: saved.botId,
+          id: saved.id, experimentId: experimentId, baseUrl: saved.baseUrl, botId: saved.botId,
         });
         let test;
         try {
@@ -102,14 +105,14 @@ export async function POST(request: Request) {
         } catch (error) {
           test = { ok: false, message: "配置已保存，但连接失败：" + formatAgentTestFailure(error, { secret: connection.token }) };
         }
-        return NextResponse.json({ control: await getAgentControl(experiment.id), test });
+        return NextResponse.json({ control: await getAgentControl(experimentId), test });
       }
     } else if (input.data.action === "activate_run") {
-      await activateExperimentRun({ ...input.data.run, experimentId: experiment.id }, admin.id);
+      await activateExperimentRun({ ...input.data.run, experimentId: experimentId }, admin.id);
     } else {
-      await closeActiveExperimentRun(experiment.id, admin.id);
+      await closeActiveExperimentRun(experimentId, admin.id, input.data.runId);
     }
-    return NextResponse.json({ control: await getAgentControl(experiment.id) });
+    return NextResponse.json({ control: await getAgentControl(experimentId) });
   } catch (error) {
     const controlled = controlError(error);
     if (controlled instanceof Error && controlled.message === "COZE_TOKEN_NOT_CONFIGURED") {
@@ -124,9 +127,10 @@ export async function DELETE(request: Request) {
     assertSameOrigin(request);
     const admin = await getAuthenticatedAdmin();
     if (!admin) throw new ApiError(401, "ADMIN_REQUIRED", "请先登录管理后台。");
+    const experimentId = await getAdminExperimentId(request);
     const input = deleteSchema.safeParse(await request.json());
     if (!input.success) throw new ApiError(400, "INVALID_AGENT_DELETE", "删除确认信息无效。");
-    await deleteAgentConfig({ ...input.data, experimentId: experiment.id }, admin.id);
-    return NextResponse.json({ control: await getAgentControl(experiment.id) });
+    await deleteAgentConfig({ ...input.data, experimentId: experimentId }, admin.id);
+    return NextResponse.json({ control: await getAgentControl(experimentId) });
   } catch (error) { return errorResponse(controlError(error)); }
 }

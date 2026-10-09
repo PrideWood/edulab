@@ -241,3 +241,16 @@
   .admin-login-page { padding: 16px; }
   .admin-login-card { padding: 24px; }
 }
+
+.experiment-selector { display: grid; gap: 8px; margin: 20px 0; font-size: 12px; }
+.experiment-selector select, .run-filter select { width: 100%; min-width: 0; padding: 9px; border: 1px solid var(--admin-line, #dce4df); border-radius: 8px; background: white; color: #263d31; }
+.experiment-selector button { padding: 8px; border: 1px solid #ccdcd2; border-radius: 8px; background: #edf4ef; color: #286046; }
+.new-experiment-form { display: flex; align-items: end; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+.new-experiment-form label { display: grid; gap: 7px; flex: 1; min-width: 180px; }
+.new-experiment-form input { width: 100%; padding: 10px; border: 1px solid #ccdcd2; border-radius: 8px; }
+.run-filter { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
+.run-filter select { max-width: 360px; }
+.run-link-list { display: grid; gap: 12px; }
+.run-link-row { display: flex; align-items: center; gap: 10px; padding: 14px 0; border-bottom: 1px solid #e0e8e3; flex-wrap: wrap; }
+.run-link-row > div { flex: 1; min-width: 160px; }
+.run-link-row small, .run-link-row code { display: block; margin-top: 6px; font-size: 12px; color: #617268; overflow-wrap: anywhere; }

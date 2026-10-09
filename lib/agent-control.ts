@@ -3,7 +3,9 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { query, transaction } from "@/db";
+import { buildSessionSnapshot, getExperimentSettings } from "@/lib/experiment-settings";
 import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
+import { createRunEntryToken } from "@/lib/entry-token";
 
 export type AssignmentMode = "fixed" | "balanced_random";
 
@@ -29,6 +31,8 @@ export interface ExperimentRunSummary {
   openedAt: string | null;
   closedAt: string | null;
   createdAt: string;
+  entryToken: string;
+  isDefault: boolean;
 }
 
 interface AgentRow {
@@ -55,6 +59,8 @@ interface RunRow {
   opened_at: string | null;
   closed_at: string | null;
   created_at: string;
+  entry_token: string;
+  is_default: boolean;
 }
 
 function mapAgent(row: AgentRow): AgentConfigSummary {
@@ -82,6 +88,8 @@ function mapRun(row: RunRow): ExperimentRunSummary {
     openedAt: row.opened_at,
     closedAt: row.closed_at,
     createdAt: row.created_at,
+    entryToken: row.entry_token,
+    isDefault: row.is_default,
   };
 }
 
@@ -113,7 +121,7 @@ export async function getAgentControl(experimentId: string) {
     ),
     query<RunRow>(
       `SELECT id, name, status, assignment_mode, fixed_agent_id, random_agent_ids,
-         opened_at, closed_at, created_at
+         opened_at, closed_at, created_at, entry_token, is_default
        FROM experiment_runs WHERE experiment_id = $1
        ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'draft' THEN 1 ELSE 2 END, created_at DESC`,
       [experimentId],
@@ -122,7 +130,7 @@ export async function getAgentControl(experimentId: string) {
   return {
     agents: agents.rows.map(mapAgent),
     runs: runs.rows.map(mapRun),
-    activeRun: runs.rows.find((row) => row.status === "active") ? mapRun(runs.rows.find((row) => row.status === "active")!) : null,
+    activeRun: runs.rows.find((row) => row.status === "active" && row.is_default) ? mapRun(runs.rows.find((row) => row.status === "active" && row.is_default)!) : null,
   };
 }
 
@@ -289,6 +297,7 @@ export async function activateExperimentRun(input: {
   assignmentMode: AssignmentMode;
   fixedAgentId: string | null;
   randomAgentIds: string[];
+  makeDefault?: boolean;
 }, adminUserId: string) {
   return transaction(async (client) => {
     const selectedIds = input.assignmentMode === "fixed"
@@ -301,21 +310,21 @@ export async function activateExperimentRun(input: {
       [input.experimentId, selectedIds],
     );
     if (valid.rows.length !== selectedIds.length) throw new Error("INVALID_RUN_AGENTS");
-    await client.query(
-      `UPDATE experiment_runs SET status = 'closed', closed_at = now(), updated_at = now(), updated_by = $2
-       WHERE experiment_id = $1 AND status = 'active'`,
-      [input.experimentId, adminUserId],
-    );
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`edulab:run:${input.experimentId}`]);
+    const makeDefault = input.makeDefault ?? true;
+    if (makeDefault) await client.query(`UPDATE experiment_runs SET is_default=false WHERE experiment_id=$1 AND is_default=true`, [input.experimentId]);
+    const snapshot = buildSessionSnapshot(await getExperimentSettings(input.experimentId,false));
+    const entryToken = await createRunEntryToken(client);
     const created = await client.query<RunRow>(
       `INSERT INTO experiment_runs (
          id, experiment_id, name, status, assignment_mode, fixed_agent_id,
-         random_agent_ids, opened_at, updated_by
-       ) VALUES ($1,$2,$3,'active',$4,$5,$6::uuid[],now(),$7)
+         random_agent_ids, opened_at, updated_by, entry_token, is_default, config_snapshot
+       ) VALUES ($1,$2,$3,'active',$4,$5,$6::uuid[],now(),$7,$8,$9,$10::jsonb)
        RETURNING id, name, status, assignment_mode, fixed_agent_id, random_agent_ids,
-         opened_at, closed_at, created_at`,
+         opened_at, closed_at, created_at, entry_token, is_default`,
       [randomUUID(), input.experimentId, input.name, input.assignmentMode,
         input.assignmentMode === "fixed" ? input.fixedAgentId : null,
-        input.assignmentMode === "balanced_random" ? selectedIds : [], adminUserId],
+        input.assignmentMode === "balanced_random" ? selectedIds : [], adminUserId, entryToken, makeDefault, JSON.stringify(snapshot)],
     );
     await client.query(
       `INSERT INTO admin_audit_log (id, admin_user_id, action, experiment_id, after_data)
@@ -326,14 +335,14 @@ export async function activateExperimentRun(input: {
   });
 }
 
-export async function closeActiveExperimentRun(experimentId: string, adminUserId: string) {
+export async function closeActiveExperimentRun(experimentId: string, adminUserId: string, runId?: string) {
   return transaction(async (client) => {
     const closed = await client.query<RunRow>(
       `UPDATE experiment_runs SET status = 'closed', closed_at = now(), updated_at = now(), updated_by = $2
-       WHERE experiment_id = $1 AND status = 'active'
+       WHERE experiment_id = $1 AND status = 'active' AND (($3::uuid IS NULL AND is_default=true) OR id=$3)
        RETURNING id, name, status, assignment_mode, fixed_agent_id, random_agent_ids,
-         opened_at, closed_at, created_at`,
-      [experimentId, adminUserId],
+         opened_at, closed_at, created_at, entry_token, is_default`,
+      [experimentId, adminUserId, runId ?? null],
     );
     if (closed.rows[0]) {
       await client.query(
@@ -362,12 +371,14 @@ export async function assignAgentWithClient(
   client: PoolClient,
   experimentId: string,
   participantId: string,
+  runId?: string,
 ): Promise<AssignedAgentRuntime> {
   const run = await client.query<RunRow & { experiment_id: string }>(
     `SELECT id, experiment_id, name, status, assignment_mode, fixed_agent_id,
-       random_agent_ids, opened_at, closed_at, created_at
-     FROM experiment_runs WHERE experiment_id = $1 AND status = 'active' FOR SHARE`,
-    [experimentId],
+       random_agent_ids, opened_at, closed_at, created_at, entry_token, is_default
+     FROM experiment_runs WHERE experiment_id = $1 AND status = 'active'
+       AND (($2::uuid IS NULL AND is_default=true) OR id=$2) FOR SHARE`,
+    [experimentId, runId ?? null],
   );
   const active = run.rows[0];
   if (!active) throw new Error("NO_ACTIVE_EXPERIMENT_RUN");

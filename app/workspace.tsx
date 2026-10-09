@@ -58,10 +58,11 @@ function readLocalTranscript(sessionId: string): StoredMessage[] {
   } catch { return []; }
 }
 
-function writeLocalTranscript(activeSession: SessionPayload["session"], messages: StoredMessage[]) {
+function writeLocalTranscript(activeSession: SessionPayload["session"], messages: StoredMessage[], experimentId: string) {
   try {
     localStorage.setItem(transcriptKey(activeSession.id), JSON.stringify({
-      version: 2,
+      version: 3,
+      experimentId,
       sessionId: activeSession.id,
       participantCode: activeSession.participantCode,
       updatedAt: new Date().toISOString(),
@@ -118,21 +119,25 @@ function isInvalidSessionError(error: unknown) {
   return error instanceof ClientApiError && error.status === 401 && ["SESSION_REQUIRED", "SESSION_REPLACED"].includes(error.code);
 }
 
-function clearLocalParticipantData(participantCode: string, currentSessionId: string | null) {
+function clearLocalParticipantData(participantCode: string, currentSessionId: string | null, experimentId: string, includeLegacy: boolean) {
   const sessionIds = new Set<string>(currentSessionId ? [currentSessionId] : []);
   const transcriptKeys: string[] = [];
   for (let index = 0; index < localStorage.length; index += 1) {
     const key = localStorage.key(index);
     if (!key?.startsWith(TRANSCRIPT_PREFIX)) continue;
     try {
-      const saved = JSON.parse(localStorage.getItem(key) ?? "{}") as { participantCode?: string; sessionId?: string };
-      if (saved.participantCode !== participantCode) continue;
+      const saved = JSON.parse(localStorage.getItem(key) ?? "{}") as { participantCode?: string; sessionId?: string; experimentId?: string };
+      if (saved.participantCode !== participantCode || (saved.experimentId ? saved.experimentId !== experimentId : !includeLegacy)) continue;
       transcriptKeys.push(key);
       if (saved.sessionId) sessionIds.add(saved.sessionId);
     } catch { /* Ignore unrelated or malformed browser data. */ }
   }
   for (const key of transcriptKeys) localStorage.removeItem(key);
-  for (const sessionId of sessionIds) localStorage.removeItem(outboxKey(sessionId));
+  for (const sessionId of sessionIds) {
+    localStorage.removeItem(outboxKey(sessionId));
+    localStorage.removeItem(`edulab_draft:${sessionId}`);
+    localStorage.removeItem(transcriptKey(sessionId));
+  }
 }
 
 function timeLabel(value: string) {
@@ -156,7 +161,9 @@ function MessageBody({ message }: { message: StoredMessage }) {
   );
 }
 
-export function ExperimentWorkspace({ experiment: initialExperiment }: { experiment: ExperimentConfig }) {
+export function ExperimentWorkspace({ experiment: initialExperiment, entryToken }: { experiment: ExperimentConfig; entryToken?: string }) {
+  const experimentId = initialExperiment.id;
+  const apiUrl = useCallback((path: string) => entryToken ? `${path}?entry=${encodeURIComponent(entryToken)}` : path, [entryToken]);
   const [experiment, setExperiment] = useState(initialExperiment);
   const [text, setText] = useState("");
   const [messages, setMessages] = useState<StoredMessage[]>([]);
@@ -187,9 +194,6 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
   const [resumeCode, setResumeCode] = useState("");
   const [resumeIdentity, setResumeIdentity] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
-  const [codeReminderOpen, setCodeReminderOpen] = useState(false);
-  const remindedParticipantRef = useRef<string | null>(null);
-  const codeReminderCloseRef = useRef<HTMLButtonElement>(null);
   const [draftStatus, setDraftStatus] = useState("");
   const [draftConflict, setDraftConflict] = useState(false);
   const draftRef = useRef({ sessionId: "", text: "", savedText: "", revision: 0, conflict: false });
@@ -207,16 +211,9 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
   const hasAutoFocusedComposerRef = useRef(false);
   const restoreComposerFocusRef = useRef(false);
 
-  const remindParticipantCode = useCallback((participantCode: string) => {
-    if (remindedParticipantRef.current === participantCode) return;
-    remindedParticipantRef.current = participantCode;
-    setCopyStatus("");
-    setCodeReminderOpen(true);
-  }, []);
-
   const clearInvalidatedSession = useCallback((notice: string) => {
     const previousSession = activeSessionRef.current;
-    if (previousSession && notice.includes("后台删除")) clearLocalParticipantData(previousSession.participantCode, previousSession.id);
+    if (previousSession && notice.includes("后台删除")) clearLocalParticipantData(previousSession.participantCode, previousSession.id, experimentId, !entryToken);
     sessionIdRef.current = null;
     activeSessionRef.current = null;
     messageLedgerRef.current = [];
@@ -226,8 +223,6 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
     setControls(null);
     setConversations([]);
     setParticipantProfile(null);
-    setCodeReminderOpen(false);
-    remindedParticipantRef.current = null;
     setProfileFullName("");
     setProfileStudentNumber("");
     setText("");
@@ -246,20 +241,20 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
     hasAutoFocusedComposerRef.current = false;
     restoreComposerFocusRef.current = false;
     window.history.replaceState({}, "", window.location.pathname);
-  }, []);
+  }, [experimentId, entryToken]);
 
   const releaseInvalidatedSession = useCallback(async (notice = "会话已失效或已在其他窗口恢复，请使用实验编号继续。") => {
     const transcript = transcriptUploadBody(messageLedgerRef.current);
     clearInvalidatedSession(notice);
     if (!notice.includes("后台删除")) return;
     try {
-      await fetch("/api/sessions/reset", {
+      await fetch(apiUrl("/api/sessions/reset"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: transcript,
       });
     } catch { /* Local cleanup must still continue when the deleted server record is unavailable. */ }
-  }, [clearInvalidatedSession]);
+  }, [clearInvalidatedSession, apiUrl]);
 
   const applyPayload = useCallback((payload: SessionPayload) => {
     const changedSession = sessionIdRef.current !== null && sessionIdRef.current !== payload.session.id;
@@ -297,13 +292,12 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
       }
     }
     setParticipantProfile(payload.participantProfile);
-    if (payload.participantProfile) remindParticipantCode(payload.session.participantCode);
     if (!payload.participantProfile) setProfileOpen(true);
     const localMessages = readLocalTranscript(payload.session.id);
     const mergedMessages = mergeMessages(localMessages, changedSession ? [] : messageLedgerRef.current, payload.messages);
     messageLedgerRef.current = mergedMessages;
     setMessages(mergedMessages);
-    writeLocalTranscript(payload.session, mergedMessages);
+    writeLocalTranscript(payload.session, mergedMessages, experimentId);
     setPending(payload.pending);
     setControls(payload.controls);
     if (payload.failedRequest) {
@@ -319,7 +313,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
         } catch { localStorage.removeItem(outboxKey(payload.session.id)); }
       }
     }
-  }, [remindParticipantCode]);
+  }, [experimentId]);
 
   const saveDraft = useCallback(async () => {
     if (!databaseMessagesEnabledRef.current) return;
@@ -330,7 +324,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
     const work = (async () => {
       try {
         setDraftStatus("草稿保存中…");
-        const response = await fetch("/api/sessions/draft", {
+        const response = await fetch(apiUrl("/api/sessions/draft"), {
           method: "PUT", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sessionId: snapshot.sessionId, text: snapshot.text, revision: snapshot.revision }),
           signal: AbortSignal.timeout(15000),
@@ -351,7 +345,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
     })();
     draftSaveRef.current = work;
     try { await work; } finally { draftSaveRef.current = null; }
-  }, []);
+  }, [apiUrl]);
 
   function updateComposer(value: string) {
     setText(value);
@@ -362,7 +356,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
   async function resolveDraftConflict(keepLocal: boolean) {
     setDraftStatus("正在核对草稿…");
     try {
-      const payload = await readResponse(await fetch("/api/sessions", { cache: "no-store" }));
+      const payload = await readResponse(await fetch(apiUrl("/api/sessions"), { cache: "no-store" }));
       if (payload.session.id !== sessionIdRef.current) throw new Error("会话已变化，请在最新恢复的窗口继续。");
       draftRef.current.revision = payload.draft?.revision ?? 0;
       draftRef.current.savedText = payload.draft?.text ?? "";
@@ -385,16 +379,16 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
       const draft = draftRef.current;
       if (!draft.sessionId || draft.conflict || draftSaveRef.current || draft.text === draft.savedText || activeSessionRef.current?.status !== "active") return;
       const body = JSON.stringify({ sessionId: draft.sessionId, text: draft.text, revision: draft.revision });
-      if (new Blob([body]).size <= 48_000) navigator.sendBeacon("/api/sessions/draft", new Blob([body], { type: "application/json" }));
+      if (new Blob([body]).size <= 48_000) navigator.sendBeacon(apiUrl("/api/sessions/draft"), new Blob([body], { type: "application/json" }));
     };
     window.addEventListener("online", retry);
     window.addEventListener("pagehide", saveBeforeLeaving);
     const interval = window.setInterval(retry, 15000);
     return () => { window.removeEventListener("online", retry); window.removeEventListener("pagehide", saveBeforeLeaving); window.clearInterval(interval); };
-  }, [saveDraft]);
+  }, [saveDraft, apiUrl]);
 
   const refreshConversations = useCallback(async () => {
-    const response = await fetch("/api/conversations", { cache: "no-store" });
+    const response = await fetch(apiUrl("/api/conversations"), { cache: "no-store" });
     const data = await response.json();
     if (!response.ok) {
       const responseError = new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "无法读取对话列表。");
@@ -406,7 +400,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
     }
     setConversations(data.conversations as ConversationSummary[]);
     return true;
-  }, [releaseInvalidatedSession]);
+  }, [releaseInvalidatedSession, apiUrl]);
 
   const pollUntilSettled = useCallback(async () => {
     const expectedSessionId = sessionIdRef.current;
@@ -417,7 +411,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
       if (sessionIdRef.current !== expectedSessionId) return;
       let payload: SessionPayload;
       try {
-        const response = await fetch("/api/sessions", { cache: "no-store", signal: AbortSignal.timeout(35000) });
+        const response = await fetch(apiUrl("/api/sessions"), { cache: "no-store", signal: AbortSignal.timeout(35000) });
         payload = await readResponse(response);
       } catch (pollError) {
         if (pollError instanceof ClientApiError && pollError.status < 500 && pollError.status !== 429) throw pollError;
@@ -434,7 +428,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
       }
     }
     setError("AI 仍在处理这条消息。你可以稍后刷新页面，系统会继续恢复结果。");
-  }, [applyPayload, releaseInvalidatedSession]);
+  }, [applyPayload, releaseInvalidatedSession, apiUrl]);
 
   const sendWithId = useCallback(async (content: string, clientRequestId: string) => {
     if (sendingRef.current || uploadRef.current) return;
@@ -464,10 +458,10 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
       const nextMessages = mergeMessages(messageLedgerRef.current, [optimisticMessage]);
       messageLedgerRef.current = nextMessages;
       setMessages(nextMessages);
-      if (activeSessionRef.current) writeLocalTranscript(activeSessionRef.current, nextMessages);
+      if (activeSessionRef.current) writeLocalTranscript(activeSessionRef.current, nextMessages, experimentId);
     }
     try {
-      const response = await fetch("/api/messages", {
+      const response = await fetch(apiUrl("/api/messages"), {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content, clientRequestId, turnIndex, userSequence }),
         signal: AbortSignal.timeout(30000),
@@ -491,7 +485,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
       setRetryContent(content);
       setError(sendError instanceof Error ? sendError.message : "发送失败，请重试。");
       try {
-        const recovered = await readResponse(await fetch("/api/sessions", { cache: "no-store" }));
+        const recovered = await readResponse(await fetch(apiUrl("/api/sessions"), { cache: "no-store" }));
         applyPayload(recovered);
         if (recovered.pending) await pollUntilSettled();
         if (!recovered.messages.some(message => message.clientRequestId === clientRequestId)) {
@@ -505,7 +499,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
       }
     }
     } finally { sendingRef.current = false; }
-  }, [applyPayload, pollUntilSettled, releaseInvalidatedSession]);
+  }, [applyPayload, pollUntilSettled, releaseInvalidatedSession, apiUrl, experimentId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -515,7 +509,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
       const access = params.get("access") ?? undefined;
       if (!participantCode) {
         try {
-          const response = await fetch("/api/sessions", { cache: "no-store" });
+          const response = await fetch(apiUrl("/api/sessions"), { cache: "no-store" });
           if (response.status === 401) {
             if (!cancelled) setProfileOpen(true);
             return;
@@ -534,7 +528,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
         return;
       }
       try {
-        const payload = await readResponse(await fetch("/api/sessions", {
+        const payload = await readResponse(await fetch(apiUrl("/api/sessions"), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ participantCode, access }),
         }));
@@ -565,7 +559,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
     }
     void initialize();
     return () => { cancelled = true; };
-  }, [applyPayload, pollUntilSettled, refreshConversations]);
+  }, [applyPayload, pollUntilSettled, refreshConversations, apiUrl]);
 
   useEffect(() => {
     let checking = false;
@@ -590,13 +584,13 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
   useEffect(() => {
     if (!("BroadcastChannel" in window)) return;
     const channel = new BroadcastChannel("edulab_session_events");
-    channel.onmessage = (event: MessageEvent<{ type?: string; participantCode?: string }>) => {
-      if (event.data?.type === "participant_deleted" && event.data.participantCode === activeSessionRef.current?.participantCode) {
+    channel.onmessage = (event: MessageEvent<{ type?: string; participantCode?: string; experimentId?: string }>) => {
+      if (event.data?.type === "participant_deleted" && event.data.experimentId === experiment.id && event.data.participantCode === activeSessionRef.current?.participantCode) {
         void releaseInvalidatedSession("原参与者记录已从后台删除，请填写下一位参与者信息。");
       }
     };
     return () => channel.close();
-  }, [releaseInvalidatedSession]);
+  }, [releaseInvalidatedSession, experiment.id, apiUrl]);
 
   useEffect(() => {
     const container = messagesViewRef.current;
@@ -615,7 +609,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
   const messageLimitReached = controls?.remainingMessages === 0;
   const canChat = Boolean(participantProfile && session?.status === "active" && controls?.chatEnabled && !timeExpired && !messageLimitReached);
   const fullscreenReady = fullscreenState === "fullscreen" || fullscreenState === "unsupported";
-  const composerAvailable = Boolean(canChat && !loading && !pending && !profileOpen && !codeReminderOpen && fullscreenReady);
+  const composerAvailable = Boolean(canChat && !loading && !pending && !profileOpen && fullscreenReady);
   const limitText = [
     controls?.remainingMessages === null || controls?.remainingMessages === undefined ? null : `剩余 ${controls.remainingMessages} 次`,
     remainingSeconds === null ? null : `剩余 ${Math.floor(remainingSeconds / 60)}:${String(remainingSeconds % 60).padStart(2, "0")}`,
@@ -638,16 +632,6 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
     return () => window.cancelAnimationFrame(frame);
   }, [composerAvailable, focusComposer]);
 
-  useEffect(() => {
-    if (!codeReminderOpen || profileOpen || !fullscreenReady) return;
-    codeReminderCloseRef.current?.focus();
-    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setCodeReminderOpen(false);
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [codeReminderOpen, profileOpen, fullscreenReady]);
-
   function handleWorkspacePointerDown(event: ReactPointerEvent<HTMLElement>) {
     if (!pending || !restoreComposerFocusRef.current) return;
     if (composerFormRef.current?.contains(event.target as Node)) return;
@@ -656,7 +640,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
 
   function handleFullscreenEntered() {
     restoreComposerFocusRef.current = true;
-    if (!profileOpen && !codeReminderOpen && !loading && !pending && canChat) focusComposer();
+    if (!profileOpen && !loading && !pending && canChat) focusComposer();
   }
 
   useEffect(() => {
@@ -676,9 +660,9 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
       const body = transcriptUploadBody(messageLedgerRef.current);
       // A full transcript above this size cannot fit the unload queue.
       if (new Blob([body]).size > 48_000) return;
-      const accepted = navigator.sendBeacon("/api/sessions/checkpoint", new Blob([body], { type: "application/json" }));
+      const accepted = navigator.sendBeacon(apiUrl("/api/sessions/checkpoint"), new Blob([body], { type: "application/json" }));
       if (!accepted) {
-        void fetch("/api/sessions/checkpoint", {
+        void fetch(apiUrl("/api/sessions/checkpoint"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body,
@@ -692,7 +676,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
       window.removeEventListener("beforeunload", warnBeforeLeaving);
       window.removeEventListener("pagehide", uploadBeforeLeaving);
     };
-  }, []);
+  }, [apiUrl]);
 
   useEffect(() => {
     if (!session || session.status !== "active" || pending || uploading || (!timeExpired && !messageLimitReached)) return;
@@ -702,8 +686,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
     setUploading(true);
     void (async () => {
       try {
-        if (controls?.databaseMessagesEnabled) await uploadTranscript(session.id, messageLedgerRef.current);
-        const payload = await readResponse(await fetch("/api/sessions/complete", {
+        if (controls?.databaseMessagesEnabled) await uploadTranscript(session.id, messageLedgerRef.current, entryToken);
+        const payload = await readResponse(await fetch(apiUrl("/api/sessions/complete"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: controls?.databaseMessagesEnabled
@@ -721,7 +705,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
         }, 5000 + Math.random() * 5000);
       } finally { uploadRef.current = false; setUploading(false); }
     })();
-  }, [applyPayload, controls?.databaseMessagesEnabled, finalizationRetry, messageLimitReached, pending, refreshConversations, session, timeExpired, uploading]);
+  }, [applyPayload, controls?.databaseMessagesEnabled, finalizationRetry, messageLimitReached, pending, refreshConversations, session, timeExpired, uploading, apiUrl, entryToken]);
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
@@ -747,13 +731,13 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
     setProfileSaving(true);
     setProfileError("");
     try {
-      const response = await fetch("/api/sessions/resume", {
+      const response = await fetch(apiUrl("/api/sessions/resume"), {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ participantCode: resumeCode, identity: resumeIdentity }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error?.message ?? "实验恢复失败，请重试。");
-      const payload = await readResponse(await fetch("/api/sessions", { cache: "no-store" }));
+      const payload = await readResponse(await fetch(apiUrl("/api/sessions"), { cache: "no-store" }));
       applyPayload(payload);
       setProfileOpen(false);
       setResumeIdentity("");
@@ -779,7 +763,6 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
   }
 
   function openParticipantProfile() {
-    setCodeReminderOpen(false);
     setProfileFullName(participantProfile?.fullName ?? "");
     setProfileStudentNumber(participantProfile?.studentNumber ?? "");
     setProfileError("");
@@ -788,14 +771,14 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
 
   async function saveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!profileFullName.trim() && !profileStudentNumber.trim()) {
-      setProfileError("请至少填写姓名或学号中的一项。");
+    if (!profileStudentNumber.trim() && (!participantProfile || participantProfile.studentNumber)) {
+      setProfileError("请填写学号，姓名可以不填。");
       return;
     }
     setProfileSaving(true);
     setProfileError("");
     try {
-      const response = await fetch(session ? "/api/participant-profile" : "/api/sessions", {
+      const response = await fetch(apiUrl(session ? "/api/participant-profile" : "/api/sessions"), {
         method: session ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(session
@@ -806,7 +789,6 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
       if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "参与者信息保存失败。");
       if (session) {
         setParticipantProfile(data.profile as ParticipantProfile);
-        remindParticipantCode(session.participantCode);
       } else {
         applyPayload(data as SessionPayload);
         await refreshConversations();
@@ -831,7 +813,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
         await saveDraft();
         if (draftRef.current.text !== draftRef.current.savedText) throw new Error("当前草稿尚未保存，请核对草稿提示后再切换对话。");
       }
-      const response = await fetch("/api/conversations", {
+      const response = await fetch(apiUrl("/api/conversations"), {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action),
       });
       const data = await response.json();
@@ -863,7 +845,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
   async function uploadAllRecords() {
     if (!session || !controls?.databaseMessagesEnabled) return;
     const ids = new Set([session.id, ...conversations.map(item => item.id)]);
-    for (const id of ids) await uploadTranscript(id, id === session.id ? messageLedgerRef.current : readLocalTranscript(id));
+    for (const id of ids) await uploadTranscript(id, id === session.id ? messageLedgerRef.current : readLocalTranscript(id), entryToken);
   }
 
   function exportTranscript() {
@@ -940,7 +922,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
     try {
       if (controls?.databaseMessagesEnabled === false) exportParticipantArchive();
       else await uploadAllRecords();
-      const response = await fetch("/api/sessions/reset", {
+      const response = await fetch(apiUrl("/api/sessions/reset"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: controls?.databaseMessagesEnabled
@@ -963,8 +945,6 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
       setControls(null);
       setConversations([]);
       setParticipantProfile(null);
-      setCodeReminderOpen(false);
-      remindedParticipantRef.current = null;
       setProfileFullName("");
       setProfileStudentNumber("");
       setText("");
@@ -1038,14 +1018,6 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
           </div>
         </section>
       </section>
-      {codeReminderOpen && !profileOpen && participantCodeDetails && <div className="profile-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCodeReminderOpen(false); }}>
-        <section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="code-reminder-title">
-          <div className="profile-modal-head"><div><p>实验信息</p><h2 id="code-reminder-title">请保存你的实验编号</h2></div><button type="button" onClick={() => setCodeReminderOpen(false)} aria-label="关闭编号提醒">×</button></div>
-          {participantCodeDetails}
-          <p className="profile-hint">关闭后，可点击左下角参与者信息查看编号。</p>
-          <button ref={codeReminderCloseRef} className="profile-save code-reminder-confirm" type="button" onClick={() => setCodeReminderOpen(false)}>我已记下，继续实验</button>
-        </section>
-      </div>}
       {profileOpen && <div className="profile-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && participantProfile) setProfileOpen(false); }}>
         <section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title">
           <div className="profile-modal-head"><div><p>参与者信息</p><h2 id="profile-title">{participantProfile ? "查看或修改基本信息" : !session && entryMode === "resume" ? "继续之前的实验" : "开始前请填写基本信息"}</h2></div>{participantProfile && <button type="button" onClick={() => setProfileOpen(false)} aria-label="关闭">×</button>}</div>
@@ -1059,8 +1031,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment }: { experim
             <button className="profile-save" type="submit" disabled={profileSaving}>{profileSaving ? "恢复中…" : "恢复实验"}</button>
           </form> : <form className="profile-form" onSubmit={saveProfile}>
             <label><span>姓名</span><input value={profileFullName} onChange={(event) => setProfileFullName(event.target.value)} maxLength={100} autoComplete="name" placeholder="请输入姓名" /></label>
-            <label><span>学号</span><input value={profileStudentNumber} onChange={(event) => setProfileStudentNumber(event.target.value)} maxLength={100} autoComplete="off" placeholder="请输入学号" /></label>
-            <p className="profile-hint">至少填写一项。请使用研究者要求的信息。</p>
+            <label><span>学号</span><input value={profileStudentNumber} onChange={(event) => setProfileStudentNumber(event.target.value)} maxLength={100} autoComplete="off" placeholder="请输入学号" required={!participantProfile || Boolean(participantProfile.studentNumber)} /></label>
+            <p className="profile-hint">学号用于核对实验记录，姓名可以不填。请使用研究者要求的信息。</p>
             {profileError && <p className="profile-error" role="alert">{profileError}</p>}
             <button className="profile-save" type="submit" disabled={profileSaving || participantSwitching}>{profileSaving ? "保存中…" : participantProfile ? "保存修改" : "保存并开始"}</button>
             {participantProfile && <div className="next-participant"><button type="button" onClick={startNextParticipant} disabled={pending || profileSaving || participantSwitching}>{participantSwitching ? "正在保存并切换…" : "开始下一位参与者"}</button><p>仅在实验人员要求时使用。切换后当前参与者将无法在此浏览器继续操作。</p></div>}

@@ -1,3 +1,4 @@
+import { getStudentEntry } from "@/lib/experiment-entry";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { beginChatRequest, CozeChatError, createCozeChat, finalizeCompletedRequest, formatCozeError, getUnstoredCompletedRequestMessages, markRequestFailed, recoverPendingRequest, waitForCozeChat } from "@/lib/coze";
@@ -47,7 +48,7 @@ export async function POST(request: Request) {
     assertSameOrigin(request);
     const input = inputSchema.safeParse(await request.json());
     if (!input.success) throw new ApiError(400, "INVALID_MESSAGE", "消息为空或过长，请修改后重试。");
-    session = await getAuthenticatedSession();
+    session = await getAuthenticatedSession(await getStudentEntry(request));
     if (!session) throw new ApiError(401, "SESSION_REQUIRED", "实验会话已失效，请重新打开实验链接。");
     await importLegacyRuntime(session);
     if (session.status !== "active") throw new ApiError(409, "SESSION_COMPLETED", "本次实验已经结束，不能再发送消息。");

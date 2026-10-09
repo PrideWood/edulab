@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { experiment } from "@/config/experiment";
+import { getAdminExperimentId } from "@/lib/experiment-entry";
 import { assertSameOrigin, getAuthenticatedAdmin } from "@/lib/admin-auth";
 import { getExperimentSettings, saveExperimentSettings } from "@/lib/experiment-settings";
 import { ApiError, errorResponse } from "@/lib/http";
@@ -36,11 +36,12 @@ const inputSchema = z.object({
   }),
 });
 
-export async function GET() {
+export async function GET(request?: Request) {
   try {
     const admin = await getAuthenticatedAdmin();
     if (!admin) throw new ApiError(401, "ADMIN_REQUIRED", "请先登录管理后台。");
-    return NextResponse.json({ admin, settings: await getExperimentSettings(experiment.id, false) });
+    const experimentId = await getAdminExperimentId(request);
+    return NextResponse.json({ admin, settings: await getExperimentSettings(experimentId, false) });
   } catch (error) { return errorResponse(error); }
 }
 
@@ -49,9 +50,10 @@ export async function POST(request: Request) {
     assertSameOrigin(request);
     const admin = await getAuthenticatedAdmin();
     if (!admin) throw new ApiError(401, "ADMIN_REQUIRED", "请先登录管理后台。");
+    const experimentId = await getAdminExperimentId(request);
     const input = inputSchema.safeParse(await request.json());
     if (!input.success) throw new ApiError(400, "INVALID_SETTINGS", input.error.issues[0]?.message ?? "设置内容无效。");
-    if (input.data.experiment.id !== experiment.id) throw new ApiError(400, "EXPERIMENT_MISMATCH", "当前版本只能设置已配置的实验。");
+    if (input.data.experiment.id !== experimentId) throw new ApiError(400, "EXPERIMENT_MISMATCH", "提交的设置与当前选择的实验不一致。");
     const settings = await saveExperimentSettings(input.data, admin.id);
     return NextResponse.json({ admin, settings });
   } catch (error) { return errorResponse(error); }

@@ -15,6 +15,7 @@ test("save and test uses the committed credential, and reports saved state on pr
     "next/server": { NextResponse: { json: (body) => body } },
     zod: { z },
     "@/config/experiment": { experiment: { id: "experiment" } },
+    "@/lib/experiment-entry": { getAdminExperimentId: async () => "experiment" },
     "@/lib/admin-auth": { assertSameOrigin() {}, getAuthenticatedAdmin: async () => ({ id: "admin" }) },
     "@/lib/http": { ApiError, errorResponse: (error) => { throw error; } },
     "@/lib/agent-test-error": { formatAgentTestFailure: () => "认证失败" },

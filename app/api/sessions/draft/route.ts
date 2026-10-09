@@ -1,3 +1,4 @@
+import { getStudentEntry } from "@/lib/experiment-entry";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { assertSameOrigin } from "@/lib/admin-auth";
@@ -9,7 +10,7 @@ const inputSchema = z.object({ sessionId: z.uuid(), text: z.string().max(20_000)
 export async function POST(request: Request) {
   try {
     assertSameOrigin(request);
-    const session = await getAuthenticatedSession();
+    const session = await getAuthenticatedSession(await getStudentEntry(request));
     if (!session) throw new ApiError(401, "SESSION_REQUIRED", "会话失效，请使用编号恢复实验。");
     if (session.configSnapshot?.storage.databaseMessagesEnabled === false) throw new ApiError(409, "DRAFT_STORAGE_DISABLED", "本实验未开启云端内容存储，请保留本地输入。");
     const input = inputSchema.safeParse(await request.json());

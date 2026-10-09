@@ -17,16 +17,16 @@ export function normalizeParticipantCode(code: string) {
   return code.trim().toUpperCase();
 }
 
-export function signParticipantCode(code: string) {
+export function signParticipantCode(code: string, experimentId = experiment.id) {
   const secret = process.env.PARTICIPANT_LINK_SECRET;
   if (!secret) throw new Error("PARTICIPANT_LINK_SECRET is not configured");
-  return createHmac("sha256", secret).update(`${experiment.id}:${normalizeParticipantCode(code)}`).digest("base64url");
+  return createHmac("sha256", secret).update(`${experimentId}:${normalizeParticipantCode(code)}`).digest("base64url");
 }
 
-export function verifyParticipantAccess(code: string, signature: string | undefined) {
+export function verifyParticipantAccess(code: string, signature: string | undefined, experimentId = experiment.id) {
   if (process.env.NODE_ENV !== "production" && process.env.ALLOW_UNSIGNED_PARTICIPANTS === "true") return true;
   if (!signature) return false;
-  const expected = Buffer.from(signParticipantCode(code));
+  const expected = Buffer.from(signParticipantCode(code, experimentId));
   const actual = Buffer.from(signature);
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }

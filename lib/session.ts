@@ -2,7 +2,9 @@ import "server-only";
 
 import { cookies } from "next/headers";
 import { query } from "@/db";
-import { hashSecret, parseSessionCookie, SESSION_COOKIE } from "@/lib/security";
+import { hashSecret, parseSessionCookie } from "@/lib/security";
+import { experiment } from "@/config/experiment";
+import { sessionCookieName, type ExperimentEntry } from "@/lib/experiment-entry";
 import type { ExperimentSessionSnapshot } from "@/lib/experiment-settings";
 
 export interface AuthenticatedSession {
@@ -22,8 +24,8 @@ export interface AuthenticatedSession {
   sessionSecretHash: string;
 }
 
-export async function getAuthenticatedSession(): Promise<AuthenticatedSession | null> {
-  const parsed = parseSessionCookie((await cookies()).get(SESSION_COOKIE)?.value);
+export async function getAuthenticatedSession(entry?: ExperimentEntry | null): Promise<AuthenticatedSession | null> {
+  const parsed = parseSessionCookie((await cookies()).get(sessionCookieName(entry))?.value);
   if (!parsed) return null;
   const result = await query<{
     id: string; public_id: string; participant_id: string; external_code: string;
@@ -36,7 +38,8 @@ export async function getAuthenticatedSession(): Promise<AuthenticatedSession | 
              s.started_at, s.last_activity_at, s.config_version, s.config_snapshot, s.session_secret_hash
       FROM experiment_sessions s
       JOIN participants p ON p.id = s.participant_id
-      WHERE s.public_id = $1 AND s.session_secret_hash = $2`, [parsed.publicId, hashSecret(parsed.secret)]);
+      WHERE s.public_id = $1 AND s.session_secret_hash = $2 AND s.experiment_id=$3
+        AND ($4::uuid IS NULL OR s.experiment_run_id=$4)`, [parsed.publicId, hashSecret(parsed.secret), entry?.experimentId ?? experiment.id, entry?.runId ?? null]);
   const row = result.rows[0];
   if (!row) return null;
   return {

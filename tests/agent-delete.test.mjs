@@ -21,7 +21,8 @@ test("agent deletion protects live records but clears empty closed runs", { skip
       CREATE TEMP TABLE experiment_runs (
         id uuid PRIMARY KEY, experiment_id text, name text, status text, assignment_mode text,
         fixed_agent_id uuid REFERENCES ai_agent_configs(id), random_agent_ids uuid[] DEFAULT '{}',
-        opened_at timestamptz, closed_at timestamptz, created_at timestamptz DEFAULT now()
+        opened_at timestamptz, closed_at timestamptz, created_at timestamptz DEFAULT now(),
+        entry_token text DEFAULT 'abcd-efgh', is_default boolean DEFAULT true, config_snapshot jsonb
       ) ON COMMIT DROP;
       CREATE TEMP TABLE participant_agent_assignments (
         id uuid, experiment_run_id uuid REFERENCES experiment_runs(id), agent_id uuid REFERENCES ai_agent_configs(id)

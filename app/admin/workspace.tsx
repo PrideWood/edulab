@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { buildEntryInvitation } from "@/lib/entry-links";
 import type { ExperimentSettings } from "@/lib/experiment-settings";
 
 type Section = "participants" | "content" | "limits" | "storage" | "ai";
@@ -18,6 +19,7 @@ type AgentSummary = {
 type RunSummary = {
   id: string; name: string; status: "draft" | "active" | "closed";
   assignmentMode: "fixed" | "balanced_random"; fixedAgentId: string | null;
+  entryToken: string; isDefault: boolean;
   randomAgentIds: string[]; openedAt: string | null; closedAt: string | null; createdAt: string;
 };
 type AgentControl = { agents: AgentSummary[]; runs: RunSummary[]; activeRun: RunSummary | null };
@@ -25,7 +27,7 @@ type AgentControl = { agents: AgentSummary[]; runs: RunSummary[]; activeRun: Run
 const sections: Array<{ id: Section; number: string; label: string; description: string }> = [
   { id: "participants", number: "01", label: "参与者", description: "身份与编号对应表" },
   { id: "limits", number: "02", label: "交互规则", description: "次数、字数与时长" },
-  { id: "ai", number: "03", label: "智能体与场次", description: "Coze 配置和课程切换" },
+  { id: "ai", number: "03", label: "智能体与入口", description: "分组链接与 Coze 配置" },
   { id: "storage", number: "04", label: "数据保存", description: "数据库与人工备份" },
   { id: "content", number: "05", label: "可选任务说明", description: "通常无需展示" },
 ];
@@ -47,27 +49,54 @@ export function AdminWorkspace() {
   const [participants, setParticipants] = useState<ParticipantDirectoryRow[]>([]);
   const [participantsLoading, setParticipantsLoading] = useState(false);
   const [participantsError, setParticipantsError] = useState("");
+  const [experiments, setExperiments] = useState<Array<{ id: string; name: string }>>([]);
+  const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [runFilter, setRunFilter] = useState("");
+  const [creatingExperiment, setCreatingExperiment] = useState(false);
+  const [newExperimentName, setNewExperimentName] = useState("");
+  const selectedExperimentRef = useRef("");
+  const runFilterRef = useRef("");
+
 
   const loadParticipants = useCallback(async () => {
+    const selectedId = selectedExperimentRef.current;
+    const selectedRun = runFilterRef.current;
     setParticipantsLoading(true);
     setParticipantsError("");
     try {
-      const response = await fetch("/api/admin/participants", { cache: "no-store" });
+      const response = await fetch(`/api/admin/participants?experimentId=${encodeURIComponent(selectedId)}${selectedRun ? `&runId=${encodeURIComponent(selectedRun)}` : ""}`, { cache: "no-store" });
       const data = await response.json();
       if (!response.ok) throw Object.assign(new Error(data?.error?.message ?? "无法读取参与者信息。"), { status: response.status });
-      setParticipants(data.participants as ParticipantDirectoryRow[]);
+      if (selectedExperimentRef.current === selectedId && runFilterRef.current === selectedRun) setParticipants(data.participants as ParticipantDirectoryRow[]);
     } catch (loadError) {
       if ((loadError as { status?: number }).status === 401) setMode("login");
-      setParticipantsError(loadError instanceof Error ? loadError.message : "无法读取参与者信息。");
-    } finally { setParticipantsLoading(false); }
+      if (selectedExperimentRef.current === selectedId && runFilterRef.current === selectedRun) setParticipantsError(loadError instanceof Error ? loadError.message : "无法读取参与者信息。");
+    } finally { if (selectedExperimentRef.current === selectedId && runFilterRef.current === selectedRun) setParticipantsLoading(false); }
+  }, []);
+
+  const loadStudyLists = useCallback(async (experimentId: string) => {
+    try {
+      const [studiesResponse, runsResponse] = await Promise.all([
+        fetch("/api/admin/experiments", { cache: "no-store" }),
+        fetch(`/api/admin/agent-control?experimentId=${encodeURIComponent(experimentId)}`, { cache: "no-store" }),
+      ]);
+      const studies = await studiesResponse.json();
+      const runData = await runsResponse.json();
+      if (!studiesResponse.ok || !runsResponse.ok) throw new Error(studies?.error?.message ?? runData?.error?.message ?? "无法读取实验与场次。");
+      if (selectedExperimentRef.current !== experimentId) return;
+      setExperiments(studies.experiments);
+      setRuns(runData.control.runs);
+    } catch (failure) {
+      if (selectedExperimentRef.current === experimentId) setError(failure instanceof Error ? failure.message : "无法读取实验与场次。");
+    }
   }, []);
 
   useEffect(() => {
     fetch("/api/admin/settings", { cache: "no-store" })
       .then(parseResponse)
-      .then((data) => { setAdmin(data.admin); setSettings(data.settings); setMode("ready"); void loadParticipants(); })
+      .then((data) => { setAdmin(data.admin); setSettings(data.settings); selectedExperimentRef.current=data.settings.experiment.id; setMode("ready"); void loadParticipants(); void loadStudyLists(data.settings.experiment.id); })
       .catch(() => setMode("login"));
-  }, [loadParticipants]);
+  }, [loadParticipants, loadStudyLists]);
 
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -84,16 +113,44 @@ export function AdminWorkspace() {
     }
     try {
       const data = await parseResponse(await fetch("/api/admin/settings", { cache: "no-store" }));
-      setAdmin(data.admin); setSettings(data.settings); setMode("ready");
+      setAdmin(data.admin); setSettings(data.settings); selectedExperimentRef.current=data.settings.experiment.id; setMode("ready");
+      void loadStudyLists(data.settings.experiment.id);
       void loadParticipants();
     } catch (loadError) { setError(loadError instanceof Error ? loadError.message : "无法读取实验设置。"); }
+  }
+
+
+  async function selectExperiment(id: string) {
+    setSaving(true); setError(""); setStatus("");
+    try {
+      const data = await parseResponse(await fetch(`/api/admin/settings?experimentId=${encodeURIComponent(id)}`, { cache:"no-store" }));
+      selectedExperimentRef.current=id; runFilterRef.current=""; setRunFilter(""); setParticipants([]);
+      setSettings(data.settings); setCreatingExperiment(false);
+      await Promise.all([loadParticipants(),loadStudyLists(id)]);
+    } catch (failure) { setError(failure instanceof Error ? failure.message : "实验切换失败。"); }
+    finally { setSaving(false); }
+  }
+
+  async function addExperiment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (!settings) return;
+    setSaving(true); setError("");
+    try {
+      const response = await fetch("/api/admin/experiments", { method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({ name:newExperimentName,sourceId:settings.experiment.id }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.error?.message ?? "创建失败。");
+      setExperiments(data.experiments); setNewExperimentName("");
+      await selectExperiment(data.created.id);
+      setStatus("新实验已创建，请检查任务和交互规则，再开放场次并复制链接。");
+    } catch (failure) { setError(failure instanceof Error ? failure.message : "创建失败。"); }
+    finally { setSaving(false); }
   }
 
   async function save() {
     if (!settings) return;
     setSaving(true); setError(""); setStatus("");
     try {
-      const data = await parseResponse(await fetch("/api/admin/settings", {
+      const data = await parseResponse(await fetch(`/api/admin/settings?experimentId=${encodeURIComponent(settings.experiment.id)}`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           experiment: settings.experiment,
@@ -124,18 +181,21 @@ export function AdminWorkspace() {
     <main className="admin-shell">
       <aside className="admin-sidebar">
         <div className="admin-brand"><span className="admin-brand-mark">E</span><span>EduLab</span></div>
+        <div className="experiment-selector"><label htmlFor="admin-experiment">当前实验</label><select id="admin-experiment" value={settings.experiment.id} disabled={saving} onChange={(event) => void selectExperiment(event.target.value)}>{experiments.length === 0 ? <option value={settings.experiment.id}>{settings.experiment.title}</option> : experiments.map((study) => <option key={study.id} value={study.id}>{study.name}</option>)}</select><button disabled={saving} onClick={() => setCreatingExperiment((value) => !value)}>＋ 新增实验</button></div>
         <nav className="admin-nav" aria-label="设置导航">{sections.map((item) => <button className={section === item.id ? "active" : ""} key={item.id} onClick={() => { setSection(item.id); if (item.id === "participants") void loadParticipants(); }}><span>{item.number}</span><div><strong>{item.label}</strong><small>{item.description}</small></div></button>)}</nav>
         <div className="admin-sidebar-footer"><div><span className="admin-online-dot" />{admin.displayName}</div><button onClick={logout}>退出</button></div>
       </aside>
 
       <section className="admin-main">
-        <header className="admin-header"><div><p className="admin-kicker">{section === "participants" ? "研究数据" : "实验配置"}</p><h1>{sections.find((item) => item.id === section)?.label}</h1></div><div className="admin-header-actions">{section === "participants" ? <><span className="save-state">身份信息与对话记录分开保存</span><button className="admin-refresh" onClick={loadParticipants} disabled={participantsLoading}>{participantsLoading ? "读取中…" : "刷新"}</button></> : section === "ai" ? <span className="save-state">场次切换只影响之后进入的参与者</span> : <><span className={error ? "save-state error" : "save-state"}>{error || status || "设置只影响新创建的会话"}</span><button className="admin-save" onClick={save} disabled={saving}>{saving ? "保存中…" : "保存设置"}</button></>}</div></header>
+        <header className="admin-header"><div><p className="admin-kicker">{section === "participants" ? "研究数据" : "实验配置"}</p><h1>{sections.find((item) => item.id === section)?.label}</h1></div><div className="admin-header-actions">{section === "participants" ? <><span className="save-state">身份信息与对话记录分开保存</span><button className="admin-refresh" onClick={() => void loadParticipants()} disabled={participantsLoading}>{participantsLoading ? "读取中…" : "刷新"}</button></> : section === "ai" ? <span className="save-state">各组链接固定对应智能体</span> : <><span className={error ? "save-state error" : "save-state"}>{error || status || "设置只影响新创建的会话"}</span><button className="admin-save" onClick={save} disabled={saving}>{saving ? "保存中…" : "保存设置"}</button></>}</div></header>
         <div className={`admin-content ${section === "ai" ? "wide" : ""}`}>
-          {section === "participants" && <ParticipantDirectory participants={participants} loading={participantsLoading} error={participantsError} onDeleted={(participantId) => setParticipants((current) => current.filter((participant) => participant.id !== participantId))} />}
+          {creatingExperiment && <section className="settings-card"><h2>新增实验</h2><p>复制当前实验的任务、规则与智能体配置；新实验的修改和数据独立保存，不复制被试记录或场次。</p><form className="new-experiment-form" onSubmit={addExperiment}><label>实验名称<input value={newExperimentName} maxLength={120} required onChange={(event) => setNewExperimentName(event.target.value)} /></label><button className="admin-save" disabled={saving || !newExperimentName.trim()}>创建实验</button></form>{error && <p role="alert">{error}</p>}</section>}
+          {section === "participants" && <label className="run-filter">查看分组入口<select value={runFilter} onChange={(event) => { setRunFilter(event.target.value); runFilterRef.current=event.target.value; setParticipants([]); void loadParticipants(); }}><option value="">全部分组</option>{runs.map((run) => <option key={run.id} value={run.id}>{run.name}</option>)}</select></label>}
+          {section === "participants" && <ParticipantDirectory key={`${settings.experiment.id}:${runFilter}`} experimentId={settings.experiment.id} runId={runFilter} participants={participants} loading={participantsLoading} error={participantsError} onDeleted={(participantId) => setParticipants((current) => current.filter((participant) => participant.id !== participantId))} />}
           {section === "content" && <ContentSettings settings={settings} update={updateExperiment} />}
           {section === "limits" && <LimitSettings settings={settings} updateExperiment={updateExperiment} updateLimits={updateLimits} />}
           {section === "storage" && <StorageSettings settings={settings} update={updateStorage} />}
-          {section === "ai" && <AgentRunSettings />}
+          {section === "ai" && <AgentRunSettings key={settings.experiment.id} experimentId={settings.experiment.id} experimentName={experiments.find((study) => study.id === settings.experiment.id)?.name ?? settings.experiment.title} onRunsChanged={setRuns} />}
         </div>
       </section>
     </main>
@@ -184,7 +244,8 @@ function DangerConfirmation({ title, description, expectedValue, expectedLabel, 
   </div>;
 }
 
-function ParticipantDirectory({ participants, loading, error, onDeleted }: {
+function ParticipantDirectory({ participants, loading, error, onDeleted, experimentId, runId }: {
+  experimentId: string; runId: string;
   participants: ParticipantDirectoryRow[]; loading: boolean; error: string; onDeleted: (participantId: string) => void;
 }) {
   const [pendingDelete, setPendingDelete] = useState<ParticipantDirectoryRow | null>(null);
@@ -215,10 +276,10 @@ function ParticipantDirectory({ participants, loading, error, onDeleted }: {
     if (kind === "identity_csv" && !window.confirm(`身份对应表包含姓名或学号等敏感信息。确认导出已选择的 ${availableSelection.length} 位参与者身份信息吗？`)) return;
     setExporting(kind); setExportError(""); setExportStatus("");
     try {
-      const response = await fetch("/api/admin/exports", {
+      const response = await fetch(`/api/admin/exports?experimentId=${encodeURIComponent(experimentId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ kind, participantIds: availableSelection }),
+        body: JSON.stringify({ kind, participantIds: availableSelection, runId:runId || undefined }),
       });
       if (!response.ok) {
         const data = await response.json().catch(() => null);
@@ -237,7 +298,7 @@ function ParticipantDirectory({ participants, loading, error, onDeleted }: {
     if (!pendingDelete) return;
     setDeleting(true); setDeleteError(""); setDeleteStatus("");
     try {
-      const response = await fetch("/api/admin/participants", {
+      const response = await fetch(`/api/admin/participants?experimentId=${encodeURIComponent(experimentId)}`, {
         method: "DELETE", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ participantId: pendingDelete.id, confirmationCode }),
       });
@@ -245,7 +306,7 @@ function ParticipantDirectory({ participants, loading, error, onDeleted }: {
       if (!response.ok) throw new Error(data?.error?.message ?? "删除失败。");
       if ("BroadcastChannel" in window) {
         const channel = new BroadcastChannel("edulab_session_events");
-        channel.postMessage({ type: "participant_deleted", participantCode: pendingDelete.participantCode });
+        channel.postMessage({ type: "participant_deleted", participantCode: pendingDelete.participantCode, experimentId });
         channel.close();
       }
       onDeleted(pendingDelete.id);
@@ -263,7 +324,7 @@ function ParticipantDirectory({ participants, loading, error, onDeleted }: {
     <section className="settings-card participant-directory">
       <div className="settings-card-head"><div><h2>参与者身份对应表</h2><p>姓名和学号经过加密后存储，并通过内部 Participant ID 与会话关联。聊天记录和学生导出的 JSON 不包含这些直接身份信息。</p></div><span className="secure-badge">仅管理员可见</span></div>
       {participants.length > 0 && <div className="participant-export-toolbar"><div><strong>已选择 {availableSelection.length} 位</strong><span>交互记录只包含数据库中已经完成上传的内容</span></div><div><button className="participant-export-button" disabled={availableSelection.length === 0 || Boolean(exporting)} onClick={() => void exportSelected("interactions_zip")}>{exporting === "interactions_zip" ? "正在整理…" : "导出交互记录 (.zip)"}</button><button className="participant-identity-export" disabled={availableSelection.length === 0 || Boolean(exporting)} onClick={() => void exportSelected("identity_csv")}>{exporting === "identity_csv" ? "正在整理…" : "导出身份对应表 (.csv)"}</button></div></div>}
-      {error ? <p className="directory-error" role="alert">{error}</p> : loading && participants.length === 0 ? <p className="directory-empty">正在读取参与者信息…</p> : participants.length === 0 ? <p className="directory-empty">还没有参与者进入实验。</p> : <div className="directory-table-wrap"><table className="directory-table"><thead><tr><th className="directory-select-cell"><SelectionCheckbox checked={allSelected} indeterminate={availableSelection.length > 0 && !allSelected} label="全选当前列表中的参与者" disabled={Boolean(exporting)} onChange={toggleAll} /></th><th>Participant ID</th><th>姓名</th><th>学号</th><th>对话</th><th>轮次</th><th>最后活动</th><th>操作</th></tr></thead><tbody>{participants.map((participant) => <tr key={participant.id}><td className="directory-select-cell"><SelectionCheckbox checked={selectedSet.has(participant.id)} label={`选择参与者 ${participant.participantCode}`} disabled={Boolean(exporting)} onChange={() => toggleParticipant(participant.id)} /></td><td><code>{participant.participantCode}</code></td><td>{participant.fullName || <span className="missing-value">未填写</span>}</td><td>{participant.studentNumber || <span className="missing-value">未填写</span>}</td><td>{participant.sessionCount}</td><td>{participant.turnCount}</td><td>{formatDate(participant.lastActivityAt)}</td><td><button className="table-danger" disabled={Boolean(exporting)} onClick={() => { setDeleteError(""); setPendingDelete(participant); }}>删除记录</button></td></tr>)}</tbody></table></div>}
+      {error ? <p className="directory-error" role="alert">{error}</p> : loading && participants.length === 0 ? <p className="directory-empty">正在读取参与者信息…</p> : participants.length === 0 ? <p className="directory-empty">还没有参与者进入实验。</p> : <div className="directory-table-wrap"><table className="directory-table"><thead><tr><th className="directory-select-cell"><SelectionCheckbox checked={allSelected} indeterminate={availableSelection.length > 0 && !allSelected} label="全选当前列表中的参与者" disabled={Boolean(exporting)} onChange={toggleAll} /></th><th>Participant ID</th><th>姓名</th><th>学号</th><th>对话</th><th>轮次</th><th>最后活动</th><th>操作</th></tr></thead><tbody>{participants.map((participant) => <tr key={participant.id}><td className="directory-select-cell"><SelectionCheckbox checked={selectedSet.has(participant.id)} label={`选择参与者 ${participant.participantCode}`} disabled={Boolean(exporting)} onChange={() => toggleParticipant(participant.id)} /></td><td><code>{participant.participantCode}</code></td><td>{participant.fullName || <span className="missing-value">未填写</span>}</td><td>{participant.studentNumber || <span className="missing-value">未填写</span>}</td><td>{participant.sessionCount}</td><td>{participant.turnCount}</td><td>{formatDate(participant.lastActivityAt)}</td><td><button className="table-danger" disabled={Boolean(exporting) || Boolean(runId)} onClick={() => { setDeleteError(""); setPendingDelete(participant); }}>删除记录</button></td></tr>)}</tbody></table></div>}
     </section>
     <div className="security-note"><strong>访谈联系时如何对应</strong><p>交互数据继续使用 Participant ID。研究者只在需要联系参与者时，通过此表将 Participant ID 对应到姓名或学号，避免直接身份信息进入 AI 对话和导出文件。</p></div>
     {pendingDelete && <DangerConfirmation title={`删除 ${pendingDelete.participantCode} 的全部数据库记录？`} description={`将永久删除该参与者的身份对应、${pendingDelete.sessionCount} 个会话、${pendingDelete.turnCount} 个轮次、消息和智能体分配。此操作无法撤销。对应实验页面在返回前台或再次操作时会退出旧会话并清除该参与者的浏览器本地记录。`} expectedValue={pendingDelete.participantCode} expectedLabel="Participant ID" busy={deleting} error={deleteError} onCancel={() => setPendingDelete(null)} onConfirm={(confirmation) => void removeParticipant(confirmation)} />}
@@ -293,10 +354,11 @@ function LimitSettings({ settings, updateExperiment, updateLimits }: { settings:
 
 function StorageSettings({ settings, update }: { settings: ExperimentSettings; update: (patch: Partial<ExperimentSettings["storage"]>) => void }) {
   const enabled = settings.storage.databaseMessagesEnabled;
-  return <div className="settings-stack"><section className={`settings-card ${enabled ? "" : "storage-disabled"}`}><div className="settings-card-head"><div><h2>实验结束时备份完整对话到数据库</h2><p>聊天期间正文只保存在当前浏览器，不在 AI 回复关键路径上读写 PostgreSQL。</p></div><label className="switch" aria-label="实验结束时备份完整对话到数据库"><input type="checkbox" checked={enabled} onChange={(event) => update({ databaseMessagesEnabled: event.target.checked })} /><span /></label></div><div className="storage-mode"><strong>{enabled ? "浏览器本地记录 + 人工导出 + 结束时数据库备份" : "仅使用浏览器本地记录与人工导出"}</strong><p>{enabled ? "达到时间或次数限制、切换参与者或关闭页面时，系统才提交当前完整记录。数据库网络不会延迟正常的 AI 回复。" : "数据库不保存学生和 AI 的消息正文。请确保参与者完成前下载并提交交互记录。"}</p></div></section><div className="security-note"><strong>刷新不会清除当前会话记录</strong><p>每条已显示的消息都会同步到当前浏览器的本地存储，页面刷新后会自动恢复。但更换设备、清除浏览器数据或使用隐私模式仍可能丢失本地副本。</p></div><div className="security-note"><strong>进入实验仍需要数据库</strong><p>Participant ID、身份对应关系和当前场次在进入实验时创建；进入后发送消息使用加密运行配置直接调用 Coze。数据库中断可能影响新参与者进入和最终备份，但不会延迟已经进入场次的学生获得 AI 回复。</p></div></div>;
+  return <div className="settings-stack"><section className={`settings-card ${enabled ? "" : "storage-disabled"}`}><div className="settings-card-head"><div><h2>实验结束时备份完整对话到数据库</h2><p>开启后，学生消息在调用 AI 前保存，AI 回复完成后保存，支持跨设备恢复。</p></div><label className="switch" aria-label="实验结束时备份完整对话到数据库"><input type="checkbox" checked={enabled} onChange={(event) => update({ databaseMessagesEnabled: event.target.checked })} /><span /></label></div><div className="storage-mode"><strong>{enabled ? "数据库自动保存 + 浏览器副本 + 人工导出" : "仅使用浏览器本地记录与人工导出"}</strong><p>{enabled ? "每轮及时保存，生成中断后使用原请求继续恢复；结束时再次核对完整性。" : "数据库不保存学生和 AI 的消息正文。请确保参与者完成前下载并提交交互记录。"}</p></div></section><div className="security-note"><strong>刷新不会清除当前会话记录</strong><p>每条已显示的消息都会同步到当前浏览器的本地存储，页面刷新后会自动恢复。但更换设备、清除浏览器数据或使用隐私模式仍可能丢失本地副本。</p></div><div className="security-note"><strong>进入实验仍需要数据库</strong><p>编号、身份和分组保存在数据库中。数据库中断时会明确提示保存失败，并保留本机未确认的输入，不会宣称消息已成功保存。</p></div></div>;
 }
 
-function AgentRunSettings() {
+function AgentRunSettings({ experimentId, experimentName, onRunsChanged }: { experimentId: string; experimentName: string; onRunsChanged: (runs: RunSummary[]) => void }) {
+  const endpoint = `/api/admin/agent-control?experimentId=${encodeURIComponent(experimentId)}`;
   const [control, setControl] = useState<AgentControl | null>(null);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
@@ -308,26 +370,30 @@ function AgentRunSettings() {
   const [assignmentMode, setAssignmentMode] = useState<"fixed" | "balanced_random">("fixed");
   const [fixedAgentId, setFixedAgentId] = useState("");
   const [randomAgentIds, setRandomAgentIds] = useState<string[]>([]);
+  const mountedRef = useRef(true);
 
   useEffect(() => {
-    void fetch("/api/admin/agent-control", { cache: "no-store" })
+    mountedRef.current = true;
+    void fetch(endpoint, { cache: "no-store" })
       .then(async (response) => {
         const data = await response.json();
         if (!response.ok) throw new Error(data?.error?.message ?? "无法读取智能体配置。");
-        setControl(data.control as AgentControl);
+        if (mountedRef.current) { setControl(data.control as AgentControl); onRunsChanged(data.control.runs); }
       })
       .catch((loadError) => setError(loadError instanceof Error ? loadError.message : "无法读取智能体配置。"));
-  }, []);
+    return () => { mountedRef.current = false; };
+  }, [endpoint, onRunsChanged]);
 
   async function post(body: unknown, success: string) {
     setBusy(true); setError(""); setStatus("");
     try {
-      const response = await fetch("/api/admin/agent-control", {
+      const response = await fetch(endpoint, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error?.message ?? "保存失败。");
-      setControl(data.control as AgentControl); setAdding(false);
+      if (!mountedRef.current) return;
+      setControl(data.control as AgentControl); onRunsChanged(data.control.runs); setAdding(false);
       if (data.test?.ok === false) setError(data.test.message);
       else setStatus(data.test?.message ?? success);
     } catch (postError) { setError(postError instanceof Error ? postError.message : "保存失败。"); }
@@ -337,13 +403,14 @@ function AgentRunSettings() {
   async function removeAgent(agent: AgentSummary, confirmationName: string) {
     setBusy(true); setError(""); setStatus(""); setAgentDeleteError("");
     try {
-      const response = await fetch("/api/admin/agent-control", {
+      const response = await fetch(endpoint, {
         method: "DELETE", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ agentId: agent.id, confirmationName }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error?.message ?? "删除失败。");
-      setControl(data.control as AgentControl); setStatus(`智能体“${agent.internalName}”已永久删除。`); setPendingAgentDelete(null);
+      if (!mountedRef.current) return false;
+      setControl(data.control as AgentControl); onRunsChanged(data.control.runs); setStatus(`智能体“${agent.internalName}”已永久删除。`); setPendingAgentDelete(null);
       return true;
     } catch (removeError) {
       const message = removeError instanceof Error ? removeError.message : "删除失败。";
@@ -352,36 +419,56 @@ function AgentRunSettings() {
     finally { setBusy(false); }
   }
 
-  if (!control) return <div className="settings-stack"><section className="settings-card"><p>{error || "正在读取智能体和场次…"}</p></section></div>;
+  function runAgentNames(run: RunSummary) {
+    const ids = run.assignmentMode === "fixed" ? (run.fixedAgentId ? [run.fixedAgentId] : []) : run.randomAgentIds;
+    return ids.map((id) => control?.agents.find((agent) => agent.id === id)?.internalName ?? "已删除的配置");
+  }
+
+  async function copyGroupEntry(run: RunSummary) {
+    const invitation = buildEntryInvitation({ experimentName, groupName: run.name, assignmentMode: run.assignmentMode,
+      agentNames: runAgentNames(run), url: `${window.location.origin}/join/${run.entryToken}` });
+    try {
+      await navigator.clipboard.writeText(invitation);
+      setError(""); setStatus(`已复制“${run.name}”的智能体信息和链接。`);
+    } catch { setError("复制失败，请手动保存上方信息和链接。"); }
+  }
+
+  if (!control) return <div className="settings-stack"><section className="settings-card"><p>{error || "正在读取智能体和入口…"}</p></section></div>;
   const enabledAgents = control.agents.filter((agent) => agent.enabled && agent.hasToken);
-  const activeAgentIds = new Set(control.activeRun?.assignmentMode === "fixed"
-    ? [control.activeRun.fixedAgentId].filter((value): value is string => Boolean(value))
-    : control.activeRun?.randomAgentIds ?? []);
+  const activeAgentIds = new Set(control.runs.filter(run => run.status === "active").flatMap(run => run.assignmentMode === "fixed" ? (run.fixedAgentId ? [run.fixedAgentId] : []) : run.randomAgentIds));
 
   return <div className="settings-stack agent-run-settings">
     {(error || status) && <p className={error ? "directory-error" : "agent-success"} role={error ? "alert" : "status"}>{error || status}</p>}
-    <section className="settings-card active-run-card">
-      <div className="settings-card-head"><div><h2>当前开放场次</h2><p>学生填写信息时被分配到当时开放的场次；已经开始的 Session 不会因后台切换而改变智能体。</p></div><span className={control.activeRun ? "secure-badge" : "field-status"}>{control.activeRun ? "正在开放" : "尚未开放"}</span></div>
-      {control.activeRun ? <div className="active-run-summary"><div><span>场次名称</span><strong>{control.activeRun.name}</strong></div><div><span>分配方式</span><strong>{control.activeRun.assignmentMode === "fixed" ? "固定智能体" : "均衡随机分配"}</strong></div><div><span>使用智能体</span><strong>{[...activeAgentIds].map((id) => control.agents.find((agent) => agent.id === id)?.internalName ?? id).join("、")}</strong></div><button className="admin-refresh" disabled={busy} onClick={() => { if (window.confirm("结束后，新学生将暂时无法进入实验，已经开始的 Session 保持原配置。确认结束当前场次吗？")) void post({ action: "close_active_run" }, "当前场次已结束。"); }}>结束当前场次</button></div> : <p className="inline-warning">没有开放场次时，新参与者不能开始实验。</p>}
+    <details className="settings-card active-run-card"><summary>原首页入口（兼容已有实验）</summary>
+      <div className="settings-card-head"><div><h2>首页默认场次</h2><p>原首页使用本实验默认场次；专属链接直接进入指定场次，已经开始的会话始终保持原配置。</p></div><span className={control.activeRun ? "secure-badge" : "field-status"}>{control.activeRun ? "正在开放" : "尚未开放"}</span></div>
+      {control.activeRun ? <div className="active-run-summary"><div><span>场次名称</span><strong>{control.activeRun.name}</strong></div><div><span>分配方式</span><strong>{control.activeRun.assignmentMode === "fixed" ? "固定智能体" : "均衡随机分配"}</strong></div><div><span>使用智能体</span><strong>{runAgentNames(control.activeRun).join("、")}</strong></div><button className="admin-refresh" disabled={busy} onClick={() => { if (window.confirm("结束后，新学生将暂时无法进入实验，已经开始的 Session 保持原配置。确认结束当前场次吗？")) void post({ action: "close_active_run" }, "当前场次已结束。"); }}>结束当前场次</button></div> : <p className="inline-warning">未设置默认场次。学生可使用下方开放场次的专属链接进入。</p>}
+    </details>
+
+    <section className="settings-card">
+      <div className="settings-card-head"><div><h2>创建分组入口</h2><p>为各组选择智能体并生成不同链接，可同时使用。每次创建会固定当前已保存的任务与规则；原有入口继续有效。</p></div><span className="field-status">新参与者生效</span></div>
+      <div className="form-grid run-form"><label className="wide"><span>分组名称</span><input value={runName} onChange={(event) => setRunName(event.target.value)} placeholder="例如：实验一 · B 组" /></label><label><span>分配方式</span><select value={assignmentMode} onChange={(event) => setAssignmentMode(event.target.value as "fixed" | "balanced_random")}><option value="fixed">固定智能体</option><option value="balanced_random">均衡随机分配</option></select></label>{assignmentMode === "fixed" ? <label><span>指定智能体</span><select value={fixedAgentId} onChange={(event) => setFixedAgentId(event.target.value)}><option value="">请选择</option>{enabledAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.internalName}</option>)}</select></label> : <fieldset className="wide agent-choice-field"><legend>参与随机分配的智能体（至少两个）</legend>{enabledAgents.map((agent) => <label key={agent.id}><input type="checkbox" checked={randomAgentIds.includes(agent.id)} onChange={(event) => setRandomAgentIds(event.target.checked ? [...randomAgentIds, agent.id] : randomAgentIds.filter((id) => id !== agent.id))} /><span>{agent.internalName}</span></label>)}</fieldset>}</div>
+      <button className="admin-save run-activate-button" disabled={busy || !runName.trim() || (assignmentMode === "fixed" ? !fixedAgentId : randomAgentIds.length < 2)} onClick={() => { void post({ action: "activate_run", run: { name: runName, assignmentMode, fixedAgentId: assignmentMode === "fixed" ? fixedAgentId : null, randomAgentIds: assignmentMode === "balanced_random" ? randomAgentIds : [], makeDefault:false } }, `分组“${runName}”的链接已创建。`); }}>生成分组链接</button>
     </section>
 
     <section className="settings-card">
-      <div className="settings-card-head"><div><h2>开放新场次</h2><p>适合在每节课开始前操作。开放新场次时，系统会自动关闭之前的场次。</p></div><span className="field-status">新参与者生效</span></div>
-      <div className="form-grid run-form"><label className="wide"><span>场次名称</span><input value={runName} onChange={(event) => setRunName(event.target.value)} placeholder="例如：第二节课 · 智能体 B" /></label><label><span>分配方式</span><select value={assignmentMode} onChange={(event) => setAssignmentMode(event.target.value as "fixed" | "balanced_random")}><option value="fixed">固定智能体</option><option value="balanced_random">均衡随机分配</option></select></label>{assignmentMode === "fixed" ? <label><span>指定智能体</span><select value={fixedAgentId} onChange={(event) => setFixedAgentId(event.target.value)}><option value="">请选择</option>{enabledAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.internalName}</option>)}</select></label> : <fieldset className="wide agent-choice-field"><legend>参与随机分配的智能体（至少两个）</legend>{enabledAgents.map((agent) => <label key={agent.id}><input type="checkbox" checked={randomAgentIds.includes(agent.id)} onChange={(event) => setRandomAgentIds(event.target.checked ? [...randomAgentIds, agent.id] : randomAgentIds.filter((id) => id !== agent.id))} /><span>{agent.internalName}</span></label>)}</fieldset>}</div>
-      <button className="admin-save run-activate-button" disabled={busy || !runName.trim() || (assignmentMode === "fixed" ? !fixedAgentId : randomAgentIds.length < 2)} onClick={() => { const selected = assignmentMode === "fixed" ? control.agents.find((agent) => agent.id === fixedAgentId)?.internalName : `${randomAgentIds.length} 个智能体均衡随机`; if (window.confirm(`即将开放“${runName}”，使用${selected ?? "所选配置"}。这只影响之后进入的参与者。确认继续吗？`)) void post({ action: "activate_run", run: { name: runName, assignmentMode, fixedAgentId: assignmentMode === "fixed" ? fixedAgentId : null, randomAgentIds: assignmentMode === "balanced_random" ? randomAgentIds : [] } }, `场次“${runName}”已开放。`); }}>开放这个场次</button>
+      <div className="settings-card-head"><div><h2>各组实验链接</h2><p>复制按钮会同时复制实验名、分组名、智能体名称和链接。新入口使用 8 位分段短码，支持大写或省略横线输入；已停止报名的入口仍可恢复记录。</p></div></div>
+      <div className="run-link-list">{control.runs.length === 0 ? <p className="directory-empty">创建分组入口后，链接将显示在这里。</p> : control.runs.map((run) => <div className="run-link-row" key={run.id}>
+        <div><strong>{run.name}</strong><small>{run.status === "active" ? "开放中" : "已停止报名"} · {run.assignmentMode === "fixed" ? "固定智能体" : "均衡随机分配"} · {runAgentNames(run).join("、")}{run.isDefault ? " · 原首页入口" : ""}</small><code>/join/{run.entryToken}</code></div>
+        <button type="button" className="admin-refresh" onClick={() => void copyGroupEntry(run)}>复制智能体信息与链接</button>
+        {run.status === "active" && <button type="button" className="admin-refresh" disabled={busy} onClick={() => { if (window.confirm(`停止“${run.name}”的新报名后，已有记录仍可恢复。确认继续吗？`)) void post({ action: "close_active_run", runId: run.id }, "已停止该组的新报名。"); }}>停止新报名</button>}
+      </div>)}</div>
     </section>
-
     <details className="settings-card agent-config-details">
-      <summary>API 配置与连通测试<span>切换智能体请使用上方“开放新场次”</span></summary>
+      <summary>API 配置与连通测试<span>为不同智能体生成链接请使用上方“创建分组入口”</span></summary>
       <div className="settings-card-head"><div><h2>Coze 智能体配置</h2><p>每个智能体占一行，可直接修改连接信息。学生端显示名称在“交互规则”中统一设置；Token 加密保存且不会回显。</p></div><button className="admin-refresh" onClick={() => setAdding(true)} disabled={busy || adding}>新增智能体</button></div>
-      <div className="agent-table-wrap"><table className="agent-table"><thead><tr><th>内部名称</th><th>API 地址</th><th>Bot ID</th><th>API Token</th><th>启用</th><th>状态</th><th>操作</th></tr></thead><tbody>{control.agents.map((agent) => <AgentTableRow key={`${agent.id}-${agent.updatedAt}`} agent={agent} locked={activeAgentIds.has(agent.id)} busy={busy} onDelete={() => { setAgentDeleteError(""); setPendingAgentDelete(agent); }} onSave={(value) => post({ action: "save_agent", agent: value, testAfterSave: Boolean(value.token?.trim()) }, `智能体“${value.internalName}”已保存。`)} />)}{adding && <AgentTableRow key="new-agent" agent={null} locked={false} busy={busy} onCancel={() => setAdding(false)} onSave={(value) => post({ action: "save_agent", agent: value, testAfterSave: Boolean(value.token?.trim()) }, `智能体“${value.internalName}”已添加。`)} />}</tbody></table></div>
+      <div className="agent-table-wrap"><table className="agent-table"><thead><tr><th>内部名称</th><th>API 地址</th><th>Bot ID</th><th>API Token</th><th>启用</th><th>状态</th><th>操作</th></tr></thead><tbody>{control.agents.map((agent) => <AgentTableRow endpoint={endpoint} key={`${agent.id}-${agent.updatedAt}`} agent={agent} locked={activeAgentIds.has(agent.id)} busy={busy} onDelete={() => { setAgentDeleteError(""); setPendingAgentDelete(agent); }} onSave={(value) => post({ action: "save_agent", agent: value, testAfterSave: Boolean(value.token?.trim()) }, `智能体“${value.internalName}”已保存。`)} />)}{adding && <AgentTableRow endpoint={endpoint} key="new-agent" agent={null} locked={false} busy={busy} onCancel={() => setAdding(false)} onSave={(value) => post({ action: "save_agent", agent: value, testAfterSave: Boolean(value.token?.trim()) }, `智能体“${value.internalName}”已添加。`)} />}</tbody></table></div>
     </details>
-    <div className="security-note"><strong>聊天期间不读取数据库配置</strong><p>学生进入场次时，服务端会把已选智能体和限制生成加密、HttpOnly 的运行配置。之后发送消息直接调用 Coze；对话正文保存在浏览器，并在结束、切换参与者或关闭页面时上传数据库备份。</p></div>
+    <div className="security-note"><strong>实验条件随会话锁定</strong><p>进入链接后锁定对应场次、智能体与任务快照。更改其他实验或开放新场次不会改变已有会话，密钥始终保留在服务端。</p></div>
     {pendingAgentDelete && <DangerConfirmation title={`删除智能体“${pendingAgentDelete.internalName}”？`} description="将永久删除该智能体的 API 地址、Bot ID 和加密 Token。仅在没有参与者记录且没有未结束场次引用时可删除。关联的空白已结束场次将一并清理，操作无法撤销。" expectedValue={pendingAgentDelete.internalName} expectedLabel="智能体名称" busy={busy} error={agentDeleteError} onCancel={() => setPendingAgentDelete(null)} onConfirm={(confirmation) => void removeAgent(pendingAgentDelete, confirmation)} />}
   </div>;
 }
 
-function AgentTableRow({ agent, locked, busy, onSave, onDelete, onCancel }: { agent: AgentSummary | null; locked: boolean; busy: boolean; onSave: (value: { id?: string; internalName: string; baseUrl: string; botId: string; token?: string; enabled: boolean }) => void; onDelete?: () => void; onCancel?: () => void }) {
+function AgentTableRow({ endpoint, agent, locked, busy, onSave, onDelete, onCancel }: { endpoint: string; agent: AgentSummary | null; locked: boolean; busy: boolean; onSave: (value: { id?: string; internalName: string; baseUrl: string; botId: string; token?: string; enabled: boolean }) => void; onDelete?: () => void; onCancel?: () => void }) {
   const [internalName, setInternalName] = useState(agent?.internalName ?? "");
   const [baseUrl, setBaseUrl] = useState(agent?.baseUrl ?? "https://api.coze.cn");
   const [botId, setBotId] = useState(agent?.botId ?? "");
@@ -403,7 +490,7 @@ function AgentTableRow({ agent, locked, busy, onSave, onDelete, onCancel }: { ag
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 30_000);
     try {
-      const response = await fetch("/api/admin/agent-control", {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,

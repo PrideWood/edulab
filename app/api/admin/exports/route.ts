@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { experiment } from "@/config/experiment";
+import { assertAdminRun, getAdminExperimentId } from "@/lib/experiment-entry";
 import { buildIdentityMappingCsv, buildInteractionArchive } from "@/lib/admin-export";
 import { assertSameOrigin, getAuthenticatedAdmin } from "@/lib/admin-auth";
 import { ApiError, errorResponse } from "@/lib/http";
@@ -8,6 +8,7 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const exportSchema = z.object({
+  runId: z.uuid().optional(),
   kind: z.enum(["interactions_zip", "identity_csv"]),
   participantIds: z.array(z.uuid()).min(1).max(500).transform((ids) => [...new Set(ids)]),
 });
@@ -34,12 +35,15 @@ export async function POST(request: Request) {
     assertSameOrigin(request);
     const admin = await getAuthenticatedAdmin();
     if (!admin) throw new ApiError(401, "ADMIN_REQUIRED", "请先登录管理后台。");
+    const experimentId = await getAdminExperimentId(request);
     const input = exportSchema.safeParse(await request.json().catch(() => null));
     if (!input.success) throw new ApiError(400, "INVALID_EXPORT_REQUEST", "请选择至少一位有效参与者。一次最多导出 500 位。");
 
+    const runId = await assertAdminRun(experimentId,input.data.runId);
     if (input.data.kind === "identity_csv") {
       const file = await buildIdentityMappingCsv({
-        experimentId: experiment.id,
+        experimentId,
+      runId: runId ?? undefined,
         participantIds: input.data.participantIds,
         adminUserId: admin.id,
       });
@@ -47,7 +51,8 @@ export async function POST(request: Request) {
     }
 
     const archive = await buildInteractionArchive({
-      experimentId: experiment.id,
+      experimentId,
+      runId: runId ?? undefined,
       participantIds: input.data.participantIds,
       adminUserId: admin.id,
     });

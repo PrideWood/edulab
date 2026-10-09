@@ -1,3 +1,4 @@
+import { getStudentEntry } from "@/lib/experiment-entry";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { assertSameOrigin } from "@/lib/admin-auth";
@@ -19,9 +20,9 @@ function noStoreJson(body: unknown) {
   return NextResponse.json(body, { headers: { "Cache-Control": "private, no-store" } });
 }
 
-export async function GET() {
+export async function GET(request?: Request) {
   try {
-    const session = await getAuthenticatedSession();
+    const session = await getAuthenticatedSession(await getStudentEntry(request));
     if (!session) throw new ApiError(401, "SESSION_REQUIRED", "实验会话已失效。");
     return noStoreJson({ profile: await getParticipantProfile(session.participantId) });
   } catch (error) { return errorResponse(error); }
@@ -30,10 +31,12 @@ export async function GET() {
 export async function PUT(request: Request) {
   try {
     assertSameOrigin(request);
-    const session = await getAuthenticatedSession();
+    const session = await getAuthenticatedSession(await getStudentEntry(request));
     if (!session) throw new ApiError(401, "SESSION_REQUIRED", "实验会话已失效。");
     const input = inputSchema.safeParse(await request.json());
     if (!input.success) throw new ApiError(400, "INVALID_PARTICIPANT_PROFILE", input.error.issues[0]?.message ?? "参与者信息无效。");
+    const existing = await getParticipantProfile(session.participantId);
+    if (!input.data.studentNumber && (!existing || existing.studentNumber)) throw new ApiError(400,"STUDENT_NUMBER_REQUIRED","请填写学号，姓名可以不填。");
     const profile = await sessionTransaction(session, (client) => saveParticipantProfileWithClient(client, session.participantId, input.data.fullName, input.data.studentNumber));
     const response = noStoreJson({ profile });
     return response;

@@ -1,3 +1,4 @@
+import { getStudentEntry } from "@/lib/experiment-entry";
 import { sessionTransaction } from "@/lib/session-write";
 import { NextResponse } from "next/server";
 import { query } from "@/db";
@@ -15,7 +16,8 @@ export const maxDuration = 120;
 export async function POST(request: Request) {
   try {
     assertSameOrigin(request);
-    let session = await getAuthenticatedSession();
+    const entry = await getStudentEntry(request);
+    let session = await getAuthenticatedSession(entry);
     if (!session) throw new ApiError(401, "SESSION_REQUIRED", "实验会话已失效。");
     const input = transcriptInputSchema.safeParse(await request.json().catch(() => ({ messages: [] })));
     if (!input.success) throw new ApiError(400, "INVALID_TRANSCRIPT", input.error.issues[0]?.message ?? "本地对话记录格式无效。");
@@ -30,7 +32,7 @@ export async function POST(request: Request) {
     }
     const targetSession = session;
     const state = await getSessionControls(session);
-    const runtime = await getRuntimeSession();
+    const runtime = entry ? null : await getRuntimeSession();
     if (state.controls.databaseMessagesEnabled && input.data.messages.length > 0) {
       await sessionTransaction(targetSession, async (client) => {
         await persistTranscript(client, targetSession.id, input.data.messages, {

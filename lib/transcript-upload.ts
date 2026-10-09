@@ -24,11 +24,11 @@ export function transcriptChunks(messages: StoredMessage[], maxBytes = 512_000) 
   return chunks;
 }
 
-export async function uploadTranscript(sessionId: string, messages: StoredMessage[]) {
+export async function uploadTranscript(sessionId: string, messages: StoredMessage[], entryToken?: string) {
   for (const chunk of transcriptChunks(messages)) {
     for (let attempt = 0; ; attempt++) {
       try {
-        const response = await fetch("/api/sessions/checkpoint", {
+        const response = await fetch(entryToken ? `/api/sessions/checkpoint?entry=${encodeURIComponent(entryToken)}` : "/api/sessions/checkpoint", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sessionId, messages: chunk }),
           signal: AbortSignal.timeout(90000),

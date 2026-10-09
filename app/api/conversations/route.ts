@@ -1,3 +1,4 @@
+import { getStudentEntry, sessionCookieName } from "@/lib/experiment-entry";
 import { sessionTransaction } from "@/lib/session-write";
 import { randomUUID } from "node:crypto";
 import { cookies } from "next/headers";
@@ -9,7 +10,7 @@ import { ApiError, errorResponse } from "@/lib/http";
 import { getSessionControls } from "@/lib/experiment-limits";
 import { getAuthenticatedSession, type AuthenticatedSession } from "@/lib/session";
 import { buildSessionPayload } from "@/lib/session-payload";
-import { parseSessionCookie, SESSION_COOKIE } from "@/lib/security";
+import { parseSessionCookie } from "@/lib/security";
 import { clearRuntimeCookie } from "@/lib/runtime-session";
 import { assertSameOrigin } from "@/lib/admin-auth";
 
@@ -55,16 +56,16 @@ async function listConversations(session: AuthenticatedSession) {
   }));
 }
 
-function setSessionCookie(response: NextResponse, publicId: string, secret: string) {
-  response.cookies.set(SESSION_COOKIE, `${publicId}.${secret}`, {
+function setSessionCookie(response: NextResponse, publicId: string, secret: string, cookieName: string) {
+  response.cookies.set(cookieName, `${publicId}.${secret}`, {
     httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production",
     path: "/", maxAge: 60 * 60 * 8,
   });
 }
 
-export async function GET() {
+export async function GET(request?: Request) {
   try {
-    const session = await getAuthenticatedSession();
+    const session = await getAuthenticatedSession(await getStudentEntry(request));
     if (!session) throw new ApiError(401, "SESSION_REQUIRED", "实验会话已失效。");
     return NextResponse.json({ conversations: await listConversations(session), currentSessionId: session.publicId });
   } catch (error) { return errorResponse(error); }
@@ -73,9 +74,10 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     assertSameOrigin(request);
-    const current = await getAuthenticatedSession();
+    const entry = await getStudentEntry(request);
+    const current = await getAuthenticatedSession(entry);
     if (!current) throw new ApiError(401, "SESSION_REQUIRED", "实验会话已失效。");
-    const parsedCookie = parseSessionCookie((await cookies()).get(SESSION_COOKIE)?.value);
+    const parsedCookie = parseSessionCookie((await cookies()).get(sessionCookieName(entry))?.value);
     if (!parsedCookie) throw new ApiError(401, "SESSION_REQUIRED", "实验会话已失效。");
     const input = inputSchema.safeParse(await request.json());
     if (!input.success) throw new ApiError(400, "INVALID_CONVERSATION_ACTION", "对话操作无效。");
@@ -127,8 +129,8 @@ export async function POST(request: Request) {
       payload,
       conversations: await listConversations(target),
     });
-    setSessionCookie(response, target.publicId, parsedCookie.secret);
-    clearRuntimeCookie(response);
+    setSessionCookie(response, target.publicId, parsedCookie.secret, sessionCookieName(entry));
+    if (!entry) clearRuntimeCookie(response);
     return response;
   } catch (error) { return errorResponse(error); }
 }

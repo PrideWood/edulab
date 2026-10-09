@@ -97,13 +97,14 @@ function storedMessage(row: MessageExportRow): StoredMessage {
   };
 }
 
-async function selectedParticipants(client: PoolClient, experimentId: string, participantIds: string[]) {
+async function selectedParticipants(client: PoolClient, experimentId: string, participantIds: string[], runId?: string) {
   const result = await client.query<ParticipantExportRow>(
     `SELECT id, external_code, created_at
      FROM participants
      WHERE experiment_id = $1 AND id = ANY($2::uuid[])
+       AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM experiment_sessions s WHERE s.participant_id=participants.id AND s.experiment_run_id=$3))
      ORDER BY external_code`,
-    [experimentId, participantIds],
+    [experimentId, participantIds, runId ?? null],
   );
   if (result.rows.length !== participantIds.length) throw new Error("PARTICIPANTS_NOT_FOUND");
   return result.rows;
@@ -113,6 +114,7 @@ async function recordExportAudit(client: PoolClient, input: {
   adminUserId: string;
   experimentId: string;
   action: string;
+  runId?: string;
   participantIds: string[];
   participantCodes: string[];
   sessionCount?: number;
@@ -125,6 +127,7 @@ async function recordExportAudit(client: PoolClient, input: {
       participantIds: input.participantIds,
       participantCodes: input.participantCodes,
       participantCount: input.participantIds.length,
+      experimentRunId: input.runId ?? null,
       sessionCount: input.sessionCount,
       messageCount: input.messageCount,
     })],
@@ -133,20 +136,21 @@ async function recordExportAudit(client: PoolClient, input: {
 
 export async function buildInteractionArchive(input: {
   experimentId: string;
+  runId?: string;
   participantIds: string[];
   adminUserId: string;
 }) {
   const exportedAt = new Date().toISOString();
   return transaction(async (client) => {
     await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
-    const participants = await selectedParticipants(client, input.experimentId, input.participantIds);
+    const participants = await selectedParticipants(client, input.experimentId, input.participantIds, input.runId);
     const sessions = (await client.query<SessionExportRow>(
       `SELECT id, public_id, participant_id, status, started_at, last_activity_at,
          coze_conversation_id, experiment_run_id, agent_id, config_snapshot
        FROM experiment_sessions
-       WHERE experiment_id = $1 AND participant_id = ANY($2::uuid[])
+       WHERE experiment_id = $1 AND participant_id = ANY($2::uuid[]) AND ($3::uuid IS NULL OR experiment_run_id=$3)
        ORDER BY participant_id, started_at, id`,
-      [input.experimentId, input.participantIds],
+      [input.experimentId, input.participantIds, input.runId ?? null],
     )).rows;
     const sessionIds = sessions.map((session) => session.id);
     const messages = sessionIds.length === 0 ? [] : (await client.query<MessageExportRow>(
@@ -220,13 +224,14 @@ export async function buildInteractionArchive(input: {
       exportedAt,
       source: "postgresql",
       experimentId: input.experimentId,
+      experimentRunId: input.runId ?? null,
       participantCount: participants.length,
       sessionCount: sessions.length,
       messageCount: messages.length,
       completeness: {
         incompleteSessionCount,
         emptySessionCount,
-        note: "active Session 或零消息 Session 可能尚未从参与者浏览器完成数据库备份。",
+        note: "active Session 或零消息 Session 可能尚未完成 AI 回复或仍未提交完整记录。",
       },
       participants: manifestParticipants,
     };
@@ -235,6 +240,7 @@ export async function buildInteractionArchive(input: {
     await recordExportAudit(client, {
       adminUserId: input.adminUserId,
       experimentId: input.experimentId,
+      runId: input.runId,
       action: "experiment.records.export",
       participantIds: participants.map((participant) => participant.id),
       participantCodes: participants.map((participant) => participant.external_code),
@@ -243,20 +249,21 @@ export async function buildInteractionArchive(input: {
     });
     return {
       bytes: zipSync(files, { level: 6 }),
-      filename: `EduLab_interactions_${exportStamp(exportedAt)}.zip`,
+      filename: `EduLab_${safeExportSegment(input.experimentId,"experiment")}_interactions_${exportStamp(exportedAt)}.zip`,
     };
   });
 }
 
 export async function buildIdentityMappingCsv(input: {
   experimentId: string;
+  runId?: string;
   participantIds: string[];
   adminUserId: string;
 }) {
   const exportedAt = new Date().toISOString();
   return transaction(async (client) => {
     await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
-    const participants = await selectedParticipants(client, input.experimentId, input.participantIds);
+    const participants = await selectedParticipants(client, input.experimentId, input.participantIds, input.runId);
     const identities = (await client.query<ParticipantIdentityRow>(
       `SELECT p.id, p.external_code, p.created_at,
          profile.full_name_ciphertext, profile.full_name_iv, profile.full_name_tag,
@@ -279,13 +286,14 @@ export async function buildIdentityMappingCsv(input: {
     await recordExportAudit(client, {
       adminUserId: input.adminUserId,
       experimentId: input.experimentId,
+      runId: input.runId,
       action: "participant.identity.export",
       participantIds: participants.map((participant) => participant.id),
       participantCodes: participants.map((participant) => participant.external_code),
     });
     return {
       content: csv,
-      filename: `EduLab_identity_mapping_${exportStamp(exportedAt)}.csv`,
+      filename: `EduLab_${safeExportSegment(input.experimentId,"experiment")}_identity_mapping_${exportStamp(exportedAt)}.csv`,
     };
   });
 }

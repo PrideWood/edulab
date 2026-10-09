@@ -99,9 +99,11 @@ const SETTINGS_SELECT = `SELECT experiment_id, version, task_visible, chat_enabl
 export async function getExperimentSettings(experimentId = defaultExperiment.id, fallback = true) {
   try {
     const result = await query<SettingsRow>(SETTINGS_SELECT, [experimentId]);
-    return result.rows[0] ? mapRow(result.rows[0]) : fallbackSettings(experimentId);
+    if (result.rows[0]) return mapRow(result.rows[0]);
+    if (experimentId !== defaultExperiment.id) throw new Error("EXPERIMENT_SETTINGS_NOT_FOUND");
+    return fallbackSettings(experimentId);
   } catch (error) {
-    if (!fallback) throw error;
+    if (!fallback || experimentId !== defaultExperiment.id) throw error;
     return fallbackSettings(experimentId);
   }
 }

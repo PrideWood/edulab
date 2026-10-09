@@ -218,7 +218,6 @@ h1 { margin: 0; font-size: clamp(27px, 3vw, 38px); line-height: 1.14; letter-spa
 .participant-code-details strong { display: block; color: var(--accent-dark); font-size: 24px; letter-spacing: .06em; }
 .participant-code-copy { padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--accent-dark); font-size: 12px; }
 .participant-code-details > span { margin-left: 10px; font-size: 12px; color: var(--muted); }
-.code-reminder-confirm { width: 100%; margin-top: 12px; }
 .draft-status { margin: 4px 8px; font-size: 12px; color: var(--muted); }
 .entry-tabs { display: flex; gap: 8px; margin: 16px 0; }
 .entry-tabs button { flex: 1; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--canvas); cursor: pointer; }

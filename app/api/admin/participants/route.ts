@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { experiment } from "@/config/experiment";
+import { assertAdminRun, getAdminExperimentId } from "@/lib/experiment-entry";
 import { query } from "@/db";
 import { deleteParticipantRecord } from "@/lib/admin-records";
 import { assertSameOrigin, getAuthenticatedAdmin } from "@/lib/admin-auth";
@@ -39,10 +39,12 @@ function participantDeleteError(error: unknown) {
   return error;
 }
 
-export async function GET() {
+export async function GET(request?: Request) {
   try {
     const admin = await getAuthenticatedAdmin();
     if (!admin) throw new ApiError(401, "ADMIN_REQUIRED", "请先登录管理后台。");
+    const experimentId = await getAdminExperimentId(request);
+    const runId = await assertAdminRun(experimentId, request ? new URL(request.url).searchParams.get("runId") : null);
     const result = await query<ParticipantRow>(
       `SELECT p.id, p.external_code, p.created_at,
          profile.full_name_ciphertext, profile.full_name_iv, profile.full_name_tag,
@@ -53,13 +55,13 @@ export async function GET() {
          max(session.last_activity_at)::text AS last_activity_at
        FROM participants p
        LEFT JOIN participant_identity_profiles profile ON profile.participant_id = p.id
-       LEFT JOIN experiment_sessions session ON session.participant_id = p.id AND session.experiment_id = p.experiment_id
+       LEFT JOIN experiment_sessions session ON session.participant_id = p.id AND session.experiment_id = p.experiment_id AND ($2::uuid IS NULL OR session.experiment_run_id=$2)
        LEFT JOIN chat_requests request ON request.session_id = session.id
-       WHERE p.experiment_id = $1
+       WHERE p.experiment_id = $1 AND ($2::uuid IS NULL OR session.id IS NOT NULL)
        GROUP BY p.id, profile.participant_id
        ORDER BY max(session.last_activity_at) DESC NULLS LAST, p.created_at DESC
        LIMIT 500`,
-      [experiment.id],
+      [experimentId,runId],
     );
     const participants = result.rows.map((row) => {
       const profile = row.updated_at ? profileFromRow({ ...row, updated_at: row.updated_at }) : null;
@@ -84,9 +86,10 @@ export async function DELETE(request: Request) {
     assertSameOrigin(request);
     const admin = await getAuthenticatedAdmin();
     if (!admin) throw new ApiError(401, "ADMIN_REQUIRED", "请先登录管理后台。");
+    const experimentId = await getAdminExperimentId(request);
     const input = deleteSchema.safeParse(await request.json());
     if (!input.success) throw new ApiError(400, "INVALID_PARTICIPANT_DELETE", "删除确认信息无效。");
-    const deleted = await deleteParticipantRecord({ ...input.data, experimentId: experiment.id }, admin.id);
+    const deleted = await deleteParticipantRecord({ ...input.data, experimentId: experimentId }, admin.id);
     const response = NextResponse.json({ deleted });
     const runtime = await getRuntimeSession();
     if (runtime?.session.participantId === deleted.participantId) {

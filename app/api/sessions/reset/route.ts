@@ -1,3 +1,4 @@
+import { getStudentEntry, sessionCookieName } from "@/lib/experiment-entry";
 import { sessionTransaction } from "@/lib/session-write";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
@@ -6,7 +7,6 @@ import { assertSameOrigin } from "@/lib/admin-auth";
 import { getSessionControls } from "@/lib/experiment-limits";
 import { ApiError, errorResponse } from "@/lib/http";
 import { getAuthenticatedSession } from "@/lib/session";
-import { SESSION_COOKIE } from "@/lib/security";
 import { clearRuntimeCookie, getRuntimeSession } from "@/lib/runtime-session";
 import { persistTranscript, transcriptInputSchema, verifyStoredTranscript } from "@/lib/transcript";
 
@@ -16,20 +16,21 @@ export const maxDuration = 120;
 export async function POST(request: Request) {
   try {
     assertSameOrigin(request);
-    const runtime = await getRuntimeSession();
-    const session = await getAuthenticatedSession();
+    const entry = await getStudentEntry(request);
+    const runtime = entry ? null : await getRuntimeSession();
+    const session = await getAuthenticatedSession(entry);
     if (!session) {
-      const hasSessionCookie = Boolean((await cookies()).get(SESSION_COOKIE)?.value);
+      const hasSessionCookie = Boolean((await cookies()).get(sessionCookieName(entry))?.value);
       if (!runtime && !hasSessionCookie) throw new ApiError(401, "SESSION_REQUIRED", "实验会话已失效。");
       const orphanedResponse = NextResponse.json({ reset: true, orphaned: true, databaseMessagesSaved: false });
-      orphanedResponse.cookies.set(SESSION_COOKIE, "", {
+      orphanedResponse.cookies.set(sessionCookieName(entry), "", {
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
         sameSite: "lax",
         path: "/",
         maxAge: 0,
       });
-      clearRuntimeCookie(orphanedResponse);
+      if (!entry) clearRuntimeCookie(orphanedResponse);
       return orphanedResponse;
     }
     const input = transcriptInputSchema.safeParse(await request.json().catch(() => ({ messages: [] })));
@@ -74,14 +75,14 @@ export async function POST(request: Request) {
     });
 
     const response = NextResponse.json({ reset: true, databaseMessagesSaved: state.controls.databaseMessagesEnabled });
-    response.cookies.set(SESSION_COOKIE, "", {
+    response.cookies.set(sessionCookieName(entry), "", {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
       path: "/",
       maxAge: 0,
     });
-    clearRuntimeCookie(response);
+    if (!entry) clearRuntimeCookie(response);
     return response;
   } catch (error) {
     return errorResponse(error);

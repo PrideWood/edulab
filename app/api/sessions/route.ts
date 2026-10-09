@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { getStudentEntry, sessionCookieName } from "@/lib/experiment-entry";
 import { experiment } from "@/config/experiment";
 import { transaction } from "@/db";
 import { errorResponse, ApiError } from "@/lib/http";
 import { getAuthenticatedSession } from "@/lib/session";
 import { buildSessionPayload } from "@/lib/session-payload";
-import { hashSecret, newSessionSecret, normalizeParticipantCode, SESSION_COOKIE, verifyParticipantAccess } from "@/lib/security";
+import { hashSecret, newSessionSecret, normalizeParticipantCode, verifyParticipantAccess } from "@/lib/security";
 import { buildSessionSnapshot, getExperimentSettings } from "@/lib/experiment-settings";
 import { getParticipantProfile, saveParticipantProfileWithClient } from "@/lib/participant-profile";
 import { isTestParticipantName } from "@/lib/participant-code";
@@ -21,7 +22,7 @@ export const maxDuration = 120;
 
 const profileSchema = z.object({
   fullName: z.string().trim().max(100),
-  studentNumber: z.string().trim().max(100),
+  studentNumber: z.string().trim().min(1, "请填写学号，姓名可以不填。").max(100),
 }).refine((value) => value.fullName.length > 0 || value.studentNumber.length > 0, {
   message: "请至少填写姓名或学号中的一项。",
 });
@@ -39,13 +40,14 @@ const inputSchema = z.object({
   }
 });
 
-export async function GET() {
+export async function GET(request?: Request) {
   try {
-    const session = await getAuthenticatedSession();
+    const entry = await getStudentEntry(request);
+    const session = await getAuthenticatedSession(entry);
     if (!session) throw new ApiError(401, "SESSION_REQUIRED", "请通过研究者提供的实验链接进入。 ");
     await importLegacyRuntime(session);
     const response = NextResponse.json(await buildSessionPayload(session), { headers: { "Cache-Control": "private, no-store" } });
-    clearRuntimeCookie(response);
+    if (!entry) clearRuntimeCookie(response);
     return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
@@ -60,26 +62,29 @@ export async function POST(request: Request) {
   try {
     assertSameOrigin(request);
     const input = inputSchema.safeParse(await request.json());
-    if (!input.success) throw new ApiError(400, "INVALID_PARTICIPANT", "实验链接中的参与者信息无效。");
-    const current = await getAuthenticatedSession();
-    if (!input.data.participantCode && current?.experimentId === experiment.id) {
+    if (!input.success) throw new ApiError(400, "INVALID_PARTICIPANT", input.error.issues[0]?.message ?? "参与者信息无效。");
+    const entry = await getStudentEntry(request);
+    const experimentId = entry?.experimentId ?? experiment.id;
+    const current = await getAuthenticatedSession(entry);
+    if (!input.data.participantCode && current?.experimentId === experimentId) {
       return NextResponse.json(await buildSessionPayload(current));
     }
     const requestedParticipantCode = input.data.participantCode
       ? normalizeParticipantCode(input.data.participantCode)
       : null;
-    if (current && current.experimentId === experiment.id && current.participantCode === requestedParticipantCode) {
+    if (current && current.experimentId === experimentId && current.participantCode === requestedParticipantCode) {
       return NextResponse.json(await buildSessionPayload(current));
     }
-    if (requestedParticipantCode && !verifyParticipantAccess(requestedParticipantCode, input.data.access)) {
+    if (requestedParticipantCode && !verifyParticipantAccess(requestedParticipantCode, input.data.access, experimentId)) {
       throw new ApiError(403, "INVALID_EXPERIMENT_LINK", "实验链接无效或已被修改，请使用研究者提供的完整链接。");
     }
 
+    if (entry && entry.status !== "active") throw new ApiError(409, "ENTRY_CLOSED", "此场次已结束，新参与者不能进入；已有记录可使用恢复入口查看。");
     const secret = newSessionSecret();
     const publicId = randomUUID();
     const sessionId = randomUUID();
-    const settings = await getExperimentSettings(experiment.id);
-    const baseSnapshot = buildSessionSnapshot(settings);
+    const settings = await getExperimentSettings(experimentId,false);
+    const baseSnapshot = entry?.snapshot ?? buildSessionSnapshot(settings);
     const startedAt = new Date();
     const created = await transaction(async (client) => {
       let participantId: string;
@@ -89,7 +94,7 @@ export async function POST(request: Request) {
           `INSERT INTO participants (id, experiment_id, external_code) VALUES ($1, $2, $3)
            ON CONFLICT (experiment_id, external_code) DO NOTHING
            RETURNING id`,
-          [randomUUID(), experiment.id, requestedParticipantCode],
+          [randomUUID(), experimentId, requestedParticipantCode],
         );
         if (!participant.rows[0]) throw new ApiError(409, "PARTICIPANT_EXISTS", "此编号已有实验记录，请选择继续之前的实验，系统不会创建重复记录。");
         participantId = participant.rows[0].id;
@@ -100,7 +105,7 @@ export async function POST(request: Request) {
         // Uncommitted placeholder permits profile/assignment work in parallel.
         // The final P/T code is allocated immediately before COMMIT.
         await client.query(`INSERT INTO participants (id, experiment_id, external_code) VALUES ($1,$2,$3)`,
-          [participantId, experiment.id, participantCode]);
+          [participantId, experimentId, participantCode]);
       }
       if (input.data.profile) {
         await saveParticipantProfileWithClient(
@@ -110,7 +115,7 @@ export async function POST(request: Request) {
           input.data.profile.studentNumber,
         );
       }
-      const assignedAgent = await assignAgentWithClient(client, experiment.id, participantId);
+      const assignedAgent = await assignAgentWithClient(client, experimentId, participantId, entry?.runId);
       const snapshot = {
         ...baseSnapshot,
         ai: {
@@ -126,13 +131,13 @@ export async function POST(request: Request) {
            coze_user_id, config_version, config_snapshot, started_at, last_activity_at, metadata,
            experiment_run_id, agent_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $9, '{"conversation_title":"新对话","transcript_authority":"server"}'::jsonb, $10, $11)`,
-        [sessionId, publicId, participantId, experiment.id, hashSecret(secret),
-          `edulab_${publicId.replaceAll("-", "")}`, settings.version, JSON.stringify(snapshot), startedAt,
+        [sessionId, publicId, participantId, experimentId, hashSecret(secret),
+          `edulab_${publicId.replaceAll("-", "")}`, snapshot.version, JSON.stringify(snapshot), startedAt,
           assignedAgent.runId, assignedAgent.agentId],
       );
       if (!requestedParticipantCode) {
         const codePrefix = isTestParticipantName(input.data.profile?.fullName ?? "") ? "T" : "P";
-        const numbered = await createParticipantWithAvailableCode(client, experiment.id, codePrefix, participantId);
+        const numbered = await createParticipantWithAvailableCode(client, experimentId, codePrefix, participantId);
         participantCode = numbered.participantCode;
       }
       return { participantId, participantCode, assignedAgent, snapshot };
@@ -155,11 +160,14 @@ export async function POST(request: Request) {
         databaseMessagesEnabled: created.snapshot.storage.databaseMessagesEnabled,
       },
     }, { status: 201 });
-    response.cookies.set(SESSION_COOKIE, `${publicId}.${secret}`, {
+    response.cookies.set(sessionCookieName(entry), `${publicId}.${secret}`, {
       httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production",
       path: "/", maxAge: 60 * 60 * 8,
     });
-    clearRuntimeCookie(response);
+    if (!entry) clearRuntimeCookie(response);
     return response;
-  } catch (error) { return errorResponse(error); }
+  } catch (error) {
+    if (error instanceof Error && error.message === "NO_ACTIVE_EXPERIMENT_RUN") return errorResponse(new ApiError(409, error.message, "此入口未开放新报名，请联系教师；已有记录可使用恢复入口。"));
+    return errorResponse(error);
+  }
 }

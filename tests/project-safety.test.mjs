@@ -89,7 +89,7 @@ test("conversation export and optional database message storage are implemented"
   assert.match(workspace, /localStorage\.setItem\(transcriptKey/);
   assert.match(workspace, /turnIndex: message\.turnIndex/);
   assert.ok(
-    workspace.indexOf("writeLocalTranscript(activeSessionRef.current") < workspace.indexOf('fetch("/api/messages"'),
+    workspace.indexOf("writeLocalTranscript(activeSessionRef.current") < workspace.indexOf('fetch(apiUrl("/api/messages")'),
     "the participant message must be persisted locally before the Coze request starts",
   );
   assert.match(cozeSource, /INSERT INTO messages/);
@@ -187,7 +187,7 @@ test("student device switching finalizes the participant and clears only the par
   const resetRoute = await readFile("app/api/sessions/reset/route.ts", "utf8");
   assert.match(resetRoute, /storageMode: "participant_switch"/);
   assert.match(resetRoute, /end_reason: "participant_switch"/);
-  assert.match(resetRoute, /SESSION_COOKIE/);
+  assert.match(resetRoute, /sessionCookieName\(entry\)/);
   assert.match(resetRoute, /maxAge: 0/);
   assert.doesNotMatch(resetRoute, /ACCESS_COOKIE/);
 });
