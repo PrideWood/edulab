@@ -311,7 +311,7 @@ test("admin agent configuration uses a compact editable table", async () => {
   const adminWorkspace = await readFile("app/admin/workspace.tsx", "utf8");
   const adminStyles = await readFile("app/admin/admin.css", "utf8");
   assert.match(adminWorkspace, /className="agent-table"/);
-  assert.match(adminWorkspace, /section === "ai" \? "wide"/);
+  assert.match(adminWorkspace, /className="admin-content"/);
   assert.match(adminWorkspace, /<th>API 地址<\/th>/);
   assert.match(adminWorkspace, /<th>Bot ID<\/th>/);
   assert.match(adminWorkspace, /<th>API Token<\/th>/);

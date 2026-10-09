@@ -33,10 +33,9 @@
 .admin-danger-secondary { padding: 9px 14px; border: 1px solid #e1b8b2; }
 .admin-danger-secondary:hover, .table-danger:hover { border-color: #c9796f; background: #fff4f2; }
 .admin-danger:disabled, .admin-danger-secondary:disabled, .table-danger:disabled { cursor: default; opacity: .48; }
-.admin-content { width: min(920px, 100%); margin: 0 auto; padding: 42px clamp(24px, 5vw, 58px) 70px; }
-.admin-content.wide { width: min(1200px, 100%); }
-.settings-stack { display: grid; gap: 18px; }
-.settings-card { padding: 26px; border: 1px solid #dce4df; border-radius: 18px; background: white; box-shadow: 0 10px 35px rgba(42,62,51,.045); }
+.admin-content { width: min(1200px, 100%); min-width: 0; margin: 0 auto; padding: 42px clamp(24px, 5vw, 58px) 70px; }
+.settings-stack { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 18px; }
+.settings-card { min-width: 0; padding: 26px; border: 1px solid #dce4df; border-radius: 18px; background: white; box-shadow: 0 10px 35px rgba(42,62,51,.045); }
 .settings-card.secure { border-color: #cfe1d7; }
 .settings-card.storage-disabled { border-color: #e6d7bf; }
 .settings-card.optional-feature { border-style: dashed; }
@@ -208,7 +207,6 @@
   .agent-table-wrap, .agent-table tbody, .settings-card-head > div, .form-grid label,
   .form-grid select, .agent-choice-field { min-width: 0; max-width: 100%; }
   .settings-stack, .agent-table tbody { grid-template-columns: minmax(0, 1fr); }
-  .admin-content.wide { width: 100%; }
   .admin-shell strong, .admin-shell p { overflow-wrap: anywhere; }
   .agent-row-actions { min-width: 0; }
   .agent-row-actions button { min-width: 0; white-space: normal; }
