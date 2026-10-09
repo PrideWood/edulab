@@ -1,3 +1,4 @@
+import type { ExperimentConfig } from "@/config/experiment";
 import type { StoredMessage } from "@/db/schema";
 import type { SessionControls } from "@/lib/experiment-limits";
 
@@ -18,9 +19,11 @@ export interface SessionPayload {
     experimentRunId: string | null;
     agentId: string | null;
   };
+  experiment?: ExperimentConfig;
+  draft?: { text: string; revision: number };
   messages: StoredMessage[];
   participantProfile: ParticipantProfile | null;
   pending: boolean;
-  failedRequest?: { content: string; message: string } | null;
+  failedRequest?: { content: string; message: string; retryable?: boolean } | null;
   controls: SessionControls;
 }

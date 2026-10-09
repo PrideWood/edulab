@@ -115,7 +115,7 @@ class ClientApiError extends Error {
 }
 
 function isInvalidSessionError(error: unknown) {
-  return error instanceof ClientApiError && error.status === 401 && error.code === "SESSION_REQUIRED";
+  return error instanceof ClientApiError && error.status === 401 && ["SESSION_REQUIRED", "SESSION_REPLACED"].includes(error.code);
 }
 
 function clearLocalParticipantData(participantCode: string, currentSessionId: string | null) {
@@ -156,7 +156,8 @@ function MessageBody({ message }: { message: StoredMessage }) {
   );
 }
 
-export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConfig }) {
+export function ExperimentWorkspace({ experiment: initialExperiment }: { experiment: ExperimentConfig }) {
+  const [experiment, setExperiment] = useState(initialExperiment);
   const [text, setText] = useState("");
   const [messages, setMessages] = useState<StoredMessage[]>([]);
   const [session, setSession] = useState<SessionPayload["session"] | null>(null);
@@ -182,6 +183,15 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   const [profileSaving, setProfileSaving] = useState(false);
   const [participantSwitching, setParticipantSwitching] = useState(false);
   const [profileError, setProfileError] = useState("");
+  const [entryMode, setEntryMode] = useState<"new" | "resume">("new");
+  const [resumeCode, setResumeCode] = useState("");
+  const [resumeIdentity, setResumeIdentity] = useState("");
+  const [copyStatus, setCopyStatus] = useState("");
+  const [draftStatus, setDraftStatus] = useState("");
+  const [draftConflict, setDraftConflict] = useState(false);
+  const draftRef = useRef({ sessionId: "", text: "", savedText: "", revision: 0, conflict: false });
+  const draftSaveRef = useRef<Promise<void> | null>(null);
+  const databaseMessagesEnabledRef = useRef(false);
   const [finalizationRetry, setFinalizationRetry] = useState(0);
   const fullscreenState = useFullscreenState();
   const messagesViewRef = useRef<HTMLDivElement>(null);
@@ -196,7 +206,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
 
   const clearInvalidatedSession = useCallback((notice: string) => {
     const previousSession = activeSessionRef.current;
-    if (previousSession) clearLocalParticipantData(previousSession.participantCode, previousSession.id);
+    if (previousSession && notice.includes("后台删除")) clearLocalParticipantData(previousSession.participantCode, previousSession.id);
     sessionIdRef.current = null;
     activeSessionRef.current = null;
     messageLedgerRef.current = [];
@@ -209,6 +219,11 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     setProfileFullName("");
     setProfileStudentNumber("");
     setText("");
+    draftRef.current = { sessionId: "", text: "", savedText: "", revision: 0, conflict: false };
+    databaseMessagesEnabledRef.current = false;
+    setDraftStatus("");
+    setDraftConflict(false);
+    setEntryMode("resume");
     setPending(false);
     setRetryContent(null);
     setError(null);
@@ -221,9 +236,10 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     window.history.replaceState({}, "", window.location.pathname);
   }, []);
 
-  const releaseInvalidatedSession = useCallback(async (notice = "原参与者记录已从后台删除，请填写下一位参与者信息。") => {
+  const releaseInvalidatedSession = useCallback(async (notice = "会话已失效或已在其他窗口恢复，请使用实验编号继续。") => {
     const transcript = transcriptUploadBody(messageLedgerRef.current);
     clearInvalidatedSession(notice);
+    if (!notice.includes("后台删除")) return;
     try {
       await fetch("/api/sessions/reset", {
         method: "POST",
@@ -238,6 +254,36 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     sessionIdRef.current = payload.session.id;
     activeSessionRef.current = payload.session;
     setSession(payload.session);
+    databaseMessagesEnabledRef.current = payload.controls.databaseMessagesEnabled;
+    if (payload.experiment) setExperiment(payload.experiment);
+    if (draftRef.current.sessionId !== payload.session.id) {
+      let draftText = payload.draft?.text ?? "";
+      let conflict = false;
+      try {
+        const local = JSON.parse(localStorage.getItem(`edulab_draft:${payload.session.id}`) ?? "null");
+        if (local?.revision === payload.draft?.revision && typeof local.text === "string") draftText = local.text;
+        else if (typeof local?.text === "string" && local.text !== local.savedText && local.text !== draftText) {
+          draftText = local.text;
+          conflict = true;
+        }
+      } catch { /* The server remains authoritative when local storage is unavailable. */ }
+      draftRef.current = { sessionId: payload.session.id, text: draftText, savedText: payload.draft?.text ?? "", revision: payload.draft?.revision ?? 0, conflict };
+      setText(draftText);
+      setDraftConflict(conflict);
+      setDraftStatus(conflict ? "本机仍有未确认保存的草稿，已保留在输入框，请核对后选择要保留的内容。" : "");
+    } else if (payload.draft && !draftSaveRef.current) {
+      const draft = draftRef.current;
+      if (draft.text === draft.savedText || draft.text === payload.draft.text) {
+        draft.revision = payload.draft.revision;
+        draft.savedText = payload.draft.text;
+        draft.text = payload.draft.text;
+        setText(payload.draft.text);
+      } else if (payload.draft.revision !== draft.revision) {
+        draft.conflict = true;
+        setDraftConflict(true);
+        setDraftStatus("云端草稿已变化，当前输入尚未保存，请保留输入并刷新核对。");
+      }
+    }
     setParticipantProfile(payload.participantProfile);
     if (!payload.participantProfile) setProfileOpen(true);
     const localMessages = readLocalTranscript(payload.session.id);
@@ -249,7 +295,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     setControls(payload.controls);
     if (payload.failedRequest) {
       setError(payload.failedRequest.message);
-      setRetryContent(payload.failedRequest.content);
+      setRetryContent(payload.failedRequest.retryable === false ? null : payload.failedRequest.content);
       localStorage.removeItem(outboxKey(payload.session.id));
     } else if (!payload.pending) {
       const raw = localStorage.getItem(outboxKey(payload.session.id));
@@ -261,6 +307,78 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
       }
     }
   }, []);
+
+  const saveDraft = useCallback(async () => {
+    if (!databaseMessagesEnabledRef.current) return;
+    if (draftSaveRef.current || sendingRef.current) return draftSaveRef.current;
+    const draft = draftRef.current;
+    if (!draft.sessionId || draft.text === draft.savedText || draft.conflict || activeSessionRef.current?.status !== "active") return;
+    const snapshot = { ...draft };
+    const work = (async () => {
+      try {
+        setDraftStatus("草稿保存中…");
+        const response = await fetch("/api/sessions/draft", {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: snapshot.sessionId, text: snapshot.text, revision: snapshot.revision }),
+          signal: AbortSignal.timeout(15000),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "DRAFT_FAILED", data?.error?.message ?? "草稿保存失败");
+        if (draftRef.current !== draft) return;
+        draft.revision = data.draft.revision;
+        draft.savedText = snapshot.text;
+        try { localStorage.setItem(`edulab_draft:${snapshot.sessionId}`, JSON.stringify({ text: draft.text, savedText: draft.savedText, revision: draft.revision })); } catch { setStorageError(true); }
+        setDraftStatus(draft.text === draft.savedText ? "草稿已保存" : "草稿待保存");
+      } catch (saveError) {
+        if (draftRef.current !== draft) return;
+        draft.conflict = saveError instanceof ClientApiError && (saveError.status === 409 || saveError.status === 401);
+        setDraftConflict(draft.conflict);
+        setDraftStatus(saveError instanceof Error ? `${saveError.message}（当前输入未确认保存）` : "草稿保存失败，请保留输入并重试");
+      }
+    })();
+    draftSaveRef.current = work;
+    try { await work; } finally { draftSaveRef.current = null; }
+  }, []);
+
+  function updateComposer(value: string) {
+    setText(value);
+    draftRef.current.text = value;
+    try { localStorage.setItem(`edulab_draft:${draftRef.current.sessionId}`, JSON.stringify({ text: value, savedText: draftRef.current.savedText, revision: draftRef.current.revision })); } catch { setStorageError(true); }
+  }
+
+  async function resolveDraftConflict(keepLocal: boolean) {
+    setDraftStatus("正在核对草稿…");
+    try {
+      const payload = await readResponse(await fetch("/api/sessions", { cache: "no-store" }));
+      if (payload.session.id !== sessionIdRef.current) throw new Error("会话已变化，请在最新恢复的窗口继续。");
+      draftRef.current.revision = payload.draft?.revision ?? 0;
+      draftRef.current.savedText = payload.draft?.text ?? "";
+      draftRef.current.conflict = false;
+      setDraftConflict(false);
+      if (keepLocal) await saveDraft();
+      else { updateComposer(payload.draft?.text ?? ""); setDraftStatus("已恢复云端草稿"); }
+    } catch (draftError) { setDraftStatus(draftError instanceof Error ? draftError.message : "草稿核对失败，请保留输入并重试。"); }
+  }
+
+  useEffect(() => {
+    if (!session || !controls?.databaseMessagesEnabled || pending || loading || draftRef.current.text === draftRef.current.savedText) return;
+    const timer = window.setTimeout(() => { void saveDraft(); }, 900);
+    return () => window.clearTimeout(timer);
+  }, [text, session, controls?.databaseMessagesEnabled, pending, loading, saveDraft]);
+
+  useEffect(() => {
+    const retry = () => { void saveDraft(); };
+    const saveBeforeLeaving = () => {
+      const draft = draftRef.current;
+      if (!draft.sessionId || draft.conflict || draftSaveRef.current || draft.text === draft.savedText || activeSessionRef.current?.status !== "active") return;
+      const body = JSON.stringify({ sessionId: draft.sessionId, text: draft.text, revision: draft.revision });
+      if (new Blob([body]).size <= 48_000) navigator.sendBeacon("/api/sessions/draft", new Blob([body], { type: "application/json" }));
+    };
+    window.addEventListener("online", retry);
+    window.addEventListener("pagehide", saveBeforeLeaving);
+    const interval = window.setInterval(retry, 15000);
+    return () => { window.removeEventListener("online", retry); window.removeEventListener("pagehide", saveBeforeLeaving); window.clearInterval(interval); };
+  }, [saveDraft]);
 
   const refreshConversations = useCallback(async () => {
     const response = await fetch("/api/conversations", { cache: "no-store" });
@@ -363,7 +481,15 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
         const recovered = await readResponse(await fetch("/api/sessions", { cache: "no-store" }));
         applyPayload(recovered);
         if (recovered.pending) await pollUntilSettled();
-      } catch { /* Keep the saved outbox for a later retry. */ }
+        if (!recovered.messages.some(message => message.clientRequestId === clientRequestId)) {
+          draftRef.current.text = content;
+          setText(content);
+        }
+      } catch {
+        draftRef.current.text = content;
+        setText(content);
+        // Keep the outbox and input for a later retry; do not claim cloud persistence.
+      }
     }
     } finally { sendingRef.current = false; }
   }, [applyPayload, pollUntilSettled, releaseInvalidatedSession]);
@@ -414,7 +540,12 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
           }
         }
       } catch (initialError) {
-        if (!cancelled) setError(initialError instanceof Error ? initialError.message : "无法进入实验，请检查链接。");
+        if (!cancelled) {
+          setError(initialError instanceof Error ? initialError.message : "无法进入实验，请检查链接。");
+          if (initialError instanceof ClientApiError && initialError.code === "PARTICIPANT_EXISTS") {
+            setResumeCode(participantCode ?? ""); setEntryMode("resume"); setProfileOpen(true);
+          }
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -448,7 +579,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     const channel = new BroadcastChannel("edulab_session_events");
     channel.onmessage = (event: MessageEvent<{ type?: string; participantCode?: string }>) => {
       if (event.data?.type === "participant_deleted" && event.data.participantCode === activeSessionRef.current?.participantCode) {
-        void releaseInvalidatedSession();
+        void releaseInvalidatedSession("原参与者记录已从后台删除，请填写下一位参与者信息。");
       }
     };
     return () => channel.close();
@@ -518,7 +649,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
       event.returnValue = "";
     }
     function uploadBeforeLeaving() {
-      if (activeSessionRef.current?.status !== "active" || messageLedgerRef.current.length === 0) return;
+      if (activeSessionRef.current?.status !== "active" || messageLedgerRef.current.length === 0 || sendingRef.current) return;
       const body = transcriptUploadBody(messageLedgerRef.current);
       // A full transcript above this size cannot fit the unload queue.
       if (new Blob([body]).size > 48_000) return;
@@ -572,9 +703,49 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     const content = text.trim();
+    if (sendingRef.current) return;
     if (!content || pending || !canChat || uploadRef.current || participantSwitching) return;
-    setText("");
+    if (draftSaveRef.current) await draftSaveRef.current;
+    updateComposer("");
     await sendWithId(content, crypto.randomUUID());
+  }
+
+  async function retryMessage(content: string) {
+    let requestId = crypto.randomUUID();
+    try {
+      const saved = JSON.parse(localStorage.getItem(outboxKey(sessionIdRef.current ?? "")) ?? "null");
+      if (saved?.content === content && saved.clientRequestId) requestId = saved.clientRequestId;
+    } catch { /* A confirmed failed request can be retried with a new identifier. */ }
+    await sendWithId(content, requestId);
+  }
+
+  async function resumeExperiment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setProfileSaving(true);
+    setProfileError("");
+    try {
+      const response = await fetch("/api/sessions/resume", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ participantCode: resumeCode, identity: resumeIdentity }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data?.error?.message ?? "实验恢复失败，请重试。");
+      const payload = await readResponse(await fetch("/api/sessions", { cache: "no-store" }));
+      applyPayload(payload);
+      setProfileOpen(false);
+      setResumeIdentity("");
+      setError(null);
+      await refreshConversations();
+      if (payload.pending) await pollUntilSettled();
+    } catch (resumeError) {
+      setProfileError(resumeError instanceof Error ? resumeError.message : "暂时无法恢复，请稍后重试。");
+    } finally { setProfileSaving(false); }
+  }
+
+  async function copyParticipantCode() {
+    if (!session) return;
+    try { await navigator.clipboard.writeText(session.participantCode); setCopyStatus("已复制"); }
+    catch { setCopyStatus("复制失败，请手动保存编号"); }
   }
 
   function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -631,6 +802,10 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
     setConversationBusy(true);
     setError(null);
     try {
+      if (controls?.databaseMessagesEnabled && session?.status === "active") {
+        await saveDraft();
+        if (draftRef.current.text !== draftRef.current.savedText) throw new Error("当前草稿尚未保存，请核对草稿提示后再切换对话。");
+      }
       const response = await fetch("/api/conversations", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action),
       });
@@ -751,6 +926,9 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
       if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "暂时无法切换参与者。");
 
       localStorage.removeItem(outboxKey(session.id));
+      draftRef.current = { sessionId: "", text: "", savedText: "", revision: 0, conflict: false };
+      setEntryMode("new");
+      setDraftStatus("");
       sessionIdRef.current = null;
       activeSessionRef.current = null;
       messageLedgerRef.current = [];
@@ -791,7 +969,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
           <div className="conversation-sidebar-head">
             <div className="brand sidebar-brand"><button className="brand-mark brand-toggle" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}>E</button>{!sidebarCollapsed && <div className="brand-name">EduLab</div>}</div>
           </div>
-          <button className="new-conversation" onClick={() => changeConversation({ action: "create" })} disabled={loading || pending || conversationBusy || !participantProfile}><span>＋</span>{!sidebarCollapsed && <em>新建对话</em>}</button>
+          <button className="new-conversation" onClick={() => changeConversation({ action: "create" })} disabled={loading || pending || conversationBusy || !canChat}><span>＋</span>{!sidebarCollapsed && <em>新建对话</em>}</button>
           <nav className="conversation-list">
             {conversations.map((conversation) => <button key={conversation.id} className={conversation.id === session?.id ? "conversation-item active" : "conversation-item"} onClick={() => changeConversation({ action: "switch", sessionId: conversation.id })} disabled={pending || conversationBusy} title={conversation.title}><span className="conversation-icon">{conversation.title.slice(0, 1)}</span>{!sidebarCollapsed && <span className="conversation-copy"><strong>{conversation.title}</strong><small>{conversation.status === "completed" ? "已结束" : timeLabel(conversation.lastActivityAt)}</small></span>}</button>)}
           </nav>
@@ -805,6 +983,7 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
               <div className="export-actions"><button onClick={exportTranscript} disabled={!session || messages.length === 0}>下载交互记录</button>{controls?.databaseMessagesEnabled && <button onClick={() => void submitRecords()} disabled={!session || pending || uploading || messages.length === 0}>{uploading ? "提交中…" : "提交交互记录"}</button>}<span role="status">{uploadStatus}</span></div>
             </div>
           </header>
+          {session && participantProfile && <div className="participant-code-banner"><div><strong>你的实验编号：{session.participantCode}</strong><small>{controls?.databaseMessagesEnabled ? "请记住或保存该编号。意外关闭后，可用编号及原学号（或姓名）继续实验。" : "请保存编号；此实验未启用云端对话存储，请及时下载记录。"}</small></div><button onClick={copyParticipantCode}>复制编号</button><span role="status">{copyStatus}</span></div>}
           <div className="messages" ref={messagesViewRef} aria-live="polite">
             {taskOpen && experiment.taskVisible && <section className="inline-task-panel"><div className="inline-task-head"><div><small>任务说明</small><h2>{experiment.title}</h2></div><button onClick={() => setTaskOpen(false)} aria-label="关闭任务说明">×</button></div><p>{experiment.introduction}</p><ol>{experiment.requirements.map((item) => <li key={item}>{item}</li>)}</ol>{experiment.material && <div><strong>学习材料</strong><p>{experiment.material}</p></div>}{experiment.hint && <div><strong>提示</strong><p>{experiment.hint}</p></div>}</section>}
             <p className="day-label">{session ? `开始于 ${timeLabel(session.startedAt)}` : "新对话"}</p>
@@ -812,30 +991,39 @@ export function ExperimentWorkspace({ experiment }: { experiment: ExperimentConf
             {messages.map((message) => <div className={`message-row ${message.role}`} key={message.id}><div className="message-stack"><div className="bubble"><MessageBody message={message} /></div><div className={`message-time ${message.role}`}>{timeLabel(message.sentAt)}</div></div></div>)}
             {pending && <div className="message-row assistant"><div className="bubble typing" aria-label="AI 正在回复"><span /><span /><span /></div></div>}
             {storageError && <div className="error-card" role="alert">本机保存空间不可用，请先下载交互记录并联系实验人员，暂勿刷新或关闭页面。</div>}
-            {error && <div className="error-card" role="alert"><span>{error}</span>{retryContent && <button onClick={() => sendWithId(retryContent, crypto.randomUUID())} disabled={pending}>重新发送</button>}</div>}
+            {error && <div className="error-card" role="alert"><span>{error}</span>{retryContent && <button onClick={() => retryMessage(retryContent)} disabled={pending}>重新发送</button>}</div>}
             {loading && <div className="loading-note">正在准备实验会话…</div>}
             {session?.status === "completed" && <div className="completed-card">这个对话已经结束。你可以在左侧查看其他对话。</div>}
           </div>
           <div className="composer-wrap">
             <form className="composer" onSubmit={submit} ref={composerFormRef}>
-              <textarea ref={composerInputRef} aria-label="输入消息" placeholder={!participantProfile && session ? "请先填写参与者信息" : !canChat && !loading ? "本次交流已结束" : "输入你的问题或想法…"} rows={1} value={text} maxLength={controls?.maxMessageChars} onChange={(event) => setText(event.target.value)} onKeyDown={onComposerKeyDown} disabled={loading || pending || !canChat} />
+              <textarea ref={composerInputRef} aria-label="输入消息" placeholder={!participantProfile && session ? "请先填写参与者信息" : !canChat && !loading ? "本次交流已结束" : "输入你的问题或想法…"} rows={1} value={text} maxLength={controls?.maxMessageChars} onChange={(event) => updateComposer(event.target.value)} onKeyDown={onComposerKeyDown} disabled={loading || pending || !canChat} />
               <button className="send-button" type="submit" disabled={!text.trim() || loading || pending || !canChat} aria-label="发送消息">↑</button>
             </form>
             <p className="composer-help"><span>按 Enter 发送 · Shift + Enter 换行</span>{controls && <span>{Array.from(text).length} / {controls.maxMessageChars} 字</span>}</p>
+            {draftStatus && <p className="draft-status" role="status">{draftStatus}</p>}
+            {draftConflict && session && <div className="draft-conflict-actions"><button type="button" onClick={() => resolveDraftConflict(true)} disabled={pending}>保存当前草稿</button><button type="button" onClick={() => resolveDraftConflict(false)} disabled={pending}>使用云端草稿</button></div>}
           </div>
         </section>
       </section>
       {profileOpen && <div className="profile-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && participantProfile) setProfileOpen(false); }}>
         <section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title">
-          <div className="profile-modal-head"><div><p>参与者信息</p><h2 id="profile-title">{participantProfile ? "查看或修改基本信息" : "开始前请填写基本信息"}</h2></div>{participantProfile && <button type="button" onClick={() => setProfileOpen(false)} aria-label="关闭">×</button>}</div>
-          <form className="profile-form" onSubmit={saveProfile}>
+          <div className="profile-modal-head"><div><p>参与者信息</p><h2 id="profile-title">{participantProfile ? "查看或修改基本信息" : !session && entryMode === "resume" ? "继续之前的实验" : "开始前请填写基本信息"}</h2></div>{participantProfile && <button type="button" onClick={() => setProfileOpen(false)} aria-label="关闭">×</button>}</div>
+          {!session && <div className="entry-tabs" role="group" aria-label="实验入口"><button type="button" aria-pressed={entryMode === "new"} onClick={() => { setEntryMode("new"); setProfileError(""); }} disabled={profileSaving}>首次参加实验</button><button type="button" aria-pressed={entryMode === "resume"} onClick={() => { setEntryMode("resume"); setProfileError(""); }} disabled={profileSaving}>继续之前的实验</button></div>}
+          {!session && entryMode === "resume" ? <form className="profile-form" onSubmit={resumeExperiment}>
+            <label><span>实验编号</span><input value={resumeCode} onChange={(event) => setResumeCode(event.target.value)} maxLength={80} autoComplete="off" placeholder="例如 P001" required /></label>
+            <label><span>身份校验</span><input value={resumeIdentity} onChange={(event) => setResumeIdentity(event.target.value)} type="password" maxLength={100} autoComplete="off" placeholder="原学号；未填学号时输入原姓名" required /></label>
+            <p className="profile-hint">为保护实验记录，请输入最初填写的学号；未填学号时使用原姓名。恢复后请使用本窗口继续。</p>
+            {profileError && <p className="profile-error" role="alert">{profileError}</p>}
+            <button className="profile-save" type="submit" disabled={profileSaving}>{profileSaving ? "恢复中…" : "恢复实验"}</button>
+          </form> : <form className="profile-form" onSubmit={saveProfile}>
             <label><span>姓名</span><input value={profileFullName} onChange={(event) => setProfileFullName(event.target.value)} maxLength={100} autoComplete="name" placeholder="请输入姓名" /></label>
             <label><span>学号</span><input value={profileStudentNumber} onChange={(event) => setProfileStudentNumber(event.target.value)} maxLength={100} autoComplete="off" placeholder="请输入学号" /></label>
             <p className="profile-hint">至少填写一项。请使用研究者要求的信息。</p>
             {profileError && <p className="profile-error" role="alert">{profileError}</p>}
             <button className="profile-save" type="submit" disabled={profileSaving || participantSwitching}>{profileSaving ? "保存中…" : participantProfile ? "保存修改" : "保存并开始"}</button>
             {participantProfile && <div className="next-participant"><button type="button" onClick={startNextParticipant} disabled={pending || profileSaving || participantSwitching}>{participantSwitching ? "正在保存并切换…" : "开始下一位参与者"}</button><p>仅在实验人员要求时使用。切换后当前参与者将无法在此浏览器继续操作。</p></div>}
-          </form>
+          </form>}
         </section>
       </div>}
     </main>

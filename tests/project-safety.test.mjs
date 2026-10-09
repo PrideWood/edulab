@@ -92,7 +92,7 @@ test("conversation export and optional database message storage are implemented"
     workspace.indexOf("writeLocalTranscript(activeSessionRef.current") < workspace.indexOf('fetch("/api/messages"'),
     "the participant message must be persisted locally before the Coze request starts",
   );
-  assert.doesNotMatch(cozeSource, /INSERT INTO messages/);
+  assert.match(cozeSource, /INSERT INTO messages/);
   assert.match(cozeSource, /role: "user"/);
   assert.match(completeRoute, /automatic_completion/);
   assert.match(checkpointRoute, /background_checkpoint/);
@@ -109,18 +109,13 @@ test("conversation export and optional database message storage are implemented"
   assert.match(adminWorkspace, /实验结束时备份完整对话到数据库/);
 });
 
-test("the student message fast path calls Coze without waiting for PostgreSQL", async () => {
+test("student messages use durable requests instead of cookie-only state", async () => {
   const messageRoute = await readFile("app/api/messages/route.ts", "utf8");
-  const runtimeSource = await readFile("lib/runtime-session.ts", "utf8");
-  const workspace = await readFile("app/workspace.tsx", "utf8");
-  const fastPathStart = messageRoute.indexOf("async function postWithoutDatabase");
-  const fastPathEnd = messageRoute.indexOf("async function responsePayload");
-  assert.ok(fastPathStart >= 0 && fastPathEnd > fastPathStart);
-  assert.doesNotMatch(messageRoute.slice(fastPathStart, fastPathEnd), /query\(|transaction\(|beginChatRequest|getAuthenticatedSession/);
-  assert.match(messageRoute, /getRuntimeSession\(\)/);
-  assert.match(messageRoute, /runCozeChatWithoutDatabase/);
-  assert.match(runtimeSource, /httpOnly: true/);
-  assert.doesNotMatch(workspace.slice(workspace.indexOf("const sendWithId"), workspace.indexOf("useEffect(() =>", workspace.indexOf("const sendWithId"))), /checkpointTranscript/);
+  const cozeSource = await readFile("lib/coze.ts", "utf8");
+  assert.match(messageRoute, /await beginChatRequest/);
+  assert.doesNotMatch(messageRoute, /return await postWithoutDatabase/);
+  assert.match(cozeSource, /sessionTransaction\(session/);
+  assert.match(cozeSource, /persistTranscript\(client, sessionId, completedMessages/);
 });
 
 test("multiple agents and controlled experiment runs are persisted", async () => {
@@ -206,7 +201,7 @@ test("multiple conversations are isolated to the authenticated participant sessi
   assert.match(route, /action: z\.literal\("switch"\)/);
   assert.match(workspace, /conversation-sidebar/);
   assert.match(workspace, /收起侧边栏/);
-  assert.match(limits, /s\.session_secret_hash = \$3/);
+  assert.match(limits, /getSessionUsage\(session\)/);
 });
 
 test("participant identity is separately encrypted and required before chat", async () => {

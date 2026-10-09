@@ -1,5 +1,6 @@
 import "server-only";
 
+import { getSessionDraft } from "@/lib/session-draft";
 import type { StoredMessage } from "@/db/schema";
 import { recoverPendingRequest } from "@/lib/coze";
 import { getSessionControls } from "@/lib/experiment-limits";
@@ -10,7 +11,7 @@ import type { AuthenticatedSession } from "@/lib/session";
 export async function buildSessionPayload(session: AuthenticatedSession, options: { includeMessages?: boolean } = {}) {
   let pending = Boolean(session.activeRequestId);
   let transientMessages: StoredMessage[] = [];
-  const storedMessages = options.includeMessages === false ? [] : await listMessages(session.id);
+
   try {
     const recovery = options.includeMessages === false
       ? { pending: false, messages: [] }
@@ -21,6 +22,7 @@ export async function buildSessionPayload(session: AuthenticatedSession, options
     console.error(pending ? "Pending request recovery failed" : "Latest response recovery failed", error);
   }
   const state = await getSessionControls(session);
+  const storedMessages = options.includeMessages === false ? [] : await listMessages(session.id);
   const messages = mergeStoredMessages(storedMessages, transientMessages);
   return {
     session: {
@@ -30,6 +32,8 @@ export async function buildSessionPayload(session: AuthenticatedSession, options
       experimentRunId: session.configSnapshot?.ai.runId ?? null,
       agentId: session.configSnapshot?.ai.agentId ?? null,
     },
+    experiment: state.snapshot.experiment,
+    draft: await getSessionDraft(session.id),
     messages,
     participantProfile: await getParticipantProfile(session.participantId),
     pending,

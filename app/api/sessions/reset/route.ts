@@ -1,6 +1,7 @@
+import { sessionTransaction } from "@/lib/session-write";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { transaction } from "@/db";
+
 import { assertSameOrigin } from "@/lib/admin-auth";
 import { getSessionControls } from "@/lib/experiment-limits";
 import { ApiError, errorResponse } from "@/lib/http";
@@ -36,7 +37,7 @@ export async function POST(request: Request) {
     const state = await getSessionControls(session);
     if (runtime?.pendingRequest) throw new ApiError(409, "SESSION_BUSY", "请等待 AI 完成本次回复后再切换参与者。");
 
-    await transaction(async (client) => {
+    await sessionTransaction(session, async (client) => {
       const busy = await client.query<{ exists: boolean }>(
         `SELECT EXISTS (
            SELECT 1 FROM experiment_sessions

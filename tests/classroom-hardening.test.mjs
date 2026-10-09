@@ -73,6 +73,7 @@ test('student chat returns provider IDs immediately and recovers without creatin
   const coze=await load('lib/coze.ts',{
     '@coze/api':{CozeAPI,RoleType:{User:'user',Assistant:'assistant'},ChatStatus:{COMPLETED:'completed',FAILED:'failed',CANCELED:'canceled',REQUIRES_ACTION:'requires_action'}},
     '@/db':{query:forbidden,transaction:forbidden},'@/lib/experiment-settings':{getRuntimeAiConfig:forbidden},
+    '@/lib/session-usage':{getSessionUsage:forbidden}, '@/lib/session-write':{sessionTransaction:forbidden}, '@/lib/transcript':{persistTranscript:forbidden}, '@/lib/experiment-limits':{resolveSessionSnapshot:forbidden},
   });
   const input={token:'synthetic',baseUrl:'https://example.invalid',botId:'1',cozeUserId:'synthetic',
     cozeConversationId:null,sessionPublicId:crypto.randomUUID(),clientRequestId:crypto.randomUUID(),

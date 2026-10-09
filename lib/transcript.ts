@@ -61,7 +61,9 @@ export async function persistTranscript(
   options: { requireComplete: boolean; storageMode: "background_checkpoint" | "automatic_completion" | "participant_switch" },
 ) {
   // Serialize uploads only for this conversation, never for other students.
-  await client.query(`SELECT id FROM experiment_sessions WHERE id=$1 FOR UPDATE`, [sessionId]);
+  const session = await client.query<{ metadata: Record<string, unknown> }>(
+    `SELECT metadata FROM experiment_sessions WHERE id=$1 FOR UPDATE`, [sessionId]);
+  const serverAuthoritative = session.rows[0]?.metadata.transcript_authority === "server";
   const requests = await client.query<RequestRow>(
     `SELECT id, client_request_id, turn_index, status, requested_at, reply_started_at, completed_at, coze_chat_id, metadata
      FROM chat_requests WHERE session_id = $1 ORDER BY turn_index ASC`,
@@ -86,6 +88,12 @@ export async function persistTranscript(
     const completedAt = assistants.map((message) => message.replyCompletedAt ?? message.sentAt).sort().at(-1) ?? null;
     const cozeChatId = assistants.find((message) => message.cozeChatId)?.cozeChatId ?? user.cozeChatId;
     const existing = requests.rows.find(row => row.turn_index === turnIndex);
+    if (serverAuthoritative && !existing) {
+      throw new ApiError(409, "INVALID_TRANSCRIPT", "此轮消息尚未由服务端确认保存，请重试发送，不能作为已完成记录提交。");
+    }
+    if (existing?.status === "in_progress" && assistants.length > 0) {
+      throw new ApiError(409, "SESSION_BUSY", "AI 回复尚未完成确认，请等待回复后再提交记录。");
+    }
     if (existing && existing.client_request_id !== user.clientRequestId) {
       throw new ApiError(409, "INVALID_TRANSCRIPT", "同一轮次的请求标识不一致，请保留本地记录并联系实验人员。");
     }
@@ -116,11 +124,11 @@ export async function persistTranscript(
          coze_chat_id, requested_at, started_at, completed_at, reply_started_at, metadata
          FROM jsonb_populate_recordset(NULL::chat_requests, $1::jsonb)
        ON CONFLICT (session_id, client_request_id) DO UPDATE SET
-         status = CASE WHEN chat_requests.status='completed' THEN chat_requests.status ELSE EXCLUDED.status END,
+         status = CASE WHEN chat_requests.status IN ('completed', 'in_progress') THEN chat_requests.status ELSE EXCLUDED.status END,
          coze_chat_id = COALESCE(chat_requests.coze_chat_id, EXCLUDED.coze_chat_id),
          completed_at = COALESCE(chat_requests.completed_at, EXCLUDED.completed_at),
          reply_started_at = COALESCE(chat_requests.reply_started_at, EXCLUDED.reply_started_at),
-         metadata = CASE WHEN chat_requests.status='completed' THEN chat_requests.metadata
+         metadata = CASE WHEN chat_requests.status IN ('completed', 'in_progress') THEN chat_requests.metadata
            ELSE EXCLUDED.metadata || (chat_requests.metadata - 'assistant_transcript') END
        RETURNING id, client_request_id, turn_index, status, requested_at,
          reply_started_at, completed_at, coze_chat_id, metadata`,

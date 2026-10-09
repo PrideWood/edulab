@@ -5,6 +5,10 @@ import { ChatStatus, CozeAPI, RoleType, type ChatV3Message, type CreateChatData 
 import { query, transaction } from "@/db";
 import type { StoredMessage } from "@/db/schema";
 import type { AuthenticatedSession } from "@/lib/session";
+import { getSessionUsage } from "@/lib/session-usage";
+import { sessionTransaction } from "@/lib/session-write";
+import { persistTranscript } from "@/lib/transcript";
+import { resolveSessionSnapshot } from "@/lib/experiment-limits";
 import { getRuntimeAiConfig } from "@/lib/experiment-settings";
 
 const TERMINAL = new Set([ChatStatus.COMPLETED, ChatStatus.FAILED, ChatStatus.CANCELED, ChatStatus.REQUIRES_ACTION]);
@@ -56,7 +60,7 @@ export interface RequestRecord {
 }
 
 export async function beginChatRequest(session: AuthenticatedSession, clientRequestId: string, content: string, databaseMessagesEnabled: boolean) {
-  return transaction(async (client) => {
+  return sessionTransaction(session, async (client) => {
     const existing = await client.query<{ id: string; client_request_id: string; turn_index: number; status: RequestRecord["status"]; coze_chat_id: string | null; coze_conversation_id: string | null; requested_at: string; metadata: Record<string, unknown> }>(
       `SELECT id, client_request_id, turn_index, status, coze_chat_id, coze_conversation_id, requested_at, metadata
        FROM chat_requests WHERE session_id = $1 AND client_request_id = $2`,
@@ -67,6 +71,14 @@ export async function beginChatRequest(session: AuthenticatedSession, clientRequ
       return { created: false as const, request: { id: row.id, clientRequestId: row.client_request_id, turnIndex: row.turn_index, status: row.status, cozeChatId: row.coze_chat_id, cozeConversationId: row.coze_conversation_id, requestedAt: row.requested_at, metadata: row.metadata } };
     }
 
+    const snapshot = await resolveSessionSnapshot(session);
+    const usage = await getSessionUsage(session, client);
+    const endsAt = snapshot.limits.sessionDurationMinutes
+      ? Date.parse(usage.startedAt) + snapshot.limits.sessionDurationMinutes * 60_000 : null;
+    if ((snapshot.limits.maxUserMessages !== null && usage.count >= snapshot.limits.maxUserMessages)
+      || (endsAt !== null && endsAt <= Date.now())) {
+      throw Object.assign(new Error("Experiment limit reached"), { code: "EXPERIMENT_LIMIT_REACHED" });
+    }
     const requestId = randomUUID();
     const conversationTitle = Array.from(content.replace(/\s+/g, " ").trim()).slice(0, 28).join("") || "新对话";
     const locked = await client.query<{ sequence_no: number }>(
@@ -87,7 +99,7 @@ export async function beginChatRequest(session: AuthenticatedSession, clientRequ
     const turnIndex = turn.rows[0].turn_index;
     const metadata = {
       database_messages_enabled: databaseMessagesEnabled,
-      storage_mode: "deferred_until_completion",
+      storage_mode: "server_autosave",
       user_sequence: locked.rows[0].sequence_no,
       content_length: Array.from(content).length,
       ...(databaseMessagesEnabled ? { user_content: content } : {}),
@@ -97,6 +109,14 @@ export async function beginChatRequest(session: AuthenticatedSession, clientRequ
        VALUES ($1, $2, $3, $4, 'in_progress', $5, $6::jsonb)`,
       [requestId, session.id, clientRequestId, turnIndex, null, JSON.stringify(metadata)],
     );
+    if (databaseMessagesEnabled) {
+      const messageId = randomUUID();
+      await client.query(`INSERT INTO messages (id, session_id, chat_request_id, sequence_no, turn_index,
+        role, content, client_request_id, sent_at) VALUES ($1,$2,$3,$4,$5,'user',$6,$7,now())`,
+        [messageId, session.id, requestId, locked.rows[0].sequence_no, turnIndex, content, clientRequestId]);
+      await client.query("UPDATE chat_requests SET user_message_id=$2 WHERE id=$1", [requestId, messageId]);
+    }
+    await client.query("UPDATE experiment_sessions SET draft_text='', draft_revision=draft_revision+1 WHERE id=$1", [session.id]);
     return { created: true as const, request: { id: requestId, clientRequestId, turnIndex, status: "in_progress" as const, cozeChatId: null, cozeConversationId: null, requestedAt: new Date().toISOString(), metadata } };
   });
 }
@@ -272,7 +292,8 @@ export async function recoverCozeChatWithoutDatabase(input: {
 }
 
 function assistantAnswers(messages: ChatV3Message[]) {
-  return messages.filter((message) => message.role === RoleType.Assistant && message.type === "answer" && message.content.trim());
+  return messages.filter((message) => message.role === RoleType.Assistant && message.type === "answer" && message.content.trim())
+    .sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
 }
 
 function userQuestion(messages: ChatV3Message[]) {
@@ -350,6 +371,7 @@ export async function finalizeCompletedRequest(
   }
 
   return transaction(async (client) => {
+    await client.query("SELECT id FROM experiment_sessions WHERE id=$1 FOR UPDATE", [sessionId]);
     const request = await client.query<{ status: string; client_request_id: string; turn_index: number; requested_at: Date; metadata: Record<string, unknown> }>(
       `SELECT status, client_request_id, turn_index, requested_at, metadata FROM chat_requests WHERE id = $1 FOR UPDATE`,
       [requestId],
@@ -403,6 +425,9 @@ export async function finalizeCompletedRequest(
         } : {}),
       })],
     );
+    if (request.rows[0].metadata.database_messages_enabled === true) {
+      await persistTranscript(client, sessionId, completedMessages, { requireComplete: false, storageMode: "background_checkpoint" });
+    }
     return completedMessages;
   });
 }
@@ -504,7 +529,10 @@ export async function recoverPendingRequest(session: AuthenticatedSession): Prom
     return { pending: false, messages: recovered.flat().sort((a, b) => a.sequenceNo - b.sequenceNo) };
   }
   if (!request.coze_chat_id || !request.coze_conversation_id) {
-    if (Date.now() - request.started_at.getTime() > 120_000) await markRequestFailed(session.id, request.id, "UNKNOWN_AFTER_CREATE", "Request outcome could not be verified", "uncertain");
+    if (Date.now() - request.started_at.getTime() > 120_000) {
+      await markRequestFailed(session.id, request.id, "UNKNOWN_AFTER_CREATE", "Request outcome could not be verified", "uncertain");
+      return { pending: false, messages: [] };
+    }
     return { pending: true, messages: [] };
   }
   const coze = (await getCozeClient(session)).client;

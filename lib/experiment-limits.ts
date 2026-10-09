@@ -1,6 +1,7 @@
 import "server-only";
 
 import { query } from "@/db";
+import { getSessionUsage } from "@/lib/session-usage";
 import { buildSessionSnapshot, getExperimentSettings, type ExperimentSessionSnapshot } from "@/lib/experiment-settings";
 import { ApiError } from "@/lib/http";
 import type { AuthenticatedSession } from "@/lib/session";
@@ -23,16 +24,9 @@ export async function resolveSessionSnapshot(session: AuthenticatedSession): Pro
 export async function getSessionControls(session: AuthenticatedSession) {
   const snapshot = await resolveSessionSnapshot(session);
   const databaseMessagesEnabled = snapshot.storage?.databaseMessagesEnabled ?? true;
-  const family = await query<{ count: string; started_at: string }>(
-    `SELECT count(r.id)::text AS count, min(s.started_at)::text AS started_at
-     FROM experiment_sessions s
-     LEFT JOIN chat_requests r ON r.session_id = s.id
-     WHERE s.participant_id = $1 AND s.experiment_id = $2 AND s.session_secret_hash = $3`,
-    [session.participantId, session.experimentId, session.sessionSecretHash],
-  );
-  const count = family;
-  const usedMessages = Number(count.rows[0]?.count ?? 0);
-  const experimentStartedAt = count.rows[0]?.started_at ?? session.startedAt;
+  const usage = await getSessionUsage(session);
+  const usedMessages = usage.count;
+  const experimentStartedAt = usage.startedAt;
   const endsAt = snapshot.limits.sessionDurationMinutes
     ? new Date(new Date(experimentStartedAt).getTime() + snapshot.limits.sessionDurationMinutes * 60_000)
     : null;

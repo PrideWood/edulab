@@ -30,8 +30,8 @@ export async function listMessages(sessionId: string): Promise<StoredMessage[]> 
 }
 
 export async function getLatestFailedRequest(sessionId: string) {
-  const result = await query<{ content: string; error_code: string | null; error_message: string | null }>(
-    `SELECT COALESCE(r.metadata->>'user_content', m.content) AS content, r.error_code, r.error_message
+  const result = await query<{ content: string; status: string; coze_chat_id: string | null; error_code: string | null; error_message: string | null }>(
+    `SELECT COALESCE(r.metadata->>'user_content', m.content) AS content, r.status, r.coze_chat_id, r.error_code, r.error_message
      FROM chat_requests r LEFT JOIN messages m ON m.id = r.user_message_id
      WHERE r.session_id = $1 AND r.status IN ('failed', 'uncertain')
        AND NOT EXISTS (
@@ -43,9 +43,12 @@ export async function getLatestFailedRequest(sessionId: string) {
   );
   const row = result.rows[0];
   if (!row?.content) return null;
+  if (row.status === "uncertain" && !row.coze_chat_id) {
+    return { content: row.content, message: "这条消息的 AI 请求结果无法确认，消息记录仍保留。请联系教师核验，暂勿重复发送。", retryable: false };
+  }
   const internalCodes = new Set(["UNEXPECTED_ERROR", "COZE_CREATE_UNCERTAIN", "UNKNOWN_AFTER_CREATE", "RECOVERY_TIMEOUT", "COZE_TIMEOUT"]);
   const message = row.error_code && row.error_message && !internalCodes.has(row.error_code)
     ? `Coze 返回错误（${row.error_code}）：${row.error_message}`
     : "上一条消息未能获得 AI 回复，你可以重新发送。";
-  return { content: row.content, message };
+  return { content: row.content, message, retryable: true };
 }

@@ -117,6 +117,18 @@ export function buildSessionSnapshot(settings: ExperimentSettings): ExperimentSe
 }
 
 export async function getRuntimeAiConfig(experimentId: string, snapshot: ExperimentSessionSnapshot | null) {
+  if (snapshot?.ai.agentId) {
+    const agents = await query<{ coze_token_ciphertext: string | null; coze_token_iv: string | null; coze_token_tag: string | null }>(
+      `SELECT coze_token_ciphertext, coze_token_iv, coze_token_tag FROM ai_agent_configs WHERE id=$1 AND experiment_id=$2`,
+      [snapshot.ai.agentId, experimentId]);
+    const agent = agents.rows[0];
+    if (!agent) throw new Error("ASSIGNED_AGENT_NOT_FOUND");
+    const token = agent.coze_token_ciphertext && agent.coze_token_iv && agent.coze_token_tag
+      ? decryptSecret({ ciphertext: agent.coze_token_ciphertext, iv: agent.coze_token_iv, tag: agent.coze_token_tag })
+      : process.env.COZE_API_TOKEN ?? "";
+    return { token, botId: snapshot.ai.botId, baseUrl: snapshot.ai.baseUrl };
+  }
+
   let row: SettingsRow | undefined;
   try { row = (await query<SettingsRow>(SETTINGS_SELECT, [experimentId])).rows[0]; } catch { /* Environment fallback below. */ }
   let token = process.env.COZE_API_TOKEN ?? "";

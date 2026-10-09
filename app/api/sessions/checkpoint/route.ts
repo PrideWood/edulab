@@ -1,5 +1,6 @@
+import { sessionTransaction } from "@/lib/session-write";
 import { NextResponse } from "next/server";
-import { query, transaction } from "@/db";
+import { query } from "@/db";
 import type { ExperimentSessionSnapshot } from "@/lib/experiment-settings";
 import { assertSameOrigin } from "@/lib/admin-auth";
 import { getSessionControls } from "@/lib/experiment-limits";
@@ -31,7 +32,7 @@ export async function POST(request: Request) {
     const state = await getSessionControls(session);
     const runtime = await getRuntimeSession();
     if (state.controls.databaseMessagesEnabled && input.data.messages.length > 0) {
-      await transaction(async (client) => {
+      await sessionTransaction(targetSession, async (client) => {
         await persistTranscript(client, targetSession.id, input.data.messages, {
           requireComplete: false,
           storageMode: "background_checkpoint",
