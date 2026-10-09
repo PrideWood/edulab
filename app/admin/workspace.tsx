@@ -195,7 +195,7 @@ export function AdminWorkspace() {
           {section === "content" && <ContentSettings settings={settings} update={updateExperiment} />}
           {section === "limits" && <LimitSettings settings={settings} updateExperiment={updateExperiment} updateLimits={updateLimits} />}
           {section === "storage" && <StorageSettings settings={settings} update={updateStorage} />}
-          {section === "ai" && <AgentRunSettings key={settings.experiment.id} experimentId={settings.experiment.id} experimentName={experiments.find((study) => study.id === settings.experiment.id)?.name ?? settings.experiment.title} onRunsChanged={setRuns} />}
+          {section === "ai" && <AgentRunSettings key={settings.experiment.id} experimentId={settings.experiment.id} onRunsChanged={setRuns} />}
         </div>
       </section>
     </main>
@@ -357,7 +357,7 @@ function StorageSettings({ settings, update }: { settings: ExperimentSettings; u
   return <div className="settings-stack"><section className={`settings-card ${enabled ? "" : "storage-disabled"}`}><div className="settings-card-head"><div><h2>实验结束时备份完整对话到数据库</h2><p>开启后，学生消息在调用 AI 前保存，AI 回复完成后保存，支持跨设备恢复。</p></div><label className="switch" aria-label="实验结束时备份完整对话到数据库"><input type="checkbox" checked={enabled} onChange={(event) => update({ databaseMessagesEnabled: event.target.checked })} /><span /></label></div><div className="storage-mode"><strong>{enabled ? "数据库自动保存 + 浏览器副本 + 人工导出" : "仅使用浏览器本地记录与人工导出"}</strong><p>{enabled ? "每轮及时保存，生成中断后使用原请求继续恢复；结束时再次核对完整性。" : "数据库不保存学生和 AI 的消息正文。请确保参与者完成前下载并提交交互记录。"}</p></div></section><div className="security-note"><strong>刷新不会清除当前会话记录</strong><p>每条已显示的消息都会同步到当前浏览器的本地存储，页面刷新后会自动恢复。但更换设备、清除浏览器数据或使用隐私模式仍可能丢失本地副本。</p></div><div className="security-note"><strong>进入实验仍需要数据库</strong><p>编号、身份和分组保存在数据库中。数据库中断时会明确提示保存失败，并保留本机未确认的输入，不会宣称消息已成功保存。</p></div></div>;
 }
 
-function AgentRunSettings({ experimentId, experimentName, onRunsChanged }: { experimentId: string; experimentName: string; onRunsChanged: (runs: RunSummary[]) => void }) {
+function AgentRunSettings({ experimentId, onRunsChanged }: { experimentId: string; onRunsChanged: (runs: RunSummary[]) => void }) {
   const endpoint = `/api/admin/agent-control?experimentId=${encodeURIComponent(experimentId)}`;
   const [control, setControl] = useState<AgentControl | null>(null);
   const [error, setError] = useState("");
@@ -366,6 +366,7 @@ function AgentRunSettings({ experimentId, experimentName, onRunsChanged }: { exp
   const [adding, setAdding] = useState(false);
   const [pendingAgentDelete, setPendingAgentDelete] = useState<AgentSummary | null>(null);
   const [agentDeleteError, setAgentDeleteError] = useState("");
+  const [copiedRunId, setCopiedRunId] = useState<string | null>(null);
   const [runName, setRunName] = useState("");
   const [assignmentMode, setAssignmentMode] = useState<"fixed" | "balanced_random">("fixed");
   const [fixedAgentId, setFixedAgentId] = useState("");
@@ -425,11 +426,12 @@ function AgentRunSettings({ experimentId, experimentName, onRunsChanged }: { exp
   }
 
   async function copyGroupEntry(run: RunSummary) {
-    const invitation = buildEntryInvitation({ experimentName, groupName: run.name, assignmentMode: run.assignmentMode,
-      agentNames: runAgentNames(run), url: `${window.location.origin}/join/${run.entryToken}` });
+    const invitation = buildEntryInvitation({ label: run.assignmentMode === "fixed" ? runAgentNames(run)[0] : run.name, url: `${window.location.origin}/join/${run.entryToken}` });
+    setCopiedRunId(null);
     try {
       await navigator.clipboard.writeText(invitation);
-      setError(""); setStatus(`已复制“${run.name}”的智能体信息和链接。`);
+      setCopiedRunId(run.id);
+      setError(""); setStatus("");
     } catch { setError("复制失败，请手动保存上方信息和链接。"); }
   }
 
@@ -439,10 +441,6 @@ function AgentRunSettings({ experimentId, experimentName, onRunsChanged }: { exp
 
   return <div className="settings-stack agent-run-settings">
     {(error || status) && <p className={error ? "directory-error" : "agent-success"} role={error ? "alert" : "status"}>{error || status}</p>}
-    <details className="settings-card active-run-card"><summary>原首页入口（兼容已有实验）</summary>
-      <div className="settings-card-head"><div><h2>首页默认场次</h2><p>原首页使用本实验默认场次；专属链接直接进入指定场次，已经开始的会话始终保持原配置。</p></div><span className={control.activeRun ? "secure-badge" : "field-status"}>{control.activeRun ? "正在开放" : "尚未开放"}</span></div>
-      {control.activeRun ? <div className="active-run-summary"><div><span>场次名称</span><strong>{control.activeRun.name}</strong></div><div><span>分配方式</span><strong>{control.activeRun.assignmentMode === "fixed" ? "固定智能体" : "均衡随机分配"}</strong></div><div><span>使用智能体</span><strong>{runAgentNames(control.activeRun).join("、")}</strong></div><button className="admin-refresh" disabled={busy} onClick={() => { if (window.confirm("结束后，新学生将暂时无法进入实验，已经开始的 Session 保持原配置。确认结束当前场次吗？")) void post({ action: "close_active_run" }, "当前场次已结束。"); }}>结束当前场次</button></div> : <p className="inline-warning">未设置默认场次。学生可使用下方开放场次的专属链接进入。</p>}
-    </details>
 
     <section className="settings-card">
       <div className="settings-card-head"><div><h2>创建分组入口</h2><p>为各组选择智能体并生成不同链接，可同时使用。每次创建会固定当前已保存的任务与规则；原有入口继续有效。</p></div><span className="field-status">新参与者生效</span></div>
@@ -451,10 +449,11 @@ function AgentRunSettings({ experimentId, experimentName, onRunsChanged }: { exp
     </section>
 
     <section className="settings-card">
-      <div className="settings-card-head"><div><h2>各组实验链接</h2><p>复制按钮会同时复制实验名、分组名、智能体名称和链接。新入口使用 8 位分段短码，支持大写或省略横线输入；已停止报名的入口仍可恢复记录。</p></div></div>
+      <div className="settings-card-head"><div><h2>各组实验链接</h2><p>复制内容只包含识别名称和链接，不包含实验信息或分配方式。入口码为 4 个字符，支持大写输入；已停止报名的入口仍可恢复记录。</p></div></div>
       <div className="run-link-list">{control.runs.length === 0 ? <p className="directory-empty">创建分组入口后，链接将显示在这里。</p> : control.runs.map((run) => <div className="run-link-row" key={run.id}>
-        <div><strong>{run.name}</strong><small>{run.status === "active" ? "开放中" : "已停止报名"} · {run.assignmentMode === "fixed" ? "固定智能体" : "均衡随机分配"} · {runAgentNames(run).join("、")}{run.isDefault ? " · 原首页入口" : ""}</small><code>/join/{run.entryToken}</code></div>
+        <div><strong>{run.name}</strong><small>{run.status === "active" ? "开放中" : "已停止报名"} · {run.assignmentMode === "fixed" ? "固定智能体" : "均衡随机分配"} · {runAgentNames(run).join("、")}</small><code>/join/{run.entryToken}</code></div>
         <button type="button" className="admin-refresh" onClick={() => void copyGroupEntry(run)}>复制智能体信息与链接</button>
+        {copiedRunId === run.id && <span className="entry-copy-success" role="status">复制成功</span>}
         {run.status === "active" && <button type="button" className="admin-refresh" disabled={busy} onClick={() => { if (window.confirm(`停止“${run.name}”的新报名后，已有记录仍可恢复。确认继续吗？`)) void post({ action: "close_active_run", runId: run.id }, "已停止该组的新报名。"); }}>停止新报名</button>}
       </div>)}</div>
     </section>

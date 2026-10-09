@@ -358,7 +358,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       ]);
       assert.equal(new Set(groups.map(group => group.entryToken)).size,3);
       for (const group of groups) {
-        assert.match(group.entryToken,/^[abcdefghjkmnpqrstuvwxyz23456789]{4}-[abcdefghjkmnpqrstuvwxyz23456789]{4}$/);
+        assert.match(group.entryToken,/^[abcdefghjkmnpqrstuvwxyz23456789]{4}$/);
         assert.equal(group.isDefault,false);
         const entry = await entries.getExperimentEntry(group.entryToken.toUpperCase().replace('-',''));
         assert.equal(entry.runId,group.id);
@@ -369,9 +369,13 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       assert.equal(current.activeRun,null);
       const legacyToken = (await pool.query('SELECT entry_token FROM experiment_runs WHERE id=$1',[runId])).rows[0].entry_token;
       assert.equal((await entries.getExperimentEntry(legacyToken)).runId,runId);
+      await pool.query(`UPDATE experiment_runs SET metadata=metadata || '{"entry_token_aliases":["abcd-2345"]}'::jsonb WHERE id=$1`,[runId]);
+      const alias = await entries.getExperimentEntry('ABCD2345');
+      assert.equal(alias.runId,runId);
+      assert.equal(alias.token,legacyToken);
       for (let i=0;i<groups.length;i++) for (let j=i+1;j<groups.length;j++) {
         const a = groups[i].entryToken.replace('-',''), b = groups[j].entryToken.replace('-','');
-        assert.ok([...a].filter((char,index) => char !== b[index]).length >= 4);
+        assert.ok([...a].filter((char,index) => char !== b[index]).length >= 2);
       }
       await settingsLib.saveExperimentSettings({ ...originalSnapshot, experiment:{ ...originalSnapshot.experiment,title:'后续修改的任务' },ai:{ baseUrl:originalSnapshot.ai.baseUrl,botId:originalSnapshot.ai.botId } },adminId);
     });

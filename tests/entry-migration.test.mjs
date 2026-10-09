@@ -40,6 +40,27 @@ test('entry migration preserves historical records, gives distinct short codes a
     await client.query("INSERT INTO experiment_runs (id,experiment_id,name,status,assignment_mode,fixed_agent_id,entry_token) VALUES ($1,'legacy-study','并行组','active','fixed',$2,'qrst-6789')",[randomUUID(),agentId]);
     assert.equal((await client.query("SELECT count(*)::int AS n FROM experiment_runs WHERE status='active'")).rows[0].n,2);
     await assert.rejects(() => client.query("INSERT INTO experiment_runs (id,experiment_id,name,status,assignment_mode,fixed_agent_id,entry_token) VALUES ($1,'legacy-study','冲突组','closed','fixed',$2,'qrst-6789')",[randomUUID(),agentId]),error => error.code === '23505');
+    const beforeShortening = (await client.query('SELECT * FROM experiment_runs ORDER BY id')).rows;
+    await client.query(await readFile('db/migrations/0012_four_character_entry_links.sql','utf8'));
+    const shortened = (await client.query('SELECT * FROM experiment_runs ORDER BY id')).rows;
+    assert.deepEqual((await client.query('SELECT * FROM participants')).rows,originalParticipant);
+    assert.deepEqual((await client.query('SELECT * FROM experiment_sessions')).rows,originalSessions);
+    for (let i=0;i<shortened.length;i++) {
+      assert.match(shortened[i].entry_token,/^[abcdefghjkmnpqrstuvwxyz23456789]{4}$/);
+      assert.ok(shortened[i].metadata.entry_token_aliases.includes(beforeShortening[i].entry_token));
+      const { entry_token,metadata,...preserved } = shortened[i];
+      const { entry_token:oldToken,metadata:oldMetadata,...original } = beforeShortening[i];
+      assert.deepEqual(preserved,original);
+      assert.notEqual(entry_token,oldToken);
+      assert.deepEqual({ ...metadata,entry_token_aliases:undefined },{ ...oldMetadata,entry_token_aliases:undefined });
+    }
+    assert.equal(new Set(shortened.map(run => run.entry_token)).size,shortened.length);
+    for (let i=0;i<shortened.length;i++) for (let j=i+1;j<shortened.length;j++) {
+      assert.ok([...shortened[i].entry_token].filter((char,index) => char !== shortened[j].entry_token[index]).length >= 2);
+    }
+    // Applying the migration again keeps already shortened links stable.
+    await client.query(await readFile('db/migrations/0012_four_character_entry_links.sql','utf8'));
+    assert.deepEqual((await client.query('SELECT * FROM experiment_runs ORDER BY id')).rows,shortened);
   } finally {
     await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
     await client.end();

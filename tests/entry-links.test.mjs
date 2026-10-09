@@ -10,16 +10,35 @@ const source = ts.transpileModule(await readFile('lib/entry-links.ts','utf8'), {
 const links = {};
 vm.runInNewContext(source,{ exports:links });
 
-test('classroom short codes accept case and separator variations while retaining legacy links', () => {
+test('four-character classroom codes accept case variations and retain historical links', () => {
+  for (const input of ['abcd','ABCD',' ABCD ']) assert.equal(links.normalizeEntryToken(input),'abcd');
   for (const input of ['abcd-2345','ABCD-2345','abcd2345',' ABCD2345 ']) assert.equal(links.normalizeEntryToken(input),'abcd-2345');
   assert.equal(links.normalizeEntryToken('1234567890abcdef1234567890abcdef'),'1234567890abcdef1234567890abcdef');
-  for (const input of ['abc','abcd0123','abcdI234','abcdo234','x'.repeat(200),'<script>']) assert.equal(links.normalizeEntryToken(input),null);
+  for (const input of ['abc','abcde','ab01','abIl','abOo','abcd0123','abcdI234','abcdo234','x'.repeat(200),'<script>']) assert.equal(links.normalizeEntryToken(input),null);
 });
 
-test('one clipboard invitation contains the correct experiment, group, agents and exact link', () => {
-  const invitation = links.buildEntryInvitation({ experimentName:'实验一',groupName:'B组',assignmentMode:'fixed',agentNames:['阅读助手B'],url:'https://school.example/join/abcd-2345' });
-  assert.equal(invitation,'实验：实验一\n分组：B组\n智能体：阅读助手B\n分配方式：固定智能体\n实验链接：https://school.example/join/abcd-2345');
-  const random = links.buildEntryInvitation({ experimentName:'实验二',groupName:'随机组',assignmentMode:'balanced_random',agentNames:['助手A','助手B'],url:'https://school.example/join/qrst-6789' });
-  assert.ok(random.includes('助手A、助手B'));
-  assert.ok(random.includes('均衡随机分配'));
+test('clipboard invitation contains only the identifying name and exact link, with no experimental conditions', () => {
+  const invitation = links.buildEntryInvitation({ label:'助手B',url:'https://school.example/join/abcd' });
+  assert.equal(invitation,'助手B\nhttps://school.example/join/abcd');
+  assert.equal(invitation.split('\n').length,2);
+  assert.doesNotMatch(invitation,/实验：|分组：|智能体：|分配方式|固定|均衡|随机/);
+});
+
+test('four-character allocation retries collisions and one-character neighbors under the shared lock', async () => {
+  const events = [];
+  const sequence = [...'abcdabceqrst'];
+  const tokenSource = ts.transpileModule(await readFile('lib/entry-token.ts','utf8'), {
+    compilerOptions: { module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const tokens = {};
+  const modules = { 'server-only':{}, '@/lib/entry-links':links,
+    'node:crypto':{ randomInt:() => links.ENTRY_CODE_ALPHABET.indexOf(sequence.shift()) } };
+  vm.runInNewContext(tokenSource,{ exports:tokens,require:name => modules[name] });
+  const token = await tokens.createRunEntryToken({ query:async sql => {
+    events.push(sql);
+    return { rows:sql.includes('SELECT entry_token') ? [{ entry_token:'abcd' }] : [] };
+  } });
+  assert.equal(token,'qrst');
+  assert.match(events[0],/pg_advisory_xact_lock/);
+  assert.match(events[1],/length\(entry_token\)=4/);
 });

@@ -18,11 +18,19 @@ export interface ExperimentEntry {
 export async function getExperimentEntry(token: string): Promise<ExperimentEntry> {
   const normalized = normalizeEntryToken(token);
   if (!normalized) throw new ApiError(404, "ENTRY_NOT_FOUND", "实验链接不存在，请检查教师提供的链接。");
-  const result = await query<{ id: string; experiment_id: string; status: ExperimentEntry["status"]; config_snapshot: ExperimentSessionSnapshot | null }>(
-    "SELECT id, experiment_id, status, config_snapshot FROM experiment_runs WHERE entry_token=$1", [normalized]);
-  const row = result.rows[0];
+  type EntryRow = { id: string; experiment_id: string; entry_token: string; status: ExperimentEntry["status"]; config_snapshot: ExperimentSessionSnapshot | null };
+  const result = await query<EntryRow>(
+    "SELECT id, experiment_id, entry_token, status, config_snapshot FROM experiment_runs WHERE entry_token=$1", [normalized]);
+  let row = result.rows[0];
+  // Only legacy links need an alias lookup; current four-character links use
+  // the existing unique index. The session remains bound to the same run.
+  if (!row && normalized.length !== 4) {
+    const legacy = await query<EntryRow>(`SELECT id, experiment_id, entry_token, status, config_snapshot
+      FROM experiment_runs WHERE metadata->'entry_token_aliases' ? $1`, [normalized]);
+    row = legacy.rows[0];
+  }
   if (!row) throw new ApiError(404, "ENTRY_NOT_FOUND", "实验链接不存在，请检查教师提供的链接。");
-  return { token: normalized, experimentId: row.experiment_id, runId: row.id, status: row.status, snapshot: row.config_snapshot };
+  return { token: row.entry_token, experimentId: row.experiment_id, runId: row.id, status: row.status, snapshot: row.config_snapshot };
 }
 
 export async function getStudentEntry(request?: Request) {
