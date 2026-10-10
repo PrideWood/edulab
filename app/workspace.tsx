@@ -9,6 +9,7 @@ import type { ParticipantProfile, SessionPayload } from "@/lib/client-types";
 import { buildTranscriptExport, safeExportSegment } from "@/lib/transcript-export";
 import { uploadTranscript } from "@/lib/transcript-upload";
 import { FullscreenController, useFullscreenState } from "./fullscreen-controller";
+import { BrandLogo } from "./brand-logo";
 
 const OUTBOX_PREFIX = "edulab_pending_message:";
 const TRANSCRIPT_PREFIX = "edulab_transcript:";
@@ -980,7 +981,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
       <section className={`workspace conversation-workspace ${sidebarCollapsed ? "sidebar-collapsed" : ""}`} aria-label="AI 对话工作区">
         <aside className="conversation-sidebar" aria-label="对话列表">
           <div className="conversation-sidebar-head">
-            <div className="brand sidebar-brand"><button className="brand-mark brand-toggle" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}>E</button>{!sidebarCollapsed && <div className="brand-name">EduLab</div>}</div>
+            <div className="brand sidebar-brand"><button className="brand-mark brand-toggle" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}><BrandLogo size={32} /></button>{!sidebarCollapsed && <div className="brand-name">EduLab</div>}</div>
           </div>
           <button className="new-conversation" onClick={() => changeConversation({ action: "create" })} disabled={loading || pending || conversationBusy || !canChat}><span>＋</span>{!sidebarCollapsed && <em>新建对话</em>}</button>
           <nav className="conversation-list">

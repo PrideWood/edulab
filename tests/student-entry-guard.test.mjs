@@ -12,8 +12,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 const compile = async file => ts.transpileModule(await readFile(file,'utf8'), {
   compilerOptions:{ module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,jsx:ts.JsxEmit.ReactJSX },
 }).outputText;
-const [accessSource,proxySource,homeSource] = await Promise.all([
-  compile('lib/access-code.ts'),compile('proxy.ts'),compile('app/page.tsx'),
+const [accessSource,proxySource,homeSource,logoSource] = await Promise.all([
+  compile('lib/access-code.ts'),compile('proxy.ts'),compile('app/page.tsx'),compile('app/brand-logo.tsx'),
 ]);
 function evaluate(source,modules={},env={}) {
   const exports = {};
@@ -35,7 +35,8 @@ const studentPaths = ['/api/sessions','/api/sessions/resume','/api/sessions/draf
   '/api/sessions/complete','/api/sessions/reset','/api/messages','/api/conversations','/api/participant-profile'];
 
 test('bare domain renders only teacher-link guidance and never loads the experiment or database', () => {
-  const home = evaluate(homeSource,{'react/jsx-runtime':jsxRuntime});
+  const logo = evaluate(logoSource,{'react/jsx-runtime':jsxRuntime,'next/image':{default:props => jsxRuntime.jsx('img',{src:props.src,alt:props.alt,width:props.width,height:props.height,className:props.className}),__esModule:true}});
+  const home = evaluate(homeSource,{'react/jsx-runtime':jsxRuntime,'./brand-logo':logo});
   const html = renderToStaticMarkup(home.default());
   assert.match(html,/请使用教师提供的实验链接进入/);
   assert.doesNotMatch(html,/<form|<input|<textarea|首次参加实验|继续之前的实验/);

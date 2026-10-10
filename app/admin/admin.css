@@ -1,7 +1,7 @@
 .admin-shell { height: 100dvh; min-height: 0; display: grid; grid-template-columns: 272px minmax(0, 1fr); overflow: hidden; color: #1b2520; background: #f5f7f5; }
 .admin-sidebar { min-height: 0; padding: 28px 20px 22px; display: flex; flex-direction: column; overflow-y: auto; color: #eaf1ed; background: #17241e; }
 .admin-brand { padding: 0 8px 26px; display: flex; align-items: center; gap: 11px; font-weight: 730; letter-spacing: -.02em; }
-.admin-brand-mark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; color: #173b2c; background: #b8dec9; }
+.admin-brand-mark { width: 34px; height: 34px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 10px; background: transparent; }
 .admin-nav { display: grid; gap: 6px; }
 .admin-nav button { width: 100%; padding: 12px 11px; display: flex; align-items: center; gap: 12px; border: 0; border-radius: 12px; color: #9eb0a7; background: transparent; text-align: left; }
 .admin-nav button > span { width: 26px; color: #6f8479; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }

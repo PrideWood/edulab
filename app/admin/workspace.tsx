@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { buildEntryInvitation } from "@/lib/entry-links";
 import type { ExperimentSettings } from "@/lib/experiment-settings";
+import { BrandLogo } from "../brand-logo";
 
 type Section = "participants" | "content" | "limits" | "storage" | "ai";
 type Admin = { id: string; username: string; displayName: string };
@@ -169,7 +170,7 @@ export function AdminWorkspace() {
     setAdmin(null); setSettings(null); setMode("login");
   }
 
-  if (mode === "loading") return <div className="admin-loading"><span className="admin-brand-mark">E</span><p>正在载入管理后台…</p></div>;
+  if (mode === "loading") return <div className="admin-loading"><span className="admin-brand-mark"><BrandLogo /></span><p>正在载入管理后台…</p></div>;
   if (mode === "login") return <AdminLogin onSubmit={login} error={error} />;
   if (!settings || !admin) return null;
 
@@ -180,7 +181,7 @@ export function AdminWorkspace() {
   return (
     <main className="admin-shell">
       <aside className="admin-sidebar">
-        <div className="admin-brand"><span className="admin-brand-mark">E</span><span>EduLab</span></div>
+        <div className="admin-brand"><span className="admin-brand-mark"><BrandLogo /></span><span>EduLab</span></div>
         <div className="experiment-selector"><label htmlFor="admin-experiment">当前实验</label><select id="admin-experiment" value={settings.experiment.id} disabled={saving} onChange={(event) => void selectExperiment(event.target.value)}>{experiments.length === 0 ? <option value={settings.experiment.id}>{settings.experiment.title}</option> : experiments.map((study) => <option key={study.id} value={study.id}>{study.name}</option>)}</select><button disabled={saving} onClick={() => setCreatingExperiment((value) => !value)}>＋ 新增实验</button></div>
         <nav className="admin-nav" aria-label="设置导航">{sections.map((item) => <button className={section === item.id ? "active" : ""} key={item.id} onClick={() => { setSection(item.id); if (item.id === "participants") void loadParticipants(); }}><span>{item.number}</span><div><strong>{item.label}</strong><small>{item.description}</small></div></button>)}</nav>
         <div className="admin-sidebar-footer"><div><span className="admin-online-dot" />{admin.displayName}</div><button onClick={logout}>退出</button></div>
@@ -332,7 +333,7 @@ function ParticipantDirectory({ participants, loading, error, onDeleted, experim
 }
 
 function AdminLogin({ onSubmit, error }: { onSubmit: (event: FormEvent<HTMLFormElement>) => void; error: string }) {
-  return <main className="admin-login-page"><section className="admin-login-card"><div className="admin-login-brand"><span className="admin-brand-mark">E</span><div><strong>EduLab</strong><span>实验管理后台</span></div></div><div className="admin-login-copy"><p className="admin-kicker">管理员登录</p><h1>管理实验，不打扰实验</h1><p>登录后可以设置任务内容、交互限制和 Coze 智能体。所有更改都会留下版本与操作记录。</p></div><form onSubmit={onSubmit}><label><span>用户名</span><input name="username" autoComplete="username" required /></label><label><span>密码</span><input name="password" type="password" autoComplete="current-password" minLength={8} required /></label>{error && <p className="admin-login-error" role="alert">{error}</p>}<button type="submit">进入管理后台</button></form><p className="admin-login-note">学生无法通过此入口读取或修改实验设置。</p></section></main>;
+  return <main className="admin-login-page"><section className="admin-login-card"><div className="admin-login-brand"><span className="admin-brand-mark"><BrandLogo /></span><div><strong>EduLab</strong><span>实验管理后台</span></div></div><div className="admin-login-copy"><p className="admin-kicker">管理员登录</p><h1>管理实验，不打扰实验</h1><p>登录后可以设置任务内容、交互限制和 Coze 智能体。所有更改都会留下版本与操作记录。</p></div><form onSubmit={onSubmit}><label><span>用户名</span><input name="username" autoComplete="username" required /></label><label><span>密码</span><input name="password" type="password" autoComplete="current-password" minLength={8} required /></label>{error && <p className="admin-login-error" role="alert">{error}</p>}<button type="submit">进入管理后台</button></form><p className="admin-login-note">学生无法通过此入口读取或修改实验设置。</p></section></main>;
 }
 
 function ContentSettings({ settings, update }: { settings: ExperimentSettings; update: (patch: Partial<ExperimentSettings["experiment"]>) => void }) {

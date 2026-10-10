@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { requestExperimentFullscreen } from "../fullscreen-controller";
+import { BrandLogo } from "../brand-logo";
 
 export function AccessCodeForm({ configured, nextPath }: { configured: boolean; nextPath: string }) {
   const [accessCode, setAccessCode] = useState("");
@@ -34,7 +35,7 @@ export function AccessCodeForm({ configured, nextPath }: { configured: boolean; 
   return (
     <main className="access-page">
       <section className="access-card" aria-labelledby="access-title">
-        <div className="access-brand"><span aria-hidden="true">E</span><strong>EduLab</strong></div>
+        <div className="access-brand"><BrandLogo size={42} /><strong>EduLab</strong></div>
         <div className="access-copy">
           <p>实验访问验证</p>
           <h1 id="access-title">请输入 Access Code</h1>

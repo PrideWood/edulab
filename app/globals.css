@@ -26,12 +26,15 @@ button { cursor: pointer; }
 .access-page { height: 100dvh; display: grid; place-items: center; padding: 24px; overflow-y: auto; background: radial-gradient(circle at 20% 10%, #e8f3ed 0, transparent 38%), var(--canvas); }
 .access-card { width: min(420px, 100%); padding: 34px; border: 1px solid #d5e0d9; border-radius: 24px; background: rgba(255,255,255,.94); box-shadow: 0 22px 60px rgba(45, 78, 60, .12); }
 .access-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 34px; font-size: 20px; }
-.access-brand span { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 13px; color: white; background: var(--accent); font-weight: 760; }
+.brand-logo { display: block; flex: 0 0 auto; max-width: 100%; height: auto; }
 .access-copy > p { margin: 0 0 8px; color: var(--accent); font-size: 12px; font-weight: 720; letter-spacing: .08em; }
 .access-copy h1 { margin: 0; font-size: 27px; letter-spacing: -.025em; }
 .access-copy > span { display: block; margin-top: 10px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.entry-notice { width: min(480px, 100%); padding: 40px clamp(20px, 5vw, 36px); text-align: center; }
+.entry-notice .access-brand { justify-content: center; margin-bottom: 28px; }
 .entry-notice .access-copy { margin-bottom: 0; }
-.entry-notice .access-copy h1 { font-size: 25px; line-height: 1.4; }
+.entry-notice .access-copy h1 { max-width: 14em; margin-inline: auto; font-size: clamp(20px, 5vw, 24px); line-height: 1.6; text-wrap: balance; }
+.entry-notice .access-copy > span { margin-top: 16px; text-wrap: balance; }
 .access-form { display: grid; gap: 10px; margin-top: 28px; }
 .access-form label { color: #536159; font-size: 12px; font-weight: 650; }
 .access-form input { width: 100%; height: 48px; padding: 0 14px; border: 1px solid #cbd8d0; border-radius: 12px; color: var(--ink); background: #fff; outline: none; }
@@ -52,7 +55,7 @@ button { cursor: pointer; }
 .fullscreen-error { margin-top: 16px; padding: 10px 12px; border: 1px solid #efd6cf; border-radius: 10px; color: #8b4d43; background: #fff2ef; font-size: 11px; line-height: 1.55; text-align: left; }
 .app-shell { height: 100dvh; min-height: 0; padding: 32px; display: flex; flex-direction: column; overflow: hidden; }
 .brand { display: flex; align-items: center; gap: 11px; }
-.brand-mark { width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center; color: white; background: var(--accent); font-weight: 750; letter-spacing: -.03em; }
+.brand-mark { width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center; background: transparent; }
 .brand-name { font-size: 17px; font-weight: 720; letter-spacing: -.02em; }
 
 .workspace { width: min(1180px, 100%); min-height: 0; flex: 1 1 auto; margin: 0 auto; display: grid; grid-template-columns: minmax(310px, .88fr) minmax(480px, 1.42fr); overflow: hidden; background: rgba(255, 255, 255, .88); border: 1px solid rgba(208, 218, 212, .92); border-radius: 22px; box-shadow: 0 20px 60px rgba(39, 62, 50, .09); backdrop-filter: blur(16px); }
@@ -64,7 +67,7 @@ button { cursor: pointer; }
 .sidebar-brand .brand-mark { width: 32px; height: 32px; border-radius: 10px; flex: 0 0 auto; font-size: 15px; }
 .sidebar-brand .brand-name { overflow: hidden; font-size: 16px; text-overflow: ellipsis; white-space: nowrap; }
 .brand-toggle { padding: 0; border: 0; cursor: pointer; }
-.brand-toggle:hover { background: var(--accent-dark); }
+.brand-toggle:hover { background: rgba(40, 116, 86, .08); }
 .brand-toggle:focus-visible { outline: 3px solid rgba(40, 116, 86, .22); outline-offset: 2px; }
 .new-conversation { min-height: 42px; margin: 9px 0 14px; padding: 0 12px; display: flex; align-items: center; justify-content: flex-start; gap: 9px; border: 1px solid #cfdad3; border-radius: 12px; color: #285f48; background: white; font-weight: 680; font-size: 12px; }
 .new-conversation span { font-size: 18px; font-weight: 400; }
