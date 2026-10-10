@@ -18,7 +18,13 @@ export async function proxy(request: NextRequest) {
   }
 
   const verified = await verifyAccessCookie(request.cookies.get(ACCESS_COOKIE)?.value, configuredCode);
-  if (verified) return NextResponse.next();
+  if (verified) {
+    // Retired homepage clients must not fall back to the default experiment.
+    if (isApiRequest && !request.nextUrl.searchParams.get("entry")?.trim()) {
+      return apiError(400, "ENTRY_REQUIRED", "请使用教师提供的实验链接进入。");
+    }
+    return NextResponse.next();
+  }
   if (isApiRequest) return apiError(401, "ACCESS_REQUIRED", "请先输入网站访问码。");
 
   const target = request.nextUrl.clone();
@@ -31,7 +37,6 @@ export async function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/",
     "/join/:path*",
     "/api/sessions/:path*",
     "/api/messages/:path*",
