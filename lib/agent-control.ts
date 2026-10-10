@@ -19,6 +19,7 @@ export interface AgentConfigSummary {
   tokenSource: "database" | "environment" | "missing";
   enabled: boolean;
   hasReferences: boolean;
+  hasExperimentRecords: boolean;
   updatedAt: string;
 }
 
@@ -34,6 +35,7 @@ export interface ExperimentRunSummary {
   createdAt: string;
   entryToken: string | null;
   entryDeletedAt: string | null;
+  entryCodeReserved: boolean | null;
   isDefault: boolean;
 }
 
@@ -48,6 +50,7 @@ interface AgentRow {
   coze_token_tag: string | null;
   enabled: boolean;
   has_references?: boolean;
+  has_experiment_records?: boolean;
   updated_at: string;
 }
 
@@ -63,6 +66,7 @@ interface RunRow {
   created_at: string;
   entry_token: string | null;
   entry_deleted_at: string | null;
+  entry_code_reserved?: boolean | null;
   is_default: boolean;
 }
 
@@ -76,6 +80,7 @@ function mapAgent(row: AgentRow): AgentConfigSummary {
     tokenSource: row.coze_token_ciphertext ? "database" : process.env.COZE_API_TOKEN ? "environment" : "missing",
     enabled: row.enabled,
     hasReferences: Boolean(row.has_references),
+    hasExperimentRecords: Boolean(row.has_experiment_records),
     updatedAt: row.updated_at,
   };
 }
@@ -93,8 +98,43 @@ function mapRun(row: RunRow): ExperimentRunSummary {
     createdAt: row.created_at,
     entryToken: row.entry_token,
     entryDeletedAt: row.entry_deleted_at ?? null,
+    entryCodeReserved: row.entry_code_reserved ?? null,
     isDefault: row.is_default,
   };
+}
+
+// These expressions are internal SQL identifiers/parameters, never user input.
+// Freeze all candidates once their group has any enrollment record.
+function agentRecordUseSql(experimentExpression: string, agentExpression: string) {
+  return `(
+    EXISTS (SELECT 1 FROM participant_agent_assignments assignment
+      WHERE assignment.agent_id = ${agentExpression})
+    OR EXISTS (SELECT 1 FROM experiment_sessions session
+      WHERE session.experiment_id = ${experimentExpression}
+        AND (session.agent_id = ${agentExpression}
+          OR session.config_snapshot->'ai'->>'agentId' = ${agentExpression}::text))
+    OR EXISTS (SELECT 1 FROM experiment_runs run
+      WHERE run.experiment_id = ${experimentExpression}
+        AND (run.fixed_agent_id = ${agentExpression} OR ${agentExpression} = ANY(run.random_agent_ids))
+        AND (EXISTS (SELECT 1 FROM participant_agent_assignments a WHERE a.experiment_run_id = run.id)
+          OR EXISTS (SELECT 1 FROM experiment_sessions s WHERE s.experiment_run_id = run.id)))
+  )`;
+}
+
+async function entryCodeIsInUse(client: PoolClient, experimentId: string,
+  run: Pick<RunRow, "id" | "assignment_mode" | "fixed_agent_id" | "random_agent_ids">) {
+  const agentIds = run.assignment_mode === "fixed"
+    ? (run.fixed_agent_id ? [run.fixed_agent_id] : []) : run.random_agent_ids;
+  const usage = await client.query<{ exists: boolean }>(`SELECT (
+    EXISTS (SELECT 1 FROM participant_agent_assignments WHERE experiment_run_id=$3)
+    OR EXISTS (SELECT 1 FROM experiment_sessions WHERE experiment_run_id=$3)
+    OR EXISTS (SELECT 1 FROM ai_agent_configs agent WHERE agent.experiment_id=$1
+      AND agent.id=ANY($2::uuid[]) AND ${agentRecordUseSql("agent.experiment_id", "agent.id")})
+    OR EXISTS (SELECT 1 FROM experiment_runs other WHERE other.experiment_id=$1 AND other.id<>$3
+      AND other.entry_deleted_at IS NULL
+      AND (other.fixed_agent_id=ANY($2::uuid[]) OR other.random_agent_ids && $2::uuid[]))
+  ) AS exists`, [experimentId,agentIds,run.id]);
+  return Boolean(usage.rows[0]?.exists);
 }
 
 export async function getAgentControl(experimentId: string) {
@@ -119,13 +159,16 @@ export async function getAgentControl(experimentId: string) {
              SELECT 1 FROM experiment_sessions session
              WHERE session.experiment_id = agent.experiment_id AND session.agent_id = agent.id
            )
-         ) AS has_references
+           OR ${agentRecordUseSql("agent.experiment_id", "agent.id")}
+         ) AS has_references,
+         ${agentRecordUseSql("agent.experiment_id", "agent.id")} AS has_experiment_records
        FROM ai_agent_configs agent WHERE agent.experiment_id = $1 ORDER BY agent.created_at, agent.internal_name`,
       [experimentId],
     ),
     query<RunRow>(
       `SELECT id, name, status, assignment_mode, fixed_agent_id, random_agent_ids,
-         opened_at, closed_at, created_at, entry_token, is_default, entry_deleted_at
+         opened_at, closed_at, created_at, entry_token, is_default, entry_deleted_at,
+         metadata->>'entry_code_reserved'='true' AS entry_code_reserved
        FROM experiment_runs WHERE experiment_id = $1
        ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'draft' THEN 1 ELSE 2 END, created_at DESC`,
       [experimentId],
@@ -153,6 +196,8 @@ export async function deleteAgentConfig(input: {
     const agent = current.rows[0];
     if (!agent) throw new Error("AGENT_NOT_FOUND");
     if (input.confirmationName !== agent.internal_name) throw new Error("AGENT_CONFIRMATION_MISMATCH");
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`edulab:run:${input.experimentId}`]);
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended('edulab:entry-links',0))");
 
     const references = await client.query<{ exists: boolean }>(
       `SELECT (
@@ -173,24 +218,32 @@ export async function deleteAgentConfig(input: {
            SELECT 1 FROM experiment_sessions session
            WHERE session.experiment_id = $1 AND session.agent_id = $2
          )
+         OR ${agentRecordUseSql("$1", "$2::uuid")}
        ) AS exists`,
       [input.experimentId, input.agentId],
     );
     if (references.rows[0]?.exists) throw new Error("AGENT_HAS_REFERENCES");
 
-    const emptyRuns = await client.query(
+    const emptyRuns = await client.query<RunRow>(
       `DELETE FROM experiment_runs run
        WHERE run.experiment_id = $1 AND run.status = 'closed'
          AND (run.fixed_agent_id = $2 OR $2 = ANY(run.random_agent_ids))
          AND NOT EXISTS (SELECT 1 FROM participant_agent_assignments a WHERE a.experiment_run_id = run.id)
          AND NOT EXISTS (SELECT 1 FROM experiment_sessions s WHERE s.experiment_run_id = run.id)
-       RETURNING run.id, run.name, run.assignment_mode, run.fixed_agent_id, run.random_agent_ids`,
+       RETURNING run.id, run.name, run.assignment_mode, run.fixed_agent_id, run.random_agent_ids, run.entry_token`,
       [input.experimentId, input.agentId],
     );
+    const removedEmptyRuns = [];
+    for (const run of emptyRuns.rows) {
+      // Agent cleanup can remove an empty random entry shared with another
+      // agent that has records elsewhere. Keep that code protected too.
+      removedEmptyRuns.push({ ...run,entryToken:run.entry_token,fixedAgentId:run.fixed_agent_id,
+        randomAgentIds:run.random_agent_ids,entryCodeReserved:await entryCodeIsInUse(client,input.experimentId,run) });
+    }
     await client.query(
       `INSERT INTO admin_audit_log (id, admin_user_id, action, experiment_id, before_data)
        VALUES ($1,$2,'ai.agent.delete',$3,$4::jsonb)`,
-      [randomUUID(), adminUserId, input.experimentId, JSON.stringify({ ...mapAgent(agent), removedEmptyRuns: emptyRuns.rows })],
+      [randomUUID(), adminUserId, input.experimentId, JSON.stringify({ ...mapAgent(agent), removedEmptyRuns })],
     );
     await client.query(
       `DELETE FROM ai_agent_configs WHERE id = $1 AND experiment_id = $2`,
@@ -219,15 +272,18 @@ export async function saveAgentConfig(input: {
     ) : null;
     if (input.id && !current?.rows[0]) throw new Error("AGENT_NOT_FOUND");
     if (input.id) {
-      const activeUse = await client.query<{ exists: boolean }>(
-        `SELECT EXISTS (
+      // One statement/snapshot prevents a signup + enrollment pause between
+      // separate record and active-entry checks from opening an editing window.
+      const usage = await client.query<{ has_records: boolean; active_use: boolean }>(
+        `SELECT ${agentRecordUseSql("$1", "$2::uuid")} AS has_records, EXISTS (
            SELECT 1 FROM experiment_runs
            WHERE experiment_id = $1 AND status = 'active'
              AND (fixed_agent_id = $2 OR $2 = ANY(random_agent_ids))
-         ) AS exists`,
+         ) AS active_use`,
         [input.experimentId, input.id],
       );
-      if (activeUse.rows[0]?.exists) throw new Error("ACTIVE_AGENT_LOCKED");
+      if (usage.rows[0]?.has_records) throw new Error("AGENT_RECORDS_LOCKED");
+      if (usage.rows[0]?.active_use) throw new Error("ACTIVE_AGENT_LOCKED");
     }
     const encrypted = input.token?.trim() ? encryptSecret(input.token.trim()) : null;
     const previous = current?.rows[0];
@@ -373,7 +429,8 @@ export interface AssignedAgentRuntime {
 
 const LIFECYCLE_RUN_SELECT = `SELECT id, name, status, assignment_mode, fixed_agent_id,
   random_agent_ids, opened_at, closed_at, created_at, entry_token, is_default, entry_deleted_at,
-  metadata FROM experiment_runs WHERE id=$1 AND experiment_id=$2`;
+  metadata, metadata->>'entry_code_reserved'='true' AS entry_code_reserved
+  FROM experiment_runs WHERE id=$1 AND experiment_id=$2`;
 
 export async function reopenExperimentRun(experimentId: string, runId: string, adminUserId: string) {
   return transaction(async (client) => {
@@ -425,6 +482,8 @@ export async function deleteExperimentRunLink(input: {
       SELECT 1 FROM chat_requests request JOIN experiment_sessions s ON s.id=request.session_id
       WHERE s.experiment_run_id=$1 AND request.status='in_progress') AS exists`, [input.runId]);
     if (sessions.rows.some((session) => session.active_request_id) || busy.rows[0].exists) throw new Error("RUN_BUSY");
+    // The global allocation lock makes the decision and tombstone atomic.
+    const entryCodeReserved = await entryCodeIsInUse(client,input.experimentId,run);
     // The teacher confirms completion. Keep saved content, times, assignments
     // and provider IDs, while revoking all old write credentials for this run.
     await client.query(`UPDATE experiment_sessions SET status='completed',
@@ -433,13 +492,16 @@ export async function deleteExperimentRunLink(input: {
         THEN '{"end_reason":"entry_deleted_by_admin","completion_source":"admin_entry_delete"}'::jsonb ELSE '{}'::jsonb END
       WHERE experiment_run_id=$1`, [input.runId,hashSecret(randomUUID())]);
     await client.query(`UPDATE experiment_runs SET entry_token=NULL, entry_deleted_at=now(),
-      is_default=false, updated_at=now(), updated_by=$2, metadata=metadata-'entry_token_aliases' WHERE id=$1`, [input.runId,adminUserId]);
+      is_default=false, updated_at=now(), updated_by=$2,
+      metadata=(metadata-'entry_token_aliases') || jsonb_build_object(
+        'retired_entry_token',entry_token,'entry_code_reserved',$3::boolean) WHERE id=$1`,
+    [input.runId,adminUserId,entryCodeReserved]);
     const after = (await client.query<RunRow>(LIFECYCLE_RUN_SELECT, [input.runId, input.experimentId])).rows[0];
     await client.query(`INSERT INTO admin_audit_log (id,admin_user_id,action,experiment_id,before_data,after_data)
       VALUES ($1,$2,'experiment.run.link.delete',$3,$4::jsonb,$5::jsonb)`,
     [randomUUID(),adminUserId,input.experimentId,
       JSON.stringify({ ...mapRun(run),entryTokenAliases:run.metadata.entry_token_aliases ?? [] }),
-      JSON.stringify({ ...mapRun(after),preservedSessionCount:sessions.rows.length })]);
+      JSON.stringify({ ...mapRun(after),preservedSessionCount:sessions.rows.length,entryCodeReserved })]);
     return mapRun(after);
   });
 }

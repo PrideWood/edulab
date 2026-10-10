@@ -6,6 +6,7 @@ import { ApiError } from "@/lib/http";
 import type { ExperimentSessionSnapshot } from "@/lib/experiment-settings";
 import { SESSION_COOKIE } from "@/lib/security";
 import { normalizeEntryToken } from "@/lib/entry-links";
+import { RESERVED_ENTRY_TOKENS_SQL } from "@/lib/entry-token";
 
 export interface ExperimentEntry {
   token: string;
@@ -20,7 +21,10 @@ export async function getExperimentEntry(token: string): Promise<ExperimentEntry
   if (!normalized) throw new ApiError(404, "ENTRY_NOT_FOUND", "实验链接不存在，请检查教师提供的链接。");
   type EntryRow = { id: string; experiment_id: string; entry_token: string; status: ExperimentEntry["status"]; config_snapshot: ExperimentSessionSnapshot | null };
   const result = await query<EntryRow>(
-    "SELECT id, experiment_id, entry_token, status, config_snapshot FROM experiment_runs WHERE entry_token=$1 AND entry_deleted_at IS NULL", [normalized]);
+    `SELECT id, experiment_id, entry_token, status, config_snapshot FROM experiment_runs
+     WHERE entry_token=$1 AND entry_deleted_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM (${RESERVED_ENTRY_TOKENS_SQL}) reserved
+         WHERE reserved.entry_token=$1 AND reserved.run_id<>experiment_runs.id::text)`, [normalized]);
   let row = result.rows[0];
   // Only legacy links need an alias lookup; current four-character links use
   // the existing unique index. The session remains bound to the same run.

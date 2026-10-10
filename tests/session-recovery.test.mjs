@@ -563,7 +563,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       assert.equal(created.body.session.participantCode,'P015');
       assert.equal(created.body.session.agentId,groups[1].fixedAgentId);
     });
-    await t.test('deleting a finished link frees its code, retains research data and revokes stale writes', async () => {
+    await t.test('deleting a finished link reserves its code, retains research data and revokes stale writes', async () => {
       const revision = (await sessions.GET(scopedRequest(groups[1],{}))).body.draft.revision;
       assert.equal((await draft.PUT(scopedRequest(groups[1],{ sessionId:linkedB.body.session.id,text:'保留的草稿',revision },'/api/sessions/draft'))).status,200);
       assert.equal((await complete.POST(scopedRequest(groups[1],{ messages:[],storedMessageCount:2 },'/api/sessions/complete'))).status,200);
@@ -588,6 +588,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       assert.equal(response.status,200);
       const deleted = response.body.control.runs.find(run => run.id === groups[1].id);
       assert.equal(deleted.entryToken,null);
+      assert.equal(deleted.entryCodeReserved,true);
       assert.ok(deleted.entryDeletedAt);
       assert.equal(deleted.status,'closed');
       const after = await preserved();
@@ -609,11 +610,17 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       assert.equal(audit.before_data.entryToken,groups[1].entryToken);
       assert.deepEqual(audit.before_data.entryTokenAliases,['qrst-2345']);
       assert.equal(audit.after_data.preservedSessionCount,6);
+      assert.equal(audit.after_data.entryCodeReserved,true);
+      const metadata = (await pool.query('SELECT metadata FROM experiment_runs WHERE id=$1',[groups[1].id])).rows[0].metadata;
+      assert.equal(metadata.retired_entry_token,groups[1].entryToken);
+      assert.equal(metadata.entry_code_reserved,true);
     });
-    await t.test('a released four-character code can be allocated again without authenticating or merging old participants', async () => {
+    await t.test('a used retired code cannot be allocated again and original participants remain isolated', async () => {
       h.forceToken(groups[1].entryToken);
       const replacement = await control.activateExperimentRun({ experimentId:study.id,name:'新的实验入口',assignmentMode:'fixed',fixedAgentId:groups[0].fixedAgentId,randomAgentIds:[],makeDefault:false },adminId);
-      assert.equal(replacement.entryToken,groups[1].entryToken);
+      assert.notEqual(replacement.entryToken,groups[1].entryToken);
+      assert.ok([...replacement.entryToken].filter((char,index) => char !== groups[1].entryToken[index]).length >= 2);
+      await assert.rejects(() => entries.getExperimentEntry(groups[1].entryToken),error => error.code === 'ENTRY_NOT_FOUND');
       assert.notEqual(replacement.id,groups[1].id);
       assert.equal((await sessions.GET(scopedRequest(replacement,{}))).status,401);
       assert.equal((await resume.POST(scopedRequest(replacement,{ participantCode:'P002',identity:'link-002' },'/api/sessions/resume'))).status,404);
@@ -625,6 +632,180 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       assert.equal(created.body.session.agentId,groups[0].fixedAgentId);
       const counts = (await pool.query('SELECT count(*)::int AS total,count(DISTINCT external_code)::int AS distinct_codes FROM participants WHERE experiment_id=$1',[study.id])).rows[0];
       assert.deepEqual(counts,{ total:16,distinct_codes:16 });
+    });
+    const agentInput = (agent,overrides={}) => ({ id:agent.id,internalName:agent.internalName,
+      baseUrl:agent.baseUrl,botId:agent.botId,enabled:agent.enabled,...overrides });
+    const newAgent = (label) => control.saveAgentConfig({ experimentId:otherStudy.id,internalName:label,
+      baseUrl:'https://api.coze.com',botId:crypto.randomUUID(),enabled:true },adminId);
+    const newFixedRun = (agent,label) => control.activateExperimentRun({ experimentId:otherStudy.id,
+      name:label,assignmentMode:'fixed',fixedAgentId:agent.id,randomAgentIds:[],makeDefault:false },adminId);
+    const deleteEmptyLink = async run => {
+      await control.closeActiveExperimentRun(otherStudy.id,adminId,run.id);
+      await control.deleteExperimentRunLink({ experimentId:otherStudy.id,runId:run.id,confirmationCode:run.entryToken },adminId);
+    };
+    await t.test('enrolled configs stay frozen after all enrollment stops and after link deletion', async () => {
+      for (const group of groups) await control.closeActiveExperimentRun(study.id,adminId,group.id);
+      const before = (await pool.query('SELECT * FROM ai_agent_configs WHERE experiment_id=$1 ORDER BY id',[study.id])).rows;
+      for (const agent of (await control.getAgentControl(study.id)).agents) {
+        assert.equal(agent.hasExperimentRecords,true);
+        for (const overrides of [{ botId:'changed-bot' },{ internalName:'changed-name' },
+          { baseUrl:'https://api.coze.cn' },{ token:'changed-token' },{ enabled:false }]) {
+          const result = await lifecycleApi.POST(adminRequest({ action:'save_agent',agent:agentInput(agent,overrides) }));
+          assert.equal(result.status,409);
+          assert.equal(result.body.error.code,'AGENT_RECORDS_LOCKED');
+        }
+      }
+      assert.deepEqual((await pool.query('SELECT * FROM ai_agent_configs WHERE experiment_id=$1 ORDER BY id',[study.id])).rows,before);
+      // Reopening admits new students to precisely the same configuration.
+      await control.reopenExperimentRun(study.id,groups[0].id,adminId);
+      const browser = await harness(db,h.sources);
+      const created = await browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'',studentNumber:'after-frozen-pause' } },`http://localhost/api/sessions?entry=${groups[0].entryToken}`));
+      assert.equal(created.status,201);
+      assert.equal(created.body.session.agentId,groups[0].fixedAgentId);
+      await browser.load('app/api/messages/route.ts').POST(browser.request({ clientRequestId:crypto.randomUUID(),content:'保持原智能体' },`http://localhost/api/messages?entry=${groups[0].entryToken}`));
+      assert.equal(browser.creates.at(-1).bot_id,before.find(agent => agent.id===groups[0].fixedAgentId).coze_bot_id);
+    });
+    await t.test('the first enrollment freezes every random-group candidate even before any chat message', async () => {
+      const agents = await Promise.all([newAgent('随机锁定A'),newAgent('随机锁定B')]);
+      const run = await control.activateExperimentRun({ experimentId:otherStudy.id,name:'首次报名即锁定',
+        assignmentMode:'balanced_random',fixedAgentId:null,randomAgentIds:agents.map(agent => agent.id),makeDefault:false },adminId);
+      const browser = await harness(db,h.sources);
+      const created = await browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'',studentNumber:'freeze-before-chat' } },`http://localhost/api/sessions?entry=${run.entryToken}`));
+      assert.equal(created.status,201);
+      assert.equal((await pool.query('SELECT count(*)::int AS n FROM messages m JOIN experiment_sessions s ON s.id=m.session_id WHERE s.experiment_run_id=$1',[run.id])).rows[0].n,0);
+      await control.closeActiveExperimentRun(otherStudy.id,adminId,run.id);
+      for (const agent of agents) {
+        await assert.rejects(() => control.saveAgentConfig({ experimentId:otherStudy.id,...agentInput(agent,{ botId:'changed-random-bot' }) },adminId),/AGENT_RECORDS_LOCKED/);
+        assert.equal((await control.getAgentControl(otherStudy.id)).agents.find(a => a.id===agent.id).hasExperimentRecords,true);
+      }
+      await control.deleteExperimentRunLink({ experimentId:otherStudy.id,runId:run.id,confirmationCode:run.entryToken },adminId);
+      for (const agent of agents) await assert.rejects(() => control.saveAgentConfig({ experimentId:otherStudy.id,...agentInput(agent,{ enabled:false }) },adminId),/AGENT_RECORDS_LOCKED/);
+    });
+    await t.test('a paused empty config remains editable and only a verified unused empty code can be reused', async () => {
+      const original = await newAgent('未使用的配置'), replacementAgent = await newAgent('空入口替代配置');
+      const empty = await newFixedRun(original,'空白可释放入口');
+      await assert.rejects(() => control.saveAgentConfig({ experimentId:otherStudy.id,...agentInput(original,{ botId:'unused-edited' }) },adminId),/ACTIVE_AGENT_LOCKED/);
+      await control.closeActiveExperimentRun(otherStudy.id,adminId,empty.id);
+      await control.saveAgentConfig({ experimentId:otherStudy.id,...agentInput(original,{ botId:'unused-edited' }) },adminId);
+      await control.deleteExperimentRunLink({ experimentId:otherStudy.id,runId:empty.id,confirmationCode:empty.entryToken },adminId);
+      const audit = (await pool.query("SELECT after_data FROM admin_audit_log WHERE action='experiment.run.link.delete' AND before_data->>'id'=$1",[empty.id])).rows[0];
+      assert.equal(audit.after_data.entryCodeReserved,false);
+      // Fresh codes are preferred; exhaust those draws to exercise safe fallback.
+      for (let i=0;i<101;i++) h.forceToken(empty.entryToken);
+      const replacement = await newFixedRun(replacementAgent,'无记录旧码复用');
+      assert.equal(replacement.entryToken,empty.entryToken);
+      assert.equal((await entries.getExperimentEntry(empty.entryToken)).runId,replacement.id);
+    });
+    await t.test('empty links cannot release codes for agents still referenced by another live or paused entry', async () => {
+      const agent = await newAgent('仍使用的空配置');
+      const first = await newFixedRun(agent,'仍开放的空入口'), second = await newFixedRun(agent,'删除的空入口');
+      await deleteEmptyLink(second);
+      const metadata = (await pool.query('SELECT metadata FROM experiment_runs WHERE id=$1',[second.id])).rows[0].metadata;
+      assert.equal(metadata.entry_code_reserved,true);
+      await control.closeActiveExperimentRun(otherStudy.id,adminId,first.id);
+      h.forceToken(second.entryToken);
+      const replacement = await newFixedRun(await newAgent('其他空配置'),'已保留码拒绝复用');
+      assert.notEqual(replacement.entryToken,second.entryToken);
+      await assert.rejects(() => entries.getExperimentEntry(second.entryToken),error => error.code==='ENTRY_NOT_FOUND');
+    });
+    await t.test('an empty link for an agent with records elsewhere reserves its code', async () => {
+      const agent = (await control.getAgentControl(study.id)).agents[0];
+      const run = await control.activateExperimentRun({ experimentId:study.id,name:'有记录配置的空入口',assignmentMode:'fixed',fixedAgentId:agent.id,randomAgentIds:[],makeDefault:false },adminId);
+      await control.closeActiveExperimentRun(study.id,adminId,run.id);
+      await control.deleteExperimentRunLink({ experimentId:study.id,runId:run.id,confirmationCode:run.entryToken },adminId);
+      assert.equal((await pool.query('SELECT metadata FROM experiment_runs WHERE id=$1',[run.id])).rows[0].metadata.entry_code_reserved,true);
+      h.forceToken(run.entryToken);
+      const replacement = await newFixedRun(await newAgent('跨记录保护配置'),'有记录旧码拒绝');
+      assert.notEqual(replacement.entryToken,run.entryToken);
+    });
+    await t.test('released empty codes are rechecked if their original agent becomes used before reuse', async () => {
+      const agent = await newAgent('释放后再次使用的配置');
+      const empty = await newFixedRun(agent,'先删除的空入口');
+      await deleteEmptyLink(empty);
+      assert.equal((await pool.query('SELECT metadata FROM experiment_runs WHERE id=$1',[empty.id])).rows[0].metadata.entry_code_reserved,false);
+      const active = await newFixedRun(agent,'原配置重新使用');
+      h.forceToken(empty.entryToken);
+      const next = await newFixedRun(await newAgent('另一个新配置'),'重新使用后不复用旧码');
+      assert.notEqual(next.entryToken,empty.entryToken);
+      const browser = await harness(db,h.sources);
+      assert.equal((await browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'',studentNumber:'released-agent-now-used' } },`http://localhost/api/sessions?entry=${active.entryToken}`))).status,201);
+      await deleteEmptyLink(active);
+      h.forceToken(empty.entryToken);
+      assert.notEqual((await newFixedRun(await newAgent('历史记录保护配置'),'有记录后拒绝旧码')).entryToken,empty.entryToken);
+    });
+    await t.test('historical deletions without a reuse decision remain reserved, and already reused unsafe URLs fail closed', async () => {
+      const audit = (await pool.query("SELECT id,after_data FROM admin_audit_log WHERE action='experiment.run.link.delete' AND before_data->>'id'=$1",[groups[1].id])).rows[0];
+      const metadata = (await pool.query('SELECT metadata FROM experiment_runs WHERE id=$1',[groups[1].id])).rows[0].metadata;
+      await pool.query("UPDATE admin_audit_log SET after_data=after_data-'entryCodeReserved' WHERE id=$1",[audit.id]);
+      await pool.query("UPDATE experiment_runs SET metadata=metadata-'entry_code_reserved'-'retired_entry_token' WHERE id=$1",[groups[1].id]);
+      try {
+        h.forceToken(groups[1].entryToken);
+        const run = await newFixedRun(await newAgent('历史冲突检验配置'),'历史旧码拒绝');
+        assert.notEqual(run.entryToken,groups[1].entryToken);
+        await pool.query('UPDATE experiment_runs SET entry_token=$2 WHERE id=$1',[run.id,groups[1].entryToken]);
+        await assert.rejects(() => entries.getExperimentEntry(groups[1].entryToken),error => error.code==='ENTRY_NOT_FOUND');
+        await pool.query('UPDATE experiment_runs SET entry_token=$2 WHERE id=$1',[run.id,run.entryToken]);
+        assert.equal((await entries.getExperimentEntry(run.entryToken)).runId,run.id);
+      } finally {
+        await pool.query('UPDATE admin_audit_log SET after_data=$2::jsonb WHERE id=$1',[audit.id,JSON.stringify(audit.after_data)]);
+        await pool.query('UPDATE experiment_runs SET metadata=$2::jsonb WHERE id=$1',[groups[1].id,JSON.stringify(metadata)]);
+      }
+    });
+    await t.test('unused released codes are avoided when a fresh code is available', async () => {
+      const empty = await newFixedRun(await newAgent('优先新码的旧配置'),'已删除空入口');
+      await deleteEmptyLink(empty);
+      h.forceToken(empty.entryToken);
+      const fresh = await newFixedRun(await newAgent('优先新码的新配置'),'优先新码');
+      assert.notEqual(fresh.entryToken,empty.entryToken);
+    });
+    await t.test('snapshot-only historical associations still lock editing and deletion', async () => {
+      const agent = await newAgent('仅快照关联的配置'), run = await newFixedRun(agent,'历史快照入口');
+      const browser = await harness(db,h.sources);
+      const created = await browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'',studentNumber:'snapshot-only' } },`http://localhost/api/sessions?entry=${run.entryToken}`));
+      assert.equal(created.status,201);
+      await control.closeActiveExperimentRun(otherStudy.id,adminId,run.id);
+      // Simulate older records whose relationship exists only in the snapshot.
+      await pool.query('DELETE FROM participant_agent_assignments WHERE experiment_run_id=$1',[run.id]);
+      await pool.query('UPDATE experiment_sessions SET agent_id=NULL,experiment_run_id=NULL WHERE experiment_run_id=$1',[run.id]);
+      const summary = (await control.getAgentControl(otherStudy.id)).agents.find(a => a.id===agent.id);
+      assert.equal(summary.hasExperimentRecords,true);
+      assert.equal(summary.hasReferences,true);
+      await assert.rejects(() => control.saveAgentConfig({ experimentId:otherStudy.id,...agentInput(agent,{ botId:'changed-legacy' }) },adminId),/AGENT_RECORDS_LOCKED/);
+      await assert.rejects(() => control.deleteAgentConfig({ experimentId:otherStudy.id,agentId:agent.id,confirmationName:agent.internalName },adminId),/AGENT_HAS_REFERENCES/);
+    });
+    await t.test('simultaneous first enrollment, pause and config edits cannot change an enrolled bot', async () => {
+      for (let attempt=0;attempt<3;attempt++) {
+        const agent = await newAgent(`报名并发配置${attempt}`), run = await newFixedRun(agent,`报名并发入口${attempt}`);
+        const browser = await harness(db,h.sources);
+        const [signup,edit,paused] = await Promise.all([
+          browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'',studentNumber:`concurrent-freeze-${attempt}` } },`http://localhost/api/sessions?entry=${run.entryToken}`)),
+          lifecycleApi.POST(adminRequest({ action:'save_agent',agent:agentInput(agent,{ botId:`concurrent-edit-${attempt}` }) },otherStudy.id)),
+          lifecycleApi.POST(adminRequest({ action:'close_active_run',runId:run.id },otherStudy.id)),
+        ]);
+        assert.equal(paused.status,200);
+        assert.ok([201,409].includes(signup.status));
+        assert.ok([200,409].includes(edit.status));
+        if (signup.status===201) {
+          assert.equal(edit.status,409);
+          assert.equal((await pool.query('SELECT coze_bot_id FROM ai_agent_configs WHERE id=$1',[agent.id])).rows[0].coze_bot_id,agent.botId);
+          await assert.rejects(() => control.saveAgentConfig({ experimentId:otherStudy.id,...agentInput(agent,{ botId:'after-race-edit' }) },adminId),/AGENT_RECORDS_LOCKED/);
+        }
+      }
+    });
+    await t.test('deleting an unused agent cannot release an empty random-link code shared with a used agent', async () => {
+      const unused = await newAgent('可删除的空配置');
+      const used = (await control.getAgentControl(otherStudy.id)).agents.find(agent => agent.hasExperimentRecords);
+      const run = await control.activateExperimentRun({ experimentId:otherStudy.id,name:'清理配置时保护旧码',
+        assignmentMode:'balanced_random',fixedAgentId:null,randomAgentIds:[unused.id,used.id],makeDefault:false },adminId);
+      await control.closeActiveExperimentRun(otherStudy.id,adminId,run.id);
+      await control.deleteAgentConfig({ experimentId:otherStudy.id,agentId:unused.id,confirmationName:unused.internalName },adminId);
+      assert.equal((await pool.query('SELECT id FROM experiment_runs WHERE id=$1',[run.id])).rowCount,0);
+      const audit = (await pool.query("SELECT before_data FROM admin_audit_log WHERE action='ai.agent.delete' AND before_data->>'id'=$1",[unused.id])).rows[0].before_data;
+      assert.equal(audit.removedEmptyRuns[0].entryToken,run.entryToken);
+      assert.equal(audit.removedEmptyRuns[0].entryCodeReserved,true);
+      h.forceToken(run.entryToken);
+      assert.notEqual((await newFixedRun(await newAgent('清理后新配置'),'清理后的新入口')).entryToken,run.entryToken);
+      await assert.rejects(() => entries.getExperimentEntry(run.entryToken),error => error.code==='ENTRY_NOT_FOUND');
     });
   } finally {
     if (pool) await pool.end();

@@ -36,7 +36,7 @@ test('four-character allocation retries collisions and one-character neighbors u
   vm.runInNewContext(tokenSource,{ exports:tokens,require:name => modules[name] });
   const token = await tokens.createRunEntryToken({ query:async sql => {
     events.push(sql);
-    return { rows:sql.includes('SELECT entry_token') ? [{ entry_token:'abcd' }] : [] };
+    return { rows:sql.includes('SELECT entry_token') ? [{ entry_token:'abcd',blocked:true }] : [] };
   } });
   assert.equal(token,'qrst');
   assert.match(events[0],/pg_advisory_xact_lock/);

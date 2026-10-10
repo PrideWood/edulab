@@ -13,13 +13,13 @@ type ParticipantDirectoryRow = {
 };
 type AgentSummary = {
   id: string; internalName: string; baseUrl: string; botId: string;
-  hasToken: boolean; enabled: boolean; hasReferences: boolean; updatedAt: string;
+  hasToken: boolean; enabled: boolean; hasReferences: boolean; hasExperimentRecords: boolean; updatedAt: string;
   tokenSource: "database" | "environment" | "missing";
 };
 type RunSummary = {
   id: string; name: string; status: "draft" | "active" | "closed";
   assignmentMode: "fixed" | "balanced_random"; fixedAgentId: string | null;
-  entryToken: string | null; entryDeletedAt: string | null; isDefault: boolean;
+  entryToken: string | null; entryDeletedAt: string | null; entryCodeReserved: boolean | null; isDefault: boolean;
   randomAgentIds: string[]; openedAt: string | null; closedAt: string | null; createdAt: string;
 };
 type AgentControl = { agents: AgentSummary[]; runs: RunSummary[]; activeRun: RunSummary | null };
@@ -461,7 +461,9 @@ function AgentRunSettings({ experimentId, onRunsChanged }: { experimentId: strin
       if (!response.ok) throw new Error(data?.error?.message ?? "删除链接失败。");
       if (!mountedRef.current) return;
       setControl(data.control as AgentControl); onRunsChanged(data.control.runs);
-      setPendingRunDelete(null); setStatus(`“${run.name}”的链接已删除，入口码已释放，实验记录已保留。`);
+      const deleted = (data.control as AgentControl).runs.find(item => item.id === run.id);
+      const codeNotice = deleted?.entryCodeReserved ? "旧入口码已保留，不会分配给其他入口。" : "无记录的旧入口码允许安全复用，仍优先分配新码。";
+      setPendingRunDelete(null); setStatus(`“${run.name}”的链接已删除，实验记录已保留。${codeNotice}`);
     } catch (removeError) {
       if (!mountedRef.current) return;
       const message = removeError instanceof Error ? removeError.message : "删除链接失败。";
@@ -484,7 +486,7 @@ function AgentRunSettings({ experimentId, onRunsChanged }: { experimentId: strin
     </section>
 
     <section className="settings-card">
-      <div className="settings-card-head"><div><h2>各组实验链接</h2><p>复制内容只包含识别名称和链接。入口码为 4 个字符，支持大写输入。停止新报名后仍可恢复记录，也可继续报名；确认实验结束后可删除链接并释放入口码。</p></div></div>
+      <div className="settings-card-head"><div><h2>各组实验链接</h2><p>复制内容只包含识别名称和链接。入口码为 4 个字符，支持大写输入。停止新报名后仍可恢复记录，也可继续报名；确认实验结束后可删除链接；有记录的旧码保留，无记录且智能体不再使用的码才允许复用。</p></div></div>
       <div className="run-link-list">{liveRuns.length === 0 ? <p className="directory-empty">创建分组入口后，链接将显示在这里。</p> : liveRuns.map((run) => <div className="run-link-row" key={run.id}>
         <div><strong>{run.name}</strong><small>{run.status === "active" ? "开放中" : "已停止报名"} · {run.assignmentMode === "fixed" ? "固定智能体" : "均衡随机分配"} · {runAgentNames(run).join("、")}</small><code>/join/{run.entryToken}</code></div>
         <button type="button" className={`admin-refresh entry-copy-button${copiedRunId === run.id ? " entry-copy-success" : ""}`} aria-live="polite" onClick={() => void copyGroupEntry(run)}>{copiedRunId === run.id ? "复制成功" : "复制智能体信息与链接"}</button>
@@ -494,12 +496,12 @@ function AgentRunSettings({ experimentId, onRunsChanged }: { experimentId: strin
     </section>
     <details className="settings-card agent-config-details">
       <summary>API 配置与连通测试<span>为不同智能体生成链接请使用上方“创建分组入口”</span></summary>
-      <div className="settings-card-head"><div><h2>Coze 智能体配置</h2><p>每个智能体占一行，可直接修改连接信息。学生端显示名称在“交互规则”中统一设置；Token 加密保存且不会回显。</p></div><button className="admin-refresh" onClick={() => setAdding(true)} disabled={busy || adding}>新增智能体</button></div>
-      <div className="agent-table-wrap"><table className="agent-table"><thead><tr><th>内部名称</th><th>API 地址</th><th>Bot ID</th><th>API Token</th><th>启用</th><th>状态</th><th>操作</th></tr></thead><tbody>{control.agents.map((agent) => <AgentTableRow endpoint={endpoint} key={`${agent.id}-${agent.updatedAt}`} agent={agent} locked={activeAgentIds.has(agent.id)} busy={busy} onDelete={() => { setAgentDeleteError(""); setPendingAgentDelete(agent); }} onSave={(value) => post({ action: "save_agent", agent: value, testAfterSave: Boolean(value.token?.trim()) }, `智能体“${value.internalName}”已保存。`)} />)}{adding && <AgentTableRow endpoint={endpoint} key="new-agent" agent={null} locked={false} busy={busy} onCancel={() => setAdding(false)} onSave={(value) => post({ action: "save_agent", agent: value, testAfterSave: Boolean(value.token?.trim()) }, `智能体“${value.internalName}”已添加。`)} />}</tbody></table></div>
+      <div className="settings-card-head"><div><h2>Coze 智能体配置</h2><p>已有学生报名的配置在停止报名后仍保持锁定；无记录的配置需先停止报名再修改。更换智能体请新增配置与入口，Token 加密保存且不会回显。</p></div><button className="admin-refresh" onClick={() => setAdding(true)} disabled={busy || adding}>新增智能体</button></div>
+      <div className="agent-table-wrap"><table className="agent-table"><thead><tr><th>内部名称</th><th>API 地址</th><th>Bot ID</th><th>API Token</th><th>启用</th><th>状态</th><th>操作</th></tr></thead><tbody>{control.agents.map((agent) => <AgentTableRow endpoint={endpoint} key={`${agent.id}-${agent.updatedAt}`} agent={agent} locked={activeAgentIds.has(agent.id) || agent.hasExperimentRecords} busy={busy} onDelete={() => { setAgentDeleteError(""); setPendingAgentDelete(agent); }} onSave={(value) => post({ action: "save_agent", agent: value, testAfterSave: Boolean(value.token?.trim()) }, `智能体“${value.internalName}”已保存。`)} />)}{adding && <AgentTableRow endpoint={endpoint} key="new-agent" agent={null} locked={false} busy={busy} onCancel={() => setAdding(false)} onSave={(value) => post({ action: "save_agent", agent: value, testAfterSave: Boolean(value.token?.trim()) }, `智能体“${value.internalName}”已添加。`)} />}</tbody></table></div>
     </details>
     <div className="security-note"><strong>实验条件随会话锁定</strong><p>进入链接后锁定对应场次、智能体与任务快照。更改其他实验或开放新场次不会改变已有会话，密钥始终保留在服务端。</p></div>
     {pendingAgentDelete && <DangerConfirmation title={`删除智能体“${pendingAgentDelete.internalName}”？`} description="将永久删除该智能体的 API 地址、Bot ID 和加密 Token。仅在没有参与者记录且没有未结束场次引用时可删除。关联的空白已结束场次将一并清理，操作无法撤销。" expectedValue={pendingAgentDelete.internalName} expectedLabel="智能体名称" busy={busy} error={agentDeleteError} onCancel={() => setPendingAgentDelete(null)} onConfirm={(confirmation) => void removeAgent(pendingAgentDelete, confirmation)} />}
-    {pendingRunDelete?.entryToken && <DangerConfirmation title={`确认“${pendingRunDelete.name}”的实验已结束并删除链接？`} description="此入口的未结束会话将标记为完成。被试编号、分组、草稿和对话记录会保留，仍可在参与者列表筛选和导出。原链接将失效，四位入口码可用于新链接；新链接不会关联原被试记录。删除后不能恢复此入口。" expectedValue={pendingRunDelete.entryToken} expectedLabel="入口码" confirmLabel="删除链接" busy={busy} error={runDeleteError} onCancel={() => setPendingRunDelete(null)} onConfirm={(confirmation) => void removeRunLink(pendingRunDelete, confirmation)} />}
+    {pendingRunDelete?.entryToken && <DangerConfirmation title={`确认“${pendingRunDelete.name}”的实验已结束并删除链接？`} description="此入口的未结束会话将标记为完成。被试编号、分组、草稿和对话记录会保留，仍可在参与者列表筛选和导出。原链接将失效。有实验记录或智能体仍被其他入口使用时，旧码保留且不复用；只有无记录且已不再使用的入口码才可释放。删除后不能恢复此入口。" expectedValue={pendingRunDelete.entryToken} expectedLabel="入口码" confirmLabel="删除链接" busy={busy} error={runDeleteError} onCancel={() => setPendingRunDelete(null)} onConfirm={(confirmation) => void removeRunLink(pendingRunDelete, confirmation)} />}
   </div>;
 }
 
@@ -511,7 +513,7 @@ function AgentTableRow({ endpoint, agent, locked, busy, onSave, onDelete, onCanc
   const [enabled, setEnabled] = useState(agent?.enabled ?? true);
   const [testResult, setTestResult] = useState<{ kind: "testing" | "success" | "error"; message: string } | null>(null);
   const testingRef = useRef(false);
-  const state = locked ? "当前场次" : agent?.hasReferences ? "有关联记录" : agent?.hasToken ? "已配置" : agent ? "缺少 Token" : "待添加";
+  const state = agent?.hasExperimentRecords ? "实验配置已锁定" : locked ? "开放入口使用中" : agent?.hasReferences ? "有关联记录" : agent?.hasToken ? "已配置" : agent ? "缺少 Token" : "待添加";
 
   function updateDraft(update: () => void) {
     update();
@@ -561,7 +563,7 @@ function AgentTableRow({ endpoint, agent, locked, busy, onSave, onDelete, onCanc
     <td data-label="Bot ID"><input className="agent-table-input agent-bot-input" aria-label={`${agent?.internalName ?? "新智能体"} Bot ID`} value={botId} onChange={(event) => updateDraft(() => setBotId(event.target.value))} disabled={locked || testing || busy} placeholder="Coze Bot ID" /></td>
     <td data-label="API Token"><input className="agent-table-input agent-token-input" aria-label={`${agent?.internalName ?? "新智能体"} API Token`} type="password" value={token} onChange={(event) => updateDraft(() => setToken(event.target.value))} disabled={locked || testing || busy} autoComplete="new-password" placeholder={agent?.hasToken ? "留空使用已配置 Token" : "输入 Token"} /></td>
     <td data-label="启用" className="agent-enabled-cell"><input type="checkbox" checked={enabled} onChange={(event) => updateDraft(() => setEnabled(event.target.checked))} disabled={locked || testing || busy} aria-label={`${internalName || "新智能体"}允许用于新场次`} /></td>
-    <td data-label="状态"><div className="agent-status-stack"><span className={`agent-row-status ${locked ? "locked" : agent && !agent.hasToken ? "warning" : ""}`} title={agent?.hasReferences ? "仍有关联参与者记录或未结束场次；清理记录并结束场次后可删除" : undefined}>{state}</span>{testResult && <span className={`agent-test-result ${testResult.kind}`} role={testResult.kind === "error" ? "alert" : "status"}>{testResult.message}</span>}</div></td>
+    <td data-label="状态"><div className="agent-status-stack"><span className={`agent-row-status ${locked ? "locked" : agent && !agent.hasToken ? "warning" : ""}`} title={agent?.hasExperimentRecords ? "已有实验记录的配置不能修改；更换智能体请新增配置与入口" : locked ? "开放入口使用中，请先停止报名" : undefined}>{state}</span>{testResult && <span className={`agent-test-result ${testResult.kind}`} role={testResult.kind === "error" ? "alert" : "status"}>{testResult.message}</span>}</div></td>
     <td data-label="操作"><div className="agent-row-actions"><button type="button" className="agent-row-test" disabled={busy || testing || !canTest} title={!canTest ? "请填写 API 地址、Bot ID 和 API Token 后再测试" : "使用当前行中尚未保存的值发起真实请求"} onClick={() => void testConnection()}>{testing ? "测试中…" : "测试连通"}</button>{agent && onDelete && <button type="button" className="agent-row-delete" disabled={busy || testing || locked || agent.hasReferences} title={agent.hasReferences ? "仍有关联参与者记录或未结束场次，暂时不能删除" : undefined} onClick={onDelete}>删除</button>}{onCancel && <button type="button" className="agent-row-cancel" onClick={onCancel} disabled={busy || testing}>取消</button>}<button type="button" className="agent-row-save" disabled={busy || testing || locked || !internalName.trim() || !botId.trim() || (!agent?.hasToken && !token.trim())} onClick={() => onSave({ ...(agent ? { id: agent.id } : {}), internalName, baseUrl, botId, ...(token.trim() ? { token } : {}), enabled })}>{busy ? "保存中…" : token.trim() ? "保存并测试" : "保存"}</button></div></td>
   </tr>;
 }

@@ -22,13 +22,13 @@ test("agent deletion protects live records but clears empty closed runs", { skip
         id uuid PRIMARY KEY, experiment_id text, name text, status text, assignment_mode text,
         fixed_agent_id uuid REFERENCES ai_agent_configs(id), random_agent_ids uuid[] DEFAULT '{}',
         opened_at timestamptz, closed_at timestamptz, created_at timestamptz DEFAULT now(),
-        entry_token text DEFAULT 'abcd-efgh', entry_deleted_at timestamptz, is_default boolean DEFAULT true, config_snapshot jsonb
+        entry_token text DEFAULT 'abcd-efgh', entry_deleted_at timestamptz, is_default boolean DEFAULT true, config_snapshot jsonb, metadata jsonb DEFAULT '{}'
       ) ON COMMIT DROP;
       CREATE TEMP TABLE participant_agent_assignments (
         id uuid, experiment_run_id uuid REFERENCES experiment_runs(id), agent_id uuid REFERENCES ai_agent_configs(id)
       ) ON COMMIT DROP;
       CREATE TEMP TABLE experiment_sessions (
-        id uuid, experiment_id text, experiment_run_id uuid REFERENCES experiment_runs(id), agent_id uuid REFERENCES ai_agent_configs(id)
+        id uuid, experiment_id text, experiment_run_id uuid REFERENCES experiment_runs(id), agent_id uuid REFERENCES ai_agent_configs(id), config_snapshot jsonb
       ) ON COMMIT DROP;
       CREATE TEMP TABLE admin_audit_log (id uuid, admin_user_id uuid, action text, experiment_id text, before_data jsonb) ON COMMIT DROP;
     `);
@@ -46,9 +46,11 @@ test("agent deletion protects live records but clears empty closed runs", { skip
     await client.query("INSERT INTO experiment_runs (id,experiment_id,name,status,assignment_mode,random_agent_ids) VALUES ($1,'test','run','active','balanced_random',$2)", [runId, [agentId, otherId]]);
     const remove = () => exports.deleteAgentConfig({ experimentId: "test", agentId, confirmationName: "agent" }, randomUUID());
     assert.equal((await exports.getAgentControl("test")).agents[0].hasReferences, true);
+    assert.equal((await exports.getAgentControl("test")).agents[0].hasExperimentRecords, false);
     await assert.rejects(remove, /AGENT_HAS_REFERENCES/);
     await client.query("UPDATE experiment_runs SET status='closed'");
-    await client.query("INSERT INTO experiment_sessions VALUES ($1,'test',$2,$3)", [randomUUID(), runId, otherId]);
+    await client.query("INSERT INTO experiment_sessions (id,experiment_id,experiment_run_id,agent_id) VALUES ($1,'test',$2,$3)", [randomUUID(), runId, otherId]);
+    assert.equal((await exports.getAgentControl("test")).agents[0].hasExperimentRecords, true);
     await assert.rejects(remove, /AGENT_HAS_REFERENCES/);
     await client.query("DELETE FROM experiment_sessions");
     await client.query("INSERT INTO participant_agent_assignments VALUES ($1,$2,$3)", [randomUUID(), runId, agentId]);
