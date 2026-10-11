@@ -1028,9 +1028,9 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
   }
 
   const participantCodeDetails = session && participantProfile && <div className="participant-code-details">
-    <p>你的实验编号</p><strong>{session.participantCode}</strong>
-    <p className="profile-hint">{controls?.databaseMessagesEnabled ? "请记住或保存该编号。意外关闭后，可用编号及姓名或学号继续实验。" : "请保存编号；此实验未启用云端对话存储，请及时下载记录。"}</p>
-    <button type="button" className="participant-code-copy" onClick={copyParticipantCode}>复制编号</button><span role="status">{copyStatus}</span>
+    <p>你的被试编号</p><strong>{session.participantCode}</strong>
+    <p className="participant-code-hint">{controls?.databaseMessagesEnabled ? "继续实验时，请输入此编号和姓名或学号。" : "本实验未启用云端保存，请及时下载记录。"}</p>
+    <div className="participant-code-actions"><button type="button" className="participant-code-copy" onClick={copyParticipantCode}>复制编号</button><span role="status">{copyStatus}</span></div>
   </div>;
 
   return (
@@ -1079,7 +1079,14 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
           </div>
         </section>
       </section>
-      {codeNoticeOpen && <div className="profile-modal-backdrop"><section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="code-notice-title"><div className="profile-modal-head"><h2 id="code-notice-title">请保存你的被试编号</h2><button type="button" onClick={() => setCodeNoticeOpen(false)} aria-label="关闭编号提醒">×</button></div>{participantCodeDetails}<p className="profile-hint">以后参加本项目时，请用此编号和姓名或学号继续。编号也可在左下角参与者信息中查看。</p><button type="button" className="profile-save" onClick={() => setCodeNoticeOpen(false)}>已记下，开始交互</button></section></div>}
+      {codeNoticeOpen && <div className="profile-modal-backdrop">
+        <section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="code-notice-title">
+          <div className="profile-modal-head"><h2 id="code-notice-title">请保存被试编号</h2><button type="button" onClick={() => setCodeNoticeOpen(false)} aria-label="关闭编号提醒">×</button></div>
+          {participantCodeDetails}
+          <p className="participant-code-location">编号也可在左下角参与者信息中查看。</p>
+          <div className="profile-modal-actions"><button type="button" className="profile-save" onClick={() => setCodeNoticeOpen(false)}>已记下，开始交互</button></div>
+        </section>
+      </div>}
       {newInteractionOpen && <div className="profile-modal-backdrop"><section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="new-interaction-title"><div className="profile-modal-head"><h2 id="new-interaction-title">开始新的学习任务？</h2><button type="button" onClick={()=>setNewInteractionOpen(false)} aria-label="取消新交互">×</button></div><p className="profile-hint">系统会保存并结束当前这次交互，创建独立会话。你的编号、原分组和历史记录保持不变，未发送的草稿保留在原会话中。</p><button type="button" className="profile-save" onClick={()=>void startNewInteraction(true)}>确认开始新一次交互</button></section></div>}
       {profileOpen && <div className="profile-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && participantProfile) setProfileOpen(false); }}>
         <section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title">
