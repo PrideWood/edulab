@@ -24,7 +24,7 @@ async function harness(db, sharedSources) {
     'app/api/sessions/complete/route.ts', 'app/api/sessions/checkpoint/route.ts', 'app/api/messages/route.ts', 'app/api/conversations/route.ts'];
   const sources = sharedSources ?? new Map(await Promise.all(files.map(async file => [file,
     ts.transpileModule(await readFile(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText])));
-  const jar = new Map(), cache = new Map(), chats = new Map(), creates = [];
+  const jar = new Map(), cache = new Map(), chats = new Map(), creates = [], cozeConfigs = [];
   const forcedDraws = [];
   let providerPending = false;
   const difyCalls = [], difyHistory = new Map(), afterTasks = [];
@@ -51,6 +51,7 @@ async function harness(db, sharedSources) {
     }}),{headers:{'content-type':'text/event-stream'}});
   };
   class CozeAPI {
+    constructor(config) { cozeConfigs.push(config); }
     chat = {
       create: async input => {
         creates.push(input);
@@ -77,7 +78,7 @@ async function harness(db, sharedSources) {
     if (cache.has(file)) return cache.get(file);
     const exports = {};
     cache.set(file, exports);
-    vm.runInNewContext(sources.get(file), { exports, Buffer, URL, Request, Response, ReadableStream, TextEncoder, TextDecoder, Date, Error, console, AbortSignal, setTimeout, clearTimeout, fetch:difyFetch,
+    vm.runInNewContext(sources.get(file), { exports, Buffer, URL, Request, Response, ReadableStream, TextEncoder, TextDecoder, Date, Error, console, AbortSignal, AbortController, setTimeout, clearTimeout, fetch:difyFetch,
       process: { env: { EXPERIMENT_ID:'recovery-test', COZE_API_TOKEN:'synthetic-token', COZE_BOT_ID:'synthetic-bot',
         SETTINGS_ENCRYPTION_KEY:'synthetic-test-encryption-key-at-least-32', ADMIN_SESSION_SECRET:'synthetic-admin-secret-at-least-32-characters', NODE_ENV:'test' } },
       require: name => {
@@ -90,7 +91,7 @@ async function harness(db, sharedSources) {
     return exports;
   }
   const request = (body, url = 'http://localhost/api/sessions') => ({ url, headers: new Headers({ origin:'http://localhost' }), json:async () => JSON.parse(JSON.stringify(body)) });
-  return { load, jar, request, creates, sources, difyCalls, afterTasks, setDifyMode:value => { difyMode=value; }, setPending:value => { providerPending = value; },
+  return { load, jar, request, creates, cozeConfigs, sources, difyCalls, afterTasks, setDifyMode:value => { difyMode=value; }, setPending:value => { providerPending = value; },
     forceToken:value => forcedDraws.push(...[...value].map(char => 'abcdefghjkmnpqrstuvwxyz23456789'.indexOf(char))) };
 }
 
@@ -111,7 +112,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
     assert.equal((await pool.query('SELECT current_schema() AS name')).rows[0].name, schema);
     const migrations = (await readdir('db/migrations')).filter(file => file.endsWith('.sql')).sort();
     for (const file of migrations) await pool.query(await readFile(`db/migrations/${file}`, 'utf8'));
-    let failMessageWrite = false, failLinkDeleteAudit = false;
+    let failMessageWrite = false, failLinkDeleteAudit = false, failKeyRotateAudit = false, failKeyWrite = false;
     const query = async (sql, values) => {
       if (failMessageWrite && /INSERT INTO messages/.test(sql)) throw new Error('synthetic database write failure');
       return pool.query(sql, values);
@@ -121,6 +122,8 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       const facade = { query:async (sql, values) => {
         if (failMessageWrite && /INSERT INTO messages/.test(sql)) throw new Error('synthetic database write failure');
         if (failLinkDeleteAudit && /INSERT INTO admin_audit_log/.test(sql) && sql.includes('experiment.run.link.delete')) throw new Error('synthetic audit write failure');
+        if (failKeyRotateAudit && /INSERT INTO admin_audit_log/.test(sql) && sql.includes('ai.agent.key.rotate')) throw new Error('synthetic key audit failure');
+        if (failKeyWrite && /UPDATE ai_agent_configs SET coze_token_ciphertext/.test(sql)) throw new Error('synthetic key write failure');
         return client.query(sql, values);
       } };
       try { await client.query('BEGIN'); const value = await work(facade); await client.query('COMMIT'); return value; }
@@ -657,7 +660,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       const counts = (await pool.query('SELECT count(*)::int AS total,count(DISTINCT external_code)::int AS distinct_codes FROM participants WHERE experiment_id=$1',[study.id])).rows[0];
       assert.deepEqual(counts,{ total:16,distinct_codes:16 });
     });
-    const agentInput = (agent,overrides={}) => ({ id:agent.id,internalName:agent.internalName,
+    const agentInput = (agent,overrides={}) => ({ id:agent.id,internalName:agent.internalName,provider:agent.provider,
       baseUrl:agent.baseUrl,botId:agent.botId,enabled:agent.enabled,...overrides });
     const newAgent = (label) => control.saveAgentConfig({ experimentId:otherStudy.id,internalName:label,
       baseUrl:'https://api.coze.com',botId:crypto.randomUUID(),enabled:true },adminId);
@@ -673,7 +676,8 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       for (const agent of (await control.getAgentControl(study.id)).agents) {
         assert.equal(agent.hasExperimentRecords,true);
         for (const overrides of [{ botId:'changed-bot' },{ internalName:'changed-name' },
-          { baseUrl:'https://api.coze.cn' },{ token:'changed-token' },{ enabled:false }]) {
+          { baseUrl:'https://api.coze.cn' },{ provider:'dify',token:'changed-token' },{ enabled:false },
+          { botId:'changed-with-key',token:'changed-token' }]) {
           const result = await lifecycleApi.POST(adminRequest({ action:'save_agent',agent:agentInput(agent,overrides) }));
           assert.equal(result.status,409);
           assert.equal(result.body.error.code,'AGENT_RECORDS_LOCKED');
@@ -975,6 +979,128 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       await control.closeActiveExperimentRun(experimentId,adminId,run.id);
       await assert.rejects(()=>control.saveAgentConfig({id:agent.id,experimentId,provider:'coze',internalName:'changed',baseUrl:'https://api.coze.cn',botId:'bot',token:'new',enabled:true},adminId),/AGENT_RECORDS_LOCKED/);
     });
+    for (const provider of ['coze','dify']) {
+      const experimentId=`key-renewal-${provider}`;
+      const firstKey=`synthetic-${provider}-initial-key`, newKey=`synthetic-${provider}-renewed-key`;
+      let agent, run, browser, active, firstReply;
+      const save = (overrides={}, testAfterSave=false, scope=experimentId) => lifecycleApi.POST(adminRequest({
+        action:'save_agent',agent:agentInput(agent,overrides),testAfterSave,
+      },scope));
+      const row = async () => (await pool.query('SELECT * FROM ai_agent_configs WHERE id=$1',[agent.id])).rows[0];
+      const decrypt = stored => h.load('lib/secret-crypto.ts').decryptSecret({
+        ciphertext:stored.coze_token_ciphertext,iv:stored.coze_token_iv,tag:stored.coze_token_tag,
+      });
+      const audits = async () => (await pool.query("SELECT * FROM admin_audit_log WHERE experiment_id=$1 AND action='ai.agent.key.rotate' ORDER BY created_at",[experimentId])).rows;
+      const send = async content => {
+        const response=await browser.load('app/api/messages/route.ts').POST(browser.request({clientRequestId:crypto.randomUUID(),content},`http://localhost/api/messages?entry=${run.entryToken}`));
+        if (provider==='coze') { assert.equal(response.status,200); return response.body; }
+        assert.equal(response.status,200);
+        const events=(await response.text()).split('\n\n').filter(Boolean).map(frame=>JSON.parse(frame.slice(6)));
+        assert.equal(events.some(event=>event.event==='error'),false);
+        return events.find(event=>event.event==='completed').payload;
+      };
+      await t.test(`${provider}: open unused agent permits only encrypted key renewal`, async () => {
+        asAdmin();
+        await pool.query('INSERT INTO experiments(id,name) VALUES ($1,$2)',[experimentId,experimentId]);
+        const settings=await settingsLib.getExperimentSettings('recovery-test',false);
+        await settingsLib.saveExperimentSettings({...settings,experiment:{...settings.experiment,id:experimentId},storage:{databaseMessagesEnabled:true},
+          limits:{maxUserMessages:null,maxMessageChars:2000,sessionDurationMinutes:null}},adminId);
+        agent=await control.saveAgentConfig({experimentId,provider,internalName:`renewal ${provider}`,
+          baseUrl:provider==='coze'?'https://api.coze.com':'https://api.dify.ai/v1',
+          botId:provider==='coze'?'renewal-fixed-bot':'',token:firstKey,enabled:true},adminId);
+        run=await control.activateExperimentRun({experimentId,name:'renewal group',assignmentMode:'fixed',fixedAgentId:agent.id,randomAgentIds:[],makeDefault:false},adminId);
+        assert.equal((await save({internalName:'changed',token:newKey})).body.error.code,'ACTIVE_AGENT_LOCKED');
+        const renewed=await save({token:`  ${newKey}  `},true);
+        assert.equal(renewed.status,200); assert.equal(renewed.body.test.ok,true);
+        assert.equal(JSON.stringify(renewed.body).includes(newKey),false);
+        const stored=await row();
+        assert.equal(decrypt(stored),newKey); assert.notEqual(stored.coze_token_ciphertext,newKey);
+        assert.equal(stored.internal_name,agent.internalName); assert.equal(stored.coze_bot_id,provider==='coze'?agent.botId:null);
+        assert.equal((await audits()).length,1);
+      });
+      await t.test(`${provider}: enrolled session uses the renewed key with the original agent and context`, async () => {
+        browser=await harness(db,h.sources);
+        const enrolled=await browser.load('app/api/sessions/route.ts').POST(browser.request({profile:{fullName:'Key renewal student',studentNumber:`renewal-${provider}-001`}},`http://localhost/api/sessions?entry=${run.entryToken}`));
+        assert.equal(enrolled.status,201);
+        active=await browser.load('lib/session.ts').getAuthenticatedSession(await entries.getExperimentEntry(run.entryToken));
+        firstReply=await send('记住关键词星星');
+        const beforeSession=(await pool.query('SELECT * FROM experiment_sessions WHERE id=$1',[active.id])).rows;
+        const beforeAssignments=(await pool.query('SELECT * FROM participant_agent_assignments WHERE participant_id=$1',[active.participantId])).rows;
+        const beforeRun=(await pool.query('SELECT * FROM experiment_runs WHERE id=$1',[run.id])).rows;
+        const result=await save({token:`${newKey}-after-enrollment`},true);
+        assert.equal(result.status,200); assert.equal(result.body.test.ok,true);
+        assert.deepEqual((await pool.query('SELECT * FROM experiment_sessions WHERE id=$1',[active.id])).rows,beforeSession);
+        assert.deepEqual((await pool.query('SELECT * FROM participant_agent_assignments WHERE participant_id=$1',[active.participantId])).rows,beforeAssignments);
+        assert.deepEqual((await pool.query('SELECT * FROM experiment_runs WHERE id=$1',[run.id])).rows,beforeRun);
+        browser.jar.clear();
+        const restored=await browser.load('app/api/sessions/resume/route.ts').POST(browser.request({participantCode:'P001',identity:`renewal-${provider}-001`},`http://localhost/api/sessions/resume?entry=${run.entryToken}`));
+        assert.equal(restored.status,200); assert.equal(restored.body.resumed,true);
+        const resumed=(await browser.load('app/api/sessions/route.ts').GET(browser.request({},`http://localhost/api/sessions?entry=${run.entryToken}`))).body;
+        assert.equal(resumed.messages.length,2); assert.equal(resumed.session.agentId,agent.id);
+        const reply=await send('上一轮关键词是什么？');
+        assert.equal(reply.messages.length,4); assert.equal(reply.session.participantCode,'P001');
+        assert.equal(reply.session.agentId,agent.id);
+        if (provider==='coze') {
+          assert.equal(browser.cozeConfigs.at(-1).token,`${newKey}-after-enrollment`);
+          assert.equal(browser.creates.at(-1).bot_id,agent.botId);
+          assert.equal(browser.creates.at(-1).conversation_id,firstReply.session.cozeConversationId);
+        } else {
+          assert.equal(browser.difyCalls.at(-1).authorization,`Bearer ${newKey}-after-enrollment`);
+          assert.equal(browser.difyCalls.at(-1).conversation_id,firstReply.session.difyConversationId);
+          assert.equal(browser.difyCalls.at(-1).user,browser.difyCalls.at(-2).user);
+        }
+        const stored=await row();
+        const serialized=JSON.stringify([...await audits(),...(await pool.query('SELECT * FROM messages WHERE session_id=$1',[active.id])).rows]);
+        assert.equal(serialized.includes(newKey),false);
+        assert.equal(serialized.includes(stored.coze_token_ciphertext),false);
+      });
+      await t.test(`${provider}: renewal remains admin scoped, rejects mixed edits and preserves blank keys`, async () => {
+        const before=await row(), beforeAudits=await audits();
+        h.jar.delete('edulab_admin');
+        assert.equal((await save({token:'unauthorized-key'})).status,401);
+        asAdmin();
+        assert.equal((await save({token:'wrong-experiment-key'},false,otherStudy.id)).status,404);
+        const crossOrigin=adminRequest({action:'save_agent',agent:agentInput(agent,{token:'cross-origin-key'})},experimentId);
+        crossOrigin.headers.set('origin','https://other.example');
+        assert.equal((await lifecycleApi.POST(crossOrigin)).status,403);
+        for (const overrides of [{internalName:'different'}, {baseUrl:'https://different.example'},
+          {botId:'different'}, {enabled:false}, {provider:provider==='coze'?'dify':'coze',botId:'different'}]) {
+          const rejected=await save({...overrides,token:'mixed-edit-key'});
+          assert.equal(rejected.status,409); assert.equal(rejected.body.error.code,'AGENT_RECORDS_LOCKED');
+        }
+        assert.equal((await save({token:'   '})).status,200);
+        assert.deepEqual(await row(),before); assert.deepEqual(await audits(),beforeAudits);
+      });
+      await t.test(`${provider}: failed key or audit writes roll back without reporting a successful save`, async () => {
+        const before=await row(), beforeAudits=await audits();
+        for (const failure of ['key','audit']) {
+          failKeyWrite=failure==='key'; failKeyRotateAudit=failure==='audit';
+          try { assert.equal((await save({token:`failed-${failure}-key`})).status,500); }
+          finally { failKeyWrite=false; failKeyRotateAudit=false; }
+          assert.deepEqual(await row(),before); assert.deepEqual(await audits(),beforeAudits);
+        }
+      });
+      if (provider==='dify') await t.test('Dify: saved renewal with a failed connection test reports both outcomes and redacts the key', async () => {
+        h.setDifyMode('error');
+        let result;
+        try { result=await save({token:`${newKey}-connection-failed`},true); }
+        finally { h.setDifyMode('normal'); }
+        assert.equal(result.status,200); assert.equal(result.body.test.ok,false);
+        assert.match(result.body.test.message,/已保存.*连接失败/);
+        assert.equal(JSON.stringify(result.body).includes(`${newKey}-connection-failed`),false);
+        assert.equal(decrypt(await row()),`${newKey}-connection-failed`);
+      });
+      await t.test(`${provider}: stopped and deleted entries allow key renewal while retaining configuration locks`, async () => {
+        await control.closeActiveExperimentRun(experimentId,adminId,run.id);
+        assert.equal((await save({token:`${newKey}-paused`})).status,200);
+        await control.deleteExperimentRunLink({experimentId,runId:run.id,confirmationCode:run.entryToken},adminId);
+        assert.equal((await save({token:`${newKey}-deleted`})).status,200);
+        assert.equal((await save({token:'deleted-mixed-key',enabled:false})).body.error.code,'AGENT_RECORDS_LOCKED');
+        assert.equal(decrypt(await row()),`${newKey}-deleted`);
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM participants WHERE experiment_id=$1',[experimentId])).rows[0].n,1);
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM messages WHERE session_id=$1',[active.id])).rows[0].n,4);
+      });
+    }
   } finally {
     if (pool) await pool.end();
     await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);

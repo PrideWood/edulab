@@ -275,6 +275,8 @@ export async function saveAgentConfig(input: {
       [input.id, input.experimentId],
     ) : null;
     if (input.id && !current?.rows[0]) throw new Error("AGENT_NOT_FOUND");
+    const previous = current?.rows[0];
+    const provider = input.provider ?? "coze";
     if (input.id) {
       // One statement/snapshot prevents a signup + enrollment pause between
       // separate record and active-entry checks from opening an editing window.
@@ -286,12 +288,35 @@ export async function saveAgentConfig(input: {
          ) AS active_use`,
         [input.experimentId, input.id],
       );
-      if (usage.rows[0]?.has_records) throw new Error("AGENT_RECORDS_LOCKED");
-      if (usage.rows[0]?.active_use) throw new Error("ACTIVE_AGENT_LOCKED");
+      const locked = usage.rows[0]?.has_records || usage.rows[0]?.active_use;
+      if (locked && previous) {
+        // Renew credentials without updating any field that defines the agent.
+        // Check the persisted row under the same lock, including stale admin drafts.
+        const configChanged = input.internalName !== previous.internal_name
+          || provider !== (previous.provider ?? "coze")
+          || input.baseUrl !== previous.coze_api_base_url
+          || input.botId !== (previous.coze_bot_id ?? "")
+          || input.enabled !== previous.enabled;
+        if (configChanged) throw new Error(usage.rows[0]?.has_records ? "AGENT_RECORDS_LOCKED" : "ACTIVE_AGENT_LOCKED");
+        if (!input.token?.trim()) return mapAgent(previous);
+        const encrypted = encryptSecret(input.token.trim());
+        const renewed = await client.query<AgentRow>(
+          `UPDATE ai_agent_configs SET coze_token_ciphertext=$3, coze_token_iv=$4,
+             coze_token_tag=$5, updated_by=$6, updated_at=now()
+           WHERE id=$1 AND experiment_id=$2
+           RETURNING id, experiment_id, internal_name, provider, coze_api_base_url, coze_bot_id,
+             coze_token_ciphertext, coze_token_iv, coze_token_tag, enabled, updated_at`,
+          [id, input.experimentId, encrypted.ciphertext, encrypted.iv, encrypted.tag, adminUserId],
+        );
+        await client.query(
+          `INSERT INTO admin_audit_log (id, admin_user_id, action, experiment_id, before_data, after_data)
+           VALUES ($1,$2,'ai.agent.key.rotate',$3,$4::jsonb,$5::jsonb)`,
+          [randomUUID(), adminUserId, input.experimentId, JSON.stringify(mapAgent(previous)), JSON.stringify(mapAgent(renewed.rows[0]))],
+        );
+        return mapAgent(renewed.rows[0]);
+      }
     }
     const encrypted = input.token?.trim() ? encryptSecret(input.token.trim()) : null;
-    const previous = current?.rows[0];
-    const provider = input.provider ?? "coze";
     const sameProvider = !previous || (previous.provider ?? "coze") === provider;
     if (provider === "coze" && !input.botId.trim()) throw new Error("COZE_BOT_NOT_CONFIGURED");
     if (!encrypted && (!sameProvider || (!previous?.coze_token_ciphertext && provider === "dify"))) throw new Error("DIFY_KEY_NOT_CONFIGURED");
