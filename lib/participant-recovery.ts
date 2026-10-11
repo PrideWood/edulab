@@ -40,6 +40,7 @@ export async function recoverParticipant(code: string, identity: string, entry?:
     const sessions = await client.query<{
       id: string; public_id: string; status: "active" | "completed"; coze_user_id: string;
       coze_conversation_id: string | null; active_request_id: string | null;
+      dify_conversation_id: string | null;
       started_at: string; last_activity_at: string; config_version: number | null;
       config_snapshot: ExperimentSessionSnapshot | null; session_secret_hash: string;
     }>(`SELECT s.* FROM experiment_sessions s WHERE participant_id=$1 AND experiment_id=$2 AND ($3::uuid IS NULL OR experiment_run_id=$3)
@@ -49,7 +50,16 @@ export async function recoverParticipant(code: string, identity: string, entry?:
     if (!row) throw invalid();
     if (!row.config_snapshot) throw new ApiError(409, "RECOVERY_CONFIG_MISSING", "此历史实验缺少配置快照，请联系教师处理，系统不会重新分组。");
     if (!row.config_snapshot.storage?.databaseMessagesEnabled) throw new ApiError(409, "RECOVERY_STORAGE_DISABLED", "此实验未启用数据库对话存储，无法完整恢复，请联系教师。");
-    if (!row.coze_conversation_id) {
+    if (row.config_snapshot.ai.provider === "dify" && !row.dify_conversation_id) {
+      const context = await client.query<{ conversation_id: string | null; has_history: boolean }>(
+        `SELECT (SELECT metadata->>'dify_conversation_id' FROM chat_requests WHERE session_id=$1
+          AND metadata->>'dify_conversation_id' IS NOT NULL ORDER BY turn_index DESC LIMIT 1) AS conversation_id,
+          (EXISTS (SELECT 1 FROM messages WHERE session_id=$1 AND role='assistant')
+            OR EXISTS (SELECT 1 FROM chat_requests WHERE session_id=$1 AND status='completed')) AS has_history`, [row.id]);
+      row.dify_conversation_id = context.rows[0].conversation_id;
+      if (!row.dify_conversation_id && context.rows[0].has_history) throw new ApiError(409, "RECOVERY_CONTEXT_MISSING", "此历史记录缺少 Dify 上下文标识，请联系教师处理。");
+      if (row.dify_conversation_id) await client.query("UPDATE experiment_sessions SET dify_conversation_id=$2 WHERE id=$1", [row.id, row.dify_conversation_id]);
+    } else if (row.config_snapshot.ai.provider !== "dify" && !row.coze_conversation_id) {
       const context = await client.query<{ conversation_id: string | null; has_history: boolean }>(
         `SELECT (SELECT coze_conversation_id FROM chat_requests WHERE session_id=$1
             AND coze_conversation_id IS NOT NULL ORDER BY turn_index DESC LIMIT 1) AS conversation_id,
@@ -73,6 +83,7 @@ export async function recoverParticipant(code: string, identity: string, entry?:
       id: row.id, publicId: row.public_id, participantId, participantCode,
       experimentId, status: row.status, cozeUserId: row.coze_user_id,
       cozeConversationId: row.coze_conversation_id, activeRequestId: row.active_request_id,
+      difyConversationId: row.dify_conversation_id ?? null,
       startedAt: row.started_at, lastActivityAt: row.last_activity_at,
       configVersion: row.config_version, configSnapshot: row.config_snapshot, sessionSecretHash: secretHash,
     };

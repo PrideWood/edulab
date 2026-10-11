@@ -16,7 +16,7 @@ async function harness(db, sharedSources) {
     'lib/session.ts', 'lib/session-usage.ts', 'lib/session-write.ts', 'lib/http.ts', 'lib/admin-auth.ts',
     'lib/participant-profile.ts', 'lib/participant-code-allocation.ts', 'lib/agent-control.ts',
     'lib/experiment-settings.ts', 'lib/experiment-limits.ts', 'lib/messages.ts', 'lib/coze.ts',
-    'lib/transcript.ts', 'lib/session-payload.ts', 'lib/runtime-session.ts', 'lib/session-draft.ts',
+    'lib/dify.ts', 'lib/dify-chat.ts', 'lib/sse.ts', 'lib/transcript.ts', 'lib/session-payload.ts', 'lib/runtime-session.ts', 'lib/session-draft.ts',
     'lib/participant-recovery.ts', 'lib/experiment-entry.ts', 'lib/entry-links.ts', 'lib/entry-token.ts', 'lib/experiments.ts',
     'lib/admin-export.ts', 'lib/transcript-export.ts', 'lib/admin-records.ts', 'app/api/admin/agent-control/route.ts', 'app/api/admin/experiments/route.ts', 'app/api/admin/participants/route.ts',
     'app/api/participant-profile/route.ts', 'app/api/sessions/reset/route.ts', 'lib/legacy-runtime.ts', 'app/api/sessions/route.ts',
@@ -27,6 +27,29 @@ async function harness(db, sharedSources) {
   const jar = new Map(), cache = new Map(), chats = new Map(), creates = [];
   const forcedDraws = [];
   let providerPending = false;
+  const difyCalls = [], difyHistory = new Map(), afterTasks = [];
+  let difyMode = 'normal';
+  const difyFetch = async (url, options) => {
+    const parsed = new URL(url);
+    if (parsed.pathname.endsWith('/messages')) {
+      const data = [...difyHistory.values()].filter(message => message.conversation_id === parsed.searchParams.get('conversation_id') && message.user === parsed.searchParams.get('user'));
+      return Response.json({data,has_more:false});
+    }
+    const body = JSON.parse(options.body);
+    difyCalls.push({...body,authorization:options.headers.Authorization});
+    if (difyMode === 'no_ids') return new Response('event: ping\n\n',{headers:{'content-type':'text/event-stream'}});
+    if (difyMode === 'error') return Response.json({code:'unauthorized',message:options.headers.Authorization},{status:401});
+    const conversation_id = body.conversation_id || crypto.randomUUID(), message_id = crypto.randomUUID(), task_id = crypto.randomUUID();
+    difyHistory.set(message_id,{id:message_id,conversation_id,user:body.user,query:body.query,
+      answer:`Dify 回复：${body.query}`,created_at:Math.floor(Date.now()/1000),status:'normal',error:null});
+    const events = [{event:'message',conversation_id,message_id,task_id,answer:'Dify '},
+      {event:'message',conversation_id,message_id,task_id,answer:`回复：${body.query}`}];
+    if (difyMode !== 'interrupted') events.push({event:'message_end',conversation_id,message_id,task_id});
+    return new Response(new ReadableStream({start(controller) {
+      for (const event of events) controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+      controller.close();
+    }}),{headers:{'content-type':'text/event-stream'}});
+  };
   class CozeAPI {
     chat = {
       create: async input => {
@@ -47,26 +70,27 @@ async function harness(db, sharedSources) {
     '@/lib/agent-test-error': { formatAgentTestFailure },
     '@/lib/participant-code': { isTestParticipantName: value => ['test','测试','ceshi'].includes(value.trim().toLowerCase()) },
     'next/headers': { cookies: async () => ({ get: key => jar.has(key) ? { value: jar.get(key) } : undefined }) },
-    'next/server': { NextResponse: { json: (body, options = {}) => ({ body:JSON.parse(JSON.stringify(body)), status: options.status ?? 200, cookies: { set: (key, value, opts) => opts.maxAge === 0 ? jar.delete(key) : jar.set(key, value) } }) } },
+    'next/server': { after: callback => afterTasks.push(callback()), NextResponse: { json: (body, options = {}) => ({ body:JSON.parse(JSON.stringify(body)), status: options.status ?? 200, cookies: { set: (key, value, opts) => opts.maxAge === 0 ? jar.delete(key) : jar.set(key, value) } }) } },
     '@coze/api': { CozeAPI, RoleType: { User:'user', Assistant:'assistant' }, ChatStatus: { COMPLETED:'completed', FAILED:'failed', CANCELED:'canceled', REQUIRES_ACTION:'requires_action' } },
   };
   function load(file) {
     if (cache.has(file)) return cache.get(file);
     const exports = {};
     cache.set(file, exports);
-    vm.runInNewContext(sources.get(file), { exports, Buffer, URL, Request, Date, Error, console, AbortSignal, setTimeout, clearTimeout,
+    vm.runInNewContext(sources.get(file), { exports, Buffer, URL, Request, Response, ReadableStream, TextEncoder, TextDecoder, Date, Error, console, AbortSignal, setTimeout, clearTimeout, fetch:difyFetch,
       process: { env: { EXPERIMENT_ID:'recovery-test', COZE_API_TOKEN:'synthetic-token', COZE_BOT_ID:'synthetic-bot',
         SETTINGS_ENCRYPTION_KEY:'synthetic-test-encryption-key-at-least-32', ADMIN_SESSION_SECRET:'synthetic-admin-secret-at-least-32-characters', NODE_ENV:'test' } },
       require: name => {
         if (name in mocks) return mocks[name];
         if (name.startsWith('@/')) return load(`${name.slice(2)}.ts`);
+        if (name === './dify-chat') return load('lib/dify-chat.ts');
         throw new Error(`Unexpected module ${name}`);
       },
     });
     return exports;
   }
   const request = (body, url = 'http://localhost/api/sessions') => ({ url, headers: new Headers({ origin:'http://localhost' }), json:async () => JSON.parse(JSON.stringify(body)) });
-  return { load, jar, request, creates, sources, setPending:value => { providerPending = value; },
+  return { load, jar, request, creates, sources, difyCalls, afterTasks, setDifyMode:value => { difyMode=value; }, setPending:value => { providerPending = value; },
     forceToken:value => forcedDraws.push(...[...value].map(char => 'abcdefghjkmnpqrstuvwxyz23456789'.indexOf(char))) };
 }
 
@@ -806,6 +830,150 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       h.forceToken(run.entryToken);
       assert.notEqual((await newFixedRun(await newAgent('清理后新配置'),'清理后的新入口')).entryToken,run.entryToken);
       await assert.rejects(() => entries.getExperimentEntry(run.entryToken),error => error.code==='ENTRY_NOT_FOUND');
+    });
+
+    await t.test('Dify encrypted app keys, streaming, multi-turn persistence, duplicates and recovery preserve Coze records', async () => {
+      asAdmin();
+      const experimentId='dify-integration-study';
+      await pool.query('INSERT INTO experiments(id,name) VALUES ($1,$2)',[experimentId,'Dify integration']);
+      const settings=await settingsLib.getExperimentSettings(study.id,false);
+      await settingsLib.saveExperimentSettings({...settings,experiment:{...settings.experiment,id:experimentId},
+        limits:{maxUserMessages:null,maxMessageChars:2000,sessionDurationMinutes:null},storage:{databaseMessagesEnabled:true},
+        ai:{baseUrl:settings.ai.baseUrl,botId:settings.ai.botId}},adminId);
+      const agentApi=h.load('app/api/admin/agent-control/route.ts');
+      const adminRequest=body=>h.request(body,`http://localhost/api/admin/agent-control?experimentId=${experimentId}`);
+      const secret='app-synthetic-dify-key-1234';
+      const saved=await agentApi.POST(adminRequest({action:'save_agent',testAfterSave:true,agent:{internalName:'Dify A',provider:'dify',baseUrl:'https://api.dify.ai/v1',token:secret,enabled:true}}));
+      assert.equal(saved.status,200);
+      const agent=saved.body.control.agents[0];
+      assert.equal(saved.body.test.ok,true);
+      assert.equal(agent.provider,'dify'); assert.equal(agent.botId,''); assert.equal(agent.hasToken,true);
+      assert.equal(JSON.stringify(saved.body).includes(secret),false);
+      const stored=(await pool.query('SELECT * FROM ai_agent_configs WHERE id=$1',[agent.id])).rows[0];
+      assert.equal(stored.coze_bot_id,null); assert.notEqual(stored.coze_token_ciphertext,secret);
+      assert.equal(h.load('lib/secret-crypto.ts').decryptSecret({ciphertext:stored.coze_token_ciphertext,iv:stored.coze_token_iv,tag:stored.coze_token_tag}),secret);
+      assert.equal((await agentApi.POST(adminRequest({action:'save_agent',agent:{internalName:'no key',provider:'dify',baseUrl:'https://api.dify.ai/v1',enabled:true}}))).status,400);
+      const secondAgent=await control.saveAgentConfig({experimentId,provider:'dify',internalName:'Dify B',baseUrl:'https://api.dify.ai/v1',botId:'',token:'app-synthetic-dify-key-5678',enabled:true},adminId);
+      assert.notEqual(secondAgent.id,agent.id);
+      const run=await control.activateExperimentRun({experimentId,name:'Dify group',assignmentMode:'fixed',fixedAgentId:agent.id,randomAgentIds:[],makeDefault:false},adminId);
+      const entry=await entries.getExperimentEntry(run.entryToken);
+      const req=(body,path='/api/messages')=>scopedRequest(run,body,path);
+      const enrolled=await sessions.POST(req({profile:{fullName:'Dify student',studentNumber:'dify-student-001'}},'/api/sessions'));
+      assert.equal(enrolled.status,201); assert.equal(enrolled.body.session.participantCode,'P001');
+      const active=await auth.getAuthenticatedSession(entry);
+      const cozeCreatesBefore=h.creates.length;
+      const cozeSessionBefore=(await pool.query('SELECT coze_conversation_id FROM experiment_sessions WHERE id=$1',[sessionId])).rows[0].coze_conversation_id;
+      const parse=async response=>{
+        assert.match(response.headers.get('content-type'),/text\/event-stream/);
+        const events=(await response.text()).split('\n\n').filter(Boolean).map(frame=>JSON.parse(frame.slice(6)));
+        const error=events.find(event=>event.event==='error');
+        const completed=events.find(event=>event.event==='completed');
+        return {events,error,payload:completed?.payload};
+      };
+      const firstId=crypto.randomUUID();
+      const first=await parse(await messages.POST(req({clientRequestId:firstId,content:'记住关键词月亮'})));
+      assert.ok(first.events.some(event=>event.event==='delta' && event.answer==='Dify '));
+      assert.equal(first.payload.messages.length,2);
+      const firstConv=first.payload.session.difyConversationId;
+      assert.ok(firstConv); assert.equal(first.payload.session.cozeConversationId,null);
+      assert.equal(first.payload.messages[1].provider,'dify'); assert.equal(first.payload.messages[1].cozeMessageId,null);
+      assert.equal(first.payload.messages[1].cozeChatId,null); assert.ok(first.payload.messages[1].providerMessageId);
+      const calls=h.difyCalls.length;
+      const duplicate=await messages.POST(req({clientRequestId:firstId,content:'different duplicate content'}));
+      assert.equal(duplicate.status,200); assert.equal(h.difyCalls.length,calls);
+      assert.equal(duplicate.body.messages.length,2);
+      assert.equal(h.difyCalls.at(-1).authorization,`Bearer ${secret}`);
+      const second=await parse(await messages.POST(req({clientRequestId:crypto.randomUUID(),content:'上一轮的关键词是什么？'})));
+      assert.equal(second.payload.session.difyConversationId,firstConv);
+      assert.equal(h.difyCalls.at(-1).conversation_id,firstConv);
+      const user=h.difyCalls.at(-1).user;
+      assert.equal(user,h.difyCalls.at(-2).user);
+      assert.equal(second.payload.messages.length,4);
+      assert.equal(h.creates.length,cozeCreatesBefore);
+      assert.equal((await pool.query('SELECT coze_conversation_id FROM experiment_sessions WHERE id=$1',[sessionId])).rows[0].coze_conversation_id,cozeSessionBefore);
+      const dbMessages=(await pool.query('SELECT * FROM messages WHERE session_id=$1 ORDER BY sequence_no',[active.id])).rows;
+      assert.equal(dbMessages.length,4); assert.equal(dbMessages[1].metadata.provider,'dify');
+      assert.equal(JSON.stringify(dbMessages).includes(secret),false);
+      const exports=await h.load('lib/admin-export.ts').buildInteractionArchive({experimentId,participantIds:[active.participantId],adminUserId:adminId});
+      const archive=fflate.unzipSync(exports.bytes ?? exports.zip ?? exports.data);
+      const interaction=JSON.parse(fflate.strFromU8(Object.entries(archive).find(([name])=>name.startsWith('interactions/'))[1]));
+      assert.equal(interaction.session.difyConversationId,firstConv); assert.equal(interaction.messages[1].provider,'dify');
+      // Corrupt browser content cannot overwrite the authoritative stream reply.
+      const copied=second.payload.messages.map(message=>({...message,content:message.role==='assistant'?'伪造内容':message.content}));
+      const checkpoint=h.load('app/api/sessions/checkpoint/route.ts');
+      assert.equal((await checkpoint.POST(req({sessionId:active.publicId,messages:copied},'/api/sessions/checkpoint'))).status,200);
+      assert.match((await sessions.GET(req({},'/api/sessions'))).body.messages[1].content,/Dify 回复/);
+      const cookieName=entries.sessionCookieName(entry),oldCookie=h.jar.get(cookieName);
+      h.jar.delete(cookieName);
+      const restored=await resume.POST(req({participantCode:'P001',identity:'dify-student-001'},'/api/sessions/resume'));
+      assert.equal(restored.status,200);
+      const resumed=(await sessions.GET(req({},'/api/sessions'))).body;
+      assert.equal(resumed.session.difyConversationId,firstConv);
+      assert.equal(resumed.messages.length,4); assert.equal(resumed.session.agentId,agent.id);
+      const newCookie=h.jar.get(cookieName);
+      h.jar.set(cookieName,oldCookie);
+      assert.equal((await messages.POST(req({clientRequestId:crypto.randomUUID(),content:'stale'}))).status,401);
+      h.jar.set(cookieName,newCookie);
+      h.setDifyMode('interrupted');
+      const interruptedId=crypto.randomUUID();
+      const interrupted=await parse(await messages.POST(req({clientRequestId:interruptedId,content:'断流后的回复'})));
+      assert.ok(interrupted.error); assert.equal(interrupted.payload,undefined);
+      h.setDifyMode('normal');
+      const callsBeforeRecovery=h.difyCalls.length;
+      const recovered=(await sessions.GET(req({},'/api/sessions'))).body;
+      assert.equal(recovered.pending,false); assert.equal(recovered.messages.length,6);
+      assert.equal(h.difyCalls.length,callsBeforeRecovery);
+      assert.equal((await pool.query('SELECT status FROM chat_requests WHERE session_id=$1 AND client_request_id=$2',[active.id,interruptedId])).rows[0].status,'completed');
+      // Finalization failure is retried from the saved message_end checkpoint.
+      const finalizeResponse=await messages.POST(req({clientRequestId:crypto.randomUUID(),content:'数据库暂时写入失败'}));
+      failMessageWrite=true;
+      const failedFinalize=await parse(finalizeResponse);
+      assert.ok(failedFinalize.error);
+      failMessageWrite=false;
+      const finalized=(await sessions.GET(req({},'/api/sessions'))).body;
+      assert.equal(finalized.pending,false); assert.equal(finalized.messages.length,8);
+      // Unknown creates are never auto-replayed or silently made retryable.
+      h.setDifyMode('no_ids');
+      const unknownId=crypto.randomUUID();
+      assert.ok((await parse(await messages.POST(req({clientRequestId:unknownId,content:'结果未知'})))).error);
+      await pool.query("UPDATE chat_requests SET requested_at=requested_at-interval '200 seconds' WHERE session_id=$1 AND client_request_id<>$2",[active.id,unknownId]);
+      await pool.query("UPDATE chat_requests SET requested_at=now()-interval '121 seconds' WHERE session_id=$1 AND client_request_id=$2",[active.id,unknownId]);
+      const unknown=(await sessions.GET(req({},'/api/sessions'))).body;
+      assert.equal(unknown.pending,false); assert.equal(unknown.failedRequest.retryable,false);
+      assert.equal((await messages.POST(req({clientRequestId:unknownId,content:'结果未知'}))).status,409);
+      h.setDifyMode('error');
+      const denied=await parse(await messages.POST(req({clientRequestId:crypto.randomUUID(),content:'认证失败'})));
+      assert.ok(denied.error); assert.equal(JSON.stringify(denied.events).includes(secret),false);
+      const failed=(await sessions.GET(req({},'/api/sessions'))).body;
+      assert.equal(failed.pending,false); assert.equal(failed.failedRequest.retryable,true);
+      assert.match(failed.failedRequest.message,/Dify/); assert.equal(failed.failedRequest.message.includes(secret),false);
+      h.setDifyMode('normal');
+      // New conversations keep the frozen agent but start with empty context.
+      const conversations=h.load('app/api/conversations/route.ts');
+      const newConversation=await conversations.POST(req({action:'create'},'/api/conversations'));
+      assert.equal(newConversation.status,200); assert.equal(newConversation.body.payload.session.difyConversationId,null);
+      await parse(await messages.POST(req({clientRequestId:crypto.randomUUID(),content:'新的独立对话'})));
+      assert.equal(h.difyCalls.at(-1).conversation_id,''); assert.notEqual(h.difyCalls.at(-1).user,user);
+      assert.equal((await conversations.POST(req({action:'switch',sessionId:active.publicId},'/api/conversations'))).status,200);
+      assert.equal((await sessions.GET(req({},'/api/sessions'))).body.session.difyConversationId,firstConv);
+      // Same app/key and matching P code across a new experiment remain isolated.
+      const otherId='dify-other-study';
+      await pool.query('INSERT INTO experiments(id,name) VALUES ($1,$2)',[otherId,'Dify other integration']);
+      await settingsLib.saveExperimentSettings({...settings,experiment:{...settings.experiment,id:otherId},
+        storage:{databaseMessagesEnabled:false},limits:{maxUserMessages:null,maxMessageChars:2000,sessionDurationMinutes:null},ai:{baseUrl:settings.ai.baseUrl,botId:settings.ai.botId}},adminId);
+      const otherAgent=await control.saveAgentConfig({experimentId:otherId,provider:'dify',internalName:'same app',baseUrl:'https://api.dify.ai/v1',botId:'',token:secret,enabled:true},adminId);
+      const otherRun=await control.activateExperimentRun({experimentId:otherId,name:'other',assignmentMode:'fixed',fixedAgentId:otherAgent.id,randomAgentIds:[],makeDefault:false},adminId);
+      const otherEnroll=await sessions.POST(scopedRequest(otherRun,{profile:{fullName:'Dify student',studentNumber:'dify-student-001'}}));
+      assert.equal(otherEnroll.body.session.participantCode,'P001');
+      const otherReply=await parse(await messages.POST(scopedRequest(otherRun,{clientRequestId:crypto.randomUUID(),content:'不保存对话正文'} ,'/api/messages')));
+      assert.equal(otherReply.payload.messages.length,2); assert.notEqual(h.difyCalls.at(-1).user,user);
+      assert.equal(h.difyCalls.at(-1).conversation_id,'');
+      const otherSession=await auth.getAuthenticatedSession(await entries.getExperimentEntry(otherRun.entryToken));
+      assert.equal((await pool.query('SELECT count(*)::int AS n FROM messages WHERE session_id=$1',[otherSession.id])).rows[0].n,0);
+      assert.equal(JSON.stringify((await pool.query('SELECT metadata FROM chat_requests WHERE session_id=$1',[otherSession.id])).rows).includes('不保存对话正文'),false);
+      assert.equal((await sessions.GET(scopedRequest(otherRun,{},'/api/sessions'))).body.messages.length,2);
+      await control.closeActiveExperimentRun(experimentId,adminId,run.id);
+      await assert.rejects(()=>control.saveAgentConfig({id:agent.id,experimentId,provider:'coze',internalName:'changed',baseUrl:'https://api.coze.cn',botId:'bot',token:'new',enabled:true},adminId),/AGENT_RECORDS_LOCKED/);
     });
   } finally {
     if (pool) await pool.end();

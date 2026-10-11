@@ -8,6 +8,8 @@ export interface TranscriptExportSession {
   lastActivityAt: string;
   participantCode: string;
   cozeConversationId: string | null;
+  provider?: "coze" | "dify";
+  difyConversationId?: string | null;
   experimentRunId: string | null;
   agentId: string | null;
 }
@@ -33,6 +35,8 @@ export function buildTranscriptExport(input: {
       startedAt: input.session.startedAt,
       lastActivityAt: input.session.lastActivityAt,
       cozeConversationId: input.session.cozeConversationId,
+      provider: input.session.provider ?? "coze",
+      ...(input.session.provider === "dify" ? { difyConversationId: input.session.difyConversationId ?? null } : {}),
       experimentRunId: input.session.experimentRunId,
       agentId: input.session.agentId,
     },
@@ -66,6 +70,7 @@ export function buildTranscriptExport(input: {
       clientRequestId: message.clientRequestId,
       cozeMessageId: message.cozeMessageId,
       cozeChatId: message.cozeChatId,
+      ...(message.provider === "dify" ? { provider: message.provider, providerMessageId: message.providerMessageId ?? null, providerTaskId: message.providerTaskId ?? null } : {}),
     })),
   };
 }

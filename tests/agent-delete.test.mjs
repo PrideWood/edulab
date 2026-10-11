@@ -14,7 +14,7 @@ test("agent deletion protects live records but clears empty closed runs", { skip
     // All unqualified names resolve to temporary tables, never production data.
     await client.query(`
       CREATE TEMP TABLE ai_agent_configs (
-        id uuid PRIMARY KEY, experiment_id text, internal_name text, coze_api_base_url text,
+        id uuid PRIMARY KEY, experiment_id text, internal_name text, provider text DEFAULT 'coze', coze_api_base_url text,
         coze_bot_id text, coze_token_ciphertext text, coze_token_iv text, coze_token_tag text,
         enabled boolean, updated_at timestamptz DEFAULT now(), created_at timestamptz DEFAULT now()
       ) ON COMMIT DROP;

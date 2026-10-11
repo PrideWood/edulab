@@ -11,6 +11,7 @@ import { assertSessionCanSend, getSessionControls } from "@/lib/experiment-limit
 import { assertSameOrigin } from "@/lib/admin-auth";
 import { importLegacyRuntime } from "@/lib/legacy-runtime";
 import { getSessionDraft } from "@/lib/session-draft";
+import { createDifyChatResponse } from "@/lib/dify-chat";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -32,7 +33,7 @@ async function responsePayload(
   const storedMessages = await listMessages(session.id);
   const messages = mergeStoredMessages(storedMessages, transientMessages);
   return {
-    session: { id: session.publicId, status: state.status, startedAt: session.startedAt, lastActivityAt: new Date().toISOString(), participantCode: session.participantCode, cozeConversationId, experimentRunId: session.configSnapshot?.ai.runId ?? null, agentId: session.configSnapshot?.ai.agentId ?? null },
+    session: { id: session.publicId, status: state.status, startedAt: session.startedAt, lastActivityAt: new Date().toISOString(), participantCode: session.participantCode, cozeConversationId, provider: session.configSnapshot?.ai.provider ?? "coze", difyConversationId: session.difyConversationId ?? null, experimentRunId: session.configSnapshot?.ai.runId ?? null, agentId: session.configSnapshot?.ai.agentId ?? null },
     experiment: state.snapshot.experiment,
     draft: await getSessionDraft(session.id),
     messages, participantProfile: await getParticipantProfile(session.participantId), pending,
@@ -72,6 +73,12 @@ export async function POST(request: Request) {
       if (begun.request.status === "failed" || begun.request.status === "uncertain") throw new ApiError(409, "REQUEST_FAILED", "这次发送未完成，请使用重试按钮重新发送。");
       const recovery = await recoverPendingRequest(session);
       return NextResponse.json(await responsePayload(session, recovery.pending, recovery.messages, begun.request.cozeConversationId), { status: recovery.pending ? 202 : 200 });
+    }
+
+    if (session.configSnapshot?.ai.provider === "dify") {
+      const activeSession = session;
+      return createDifyChatResponse(activeSession, begun.request, input.data.content,
+        messages => responsePayload(activeSession, false, messages));
     }
 
     let chat;

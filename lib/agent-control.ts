@@ -13,6 +13,7 @@ export type AssignmentMode = "fixed" | "balanced_random";
 export interface AgentConfigSummary {
   id: string;
   internalName: string;
+  provider: "coze" | "dify";
   baseUrl: string;
   botId: string;
   hasToken: boolean;
@@ -44,7 +45,8 @@ interface AgentRow {
   experiment_id: string;
   internal_name: string;
   coze_api_base_url: string;
-  coze_bot_id: string;
+  provider?: "coze" | "dify";
+  coze_bot_id: string | null;
   coze_token_ciphertext: string | null;
   coze_token_iv: string | null;
   coze_token_tag: string | null;
@@ -75,9 +77,10 @@ function mapAgent(row: AgentRow): AgentConfigSummary {
     id: row.id,
     internalName: row.internal_name,
     baseUrl: row.coze_api_base_url,
-    botId: row.coze_bot_id,
-    hasToken: Boolean(row.coze_token_ciphertext || process.env.COZE_API_TOKEN),
-    tokenSource: row.coze_token_ciphertext ? "database" : process.env.COZE_API_TOKEN ? "environment" : "missing",
+    provider: row.provider ?? "coze",
+    botId: row.coze_bot_id ?? "",
+    hasToken: Boolean(row.coze_token_ciphertext || ((row.provider ?? "coze") === "coze" && process.env.COZE_API_TOKEN)),
+    tokenSource: row.coze_token_ciphertext ? "database" : (row.provider ?? "coze") === "coze" && process.env.COZE_API_TOKEN ? "environment" : "missing",
     enabled: row.enabled,
     hasReferences: Boolean(row.has_references),
     hasExperimentRecords: Boolean(row.has_experiment_records),
@@ -140,7 +143,7 @@ async function entryCodeIsInUse(client: PoolClient, experimentId: string,
 export async function getAgentControl(experimentId: string) {
   const [agents, runs] = await Promise.all([
     query<AgentRow>(
-      `SELECT agent.id, agent.experiment_id, agent.internal_name, agent.coze_api_base_url, agent.coze_bot_id,
+      `SELECT agent.id, agent.experiment_id, agent.internal_name, agent.provider, agent.coze_api_base_url, agent.coze_bot_id,
          agent.coze_token_ciphertext, agent.coze_token_iv, agent.coze_token_tag, agent.enabled, agent.updated_at,
          (
            EXISTS (
@@ -188,7 +191,7 @@ export async function deleteAgentConfig(input: {
 }, adminUserId: string) {
   return transaction(async (client) => {
     const current = await client.query<AgentRow>(
-      `SELECT id, experiment_id, internal_name, coze_api_base_url, coze_bot_id,
+      `SELECT id, experiment_id, internal_name, provider, coze_api_base_url, coze_bot_id,
          coze_token_ciphertext, coze_token_iv, coze_token_tag, enabled, updated_at
        FROM ai_agent_configs WHERE id = $1 AND experiment_id = $2 FOR UPDATE`,
       [input.agentId, input.experimentId],
@@ -257,6 +260,7 @@ export async function saveAgentConfig(input: {
   id?: string;
   experimentId: string;
   internalName: string;
+  provider?: "coze" | "dify";
   baseUrl: string;
   botId: string;
   token?: string;
@@ -265,7 +269,7 @@ export async function saveAgentConfig(input: {
   return transaction(async (client) => {
     const id = input.id ?? randomUUID();
     const current = input.id ? await client.query<AgentRow>(
-      `SELECT id, experiment_id, internal_name, coze_api_base_url, coze_bot_id,
+      `SELECT id, experiment_id, internal_name, provider, coze_api_base_url, coze_bot_id,
          coze_token_ciphertext, coze_token_iv, coze_token_tag, enabled, updated_at
        FROM ai_agent_configs WHERE id = $1 AND experiment_id = $2 FOR UPDATE`,
       [input.id, input.experimentId],
@@ -287,26 +291,31 @@ export async function saveAgentConfig(input: {
     }
     const encrypted = input.token?.trim() ? encryptSecret(input.token.trim()) : null;
     const previous = current?.rows[0];
+    const provider = input.provider ?? "coze";
+    const sameProvider = !previous || (previous.provider ?? "coze") === provider;
+    if (provider === "coze" && !input.botId.trim()) throw new Error("COZE_BOT_NOT_CONFIGURED");
+    if (!encrypted && (!sameProvider || (!previous?.coze_token_ciphertext && provider === "dify"))) throw new Error("DIFY_KEY_NOT_CONFIGURED");
     const saved = await client.query<AgentRow>(
       `INSERT INTO ai_agent_configs (
-         id, experiment_id, internal_name, coze_api_base_url, coze_bot_id,
+         id, experiment_id, internal_name, provider, coze_api_base_url, coze_bot_id,
          coze_token_ciphertext, coze_token_iv, coze_token_tag, enabled, updated_by
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       ) VALUES ($1,$2,$3,$11,$4,$5,$6,$7,$8,$9,$10)
        ON CONFLICT (id) DO UPDATE SET
          internal_name = EXCLUDED.internal_name,
+         provider = EXCLUDED.provider,
          coze_api_base_url = EXCLUDED.coze_api_base_url,
          coze_bot_id = EXCLUDED.coze_bot_id,
          coze_token_ciphertext = EXCLUDED.coze_token_ciphertext,
          coze_token_iv = EXCLUDED.coze_token_iv,
          coze_token_tag = EXCLUDED.coze_token_tag,
          enabled = EXCLUDED.enabled, updated_by = EXCLUDED.updated_by, updated_at = now()
-       RETURNING id, experiment_id, internal_name, coze_api_base_url, coze_bot_id,
+       RETURNING id, experiment_id, internal_name, provider, coze_api_base_url, coze_bot_id,
          coze_token_ciphertext, coze_token_iv, coze_token_tag, enabled, updated_at`,
-      [id, input.experimentId, input.internalName, input.baseUrl, input.botId,
+      [id, input.experimentId, input.internalName, input.baseUrl, provider === "coze" ? input.botId : null,
         encrypted?.ciphertext ?? previous?.coze_token_ciphertext ?? null,
         encrypted?.iv ?? previous?.coze_token_iv ?? null,
         encrypted?.tag ?? previous?.coze_token_tag ?? null,
-        input.enabled, adminUserId],
+        input.enabled, adminUserId, provider],
     );
     await client.query(
       `INSERT INTO admin_audit_log (id, admin_user_id, action, experiment_id, before_data, after_data)
@@ -320,20 +329,23 @@ export async function saveAgentConfig(input: {
 export async function resolveAgentTestConnection(input: {
   experimentId: string;
   id?: string;
+  provider?: "coze" | "dify";
   baseUrl: string;
   botId: string;
   token?: string;
 }) {
+  const provider = input.provider ?? "coze";
   let token = input.token?.trim() ?? "";
   if (!token && input.id) {
     const current = await query<AgentRow>(
-      `SELECT id, experiment_id, internal_name, coze_api_base_url, coze_bot_id,
+      `SELECT id, experiment_id, internal_name, provider, coze_api_base_url, coze_bot_id,
          coze_token_ciphertext, coze_token_iv, coze_token_tag, enabled, updated_at
        FROM ai_agent_configs WHERE id = $1 AND experiment_id = $2`,
       [input.id, input.experimentId],
     );
     const agent = current.rows[0];
     if (!agent) throw new Error("AGENT_NOT_FOUND");
+    if ((agent.provider ?? "coze") !== provider) throw new Error("PROVIDER_KEY_REQUIRED");
     if (agent.coze_token_ciphertext && agent.coze_token_iv && agent.coze_token_tag) {
       try {
         token = decryptSecret({
@@ -346,9 +358,9 @@ export async function resolveAgentTestConnection(input: {
       }
     }
   }
-  token ||= process.env.COZE_API_TOKEN ?? "";
-  if (!token) throw new Error("COZE_TOKEN_NOT_CONFIGURED");
-  return { token, baseUrl: input.baseUrl, botId: input.botId };
+  if (provider === "coze") token ||= process.env.COZE_API_TOKEN ?? "";
+  if (!token) throw new Error(provider === "dify" ? "DIFY_KEY_NOT_CONFIGURED" : "COZE_TOKEN_NOT_CONFIGURED");
+  return { provider, token, baseUrl: input.baseUrl, botId: input.botId };
 }
 
 export async function activateExperimentRun(input: {
@@ -422,6 +434,7 @@ export interface AssignedAgentRuntime {
   assignmentMode: AssignmentMode;
   agentId: string;
   internalName: string;
+  provider: "coze" | "dify";
   baseUrl: string;
   botId: string;
   token: string;
@@ -557,14 +570,15 @@ export async function assignAgentWithClient(
     );
   }
   const agent = await client.query<AgentRow>(
-    `SELECT id, experiment_id, internal_name, coze_api_base_url, coze_bot_id,
+    `SELECT id, experiment_id, internal_name, provider, coze_api_base_url, coze_bot_id,
        coze_token_ciphertext, coze_token_iv, coze_token_tag, enabled, updated_at
      FROM ai_agent_configs WHERE id = $1 AND experiment_id = $2 AND enabled = true`,
     [agentId, experimentId],
   );
   const selected = agent.rows[0];
   if (!selected) throw new Error("NO_AVAILABLE_AGENT");
-  let token = process.env.COZE_API_TOKEN ?? "";
+  const provider = selected.provider ?? "coze";
+  let token = provider === "coze" ? process.env.COZE_API_TOKEN ?? "" : "";
   if (selected.coze_token_ciphertext && selected.coze_token_iv && selected.coze_token_tag) {
     token = decryptSecret({
       ciphertext: selected.coze_token_ciphertext,
@@ -572,11 +586,11 @@ export async function assignAgentWithClient(
       tag: selected.coze_token_tag,
     });
   }
-  if (!token) throw new Error("COZE_TOKEN_NOT_CONFIGURED");
+  if (!token) throw new Error(provider === "dify" ? "DIFY_KEY_NOT_CONFIGURED" : "COZE_TOKEN_NOT_CONFIGURED");
   return {
     assignmentId: assignmentId!, runId: active.id, runName: active.name,
     assignmentMode: active.assignment_mode, agentId: selected.id,
-    internalName: selected.internal_name, baseUrl: selected.coze_api_base_url,
-    botId: selected.coze_bot_id, token,
+    internalName: selected.internal_name, provider, baseUrl: selected.coze_api_base_url,
+    botId: selected.coze_bot_id ?? "", token,
   };
 }

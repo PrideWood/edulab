@@ -16,6 +16,7 @@ export interface AuthenticatedSession {
   status: "active" | "completed";
   cozeUserId: string;
   cozeConversationId: string | null;
+  difyConversationId?: string | null;
   activeRequestId: string | null;
   startedAt: string;
   lastActivityAt: string;
@@ -30,11 +31,11 @@ export async function getAuthenticatedSession(entry?: ExperimentEntry | null): P
   const result = await query<{
     id: string; public_id: string; participant_id: string; external_code: string;
     experiment_id: string; status: "active" | "completed"; coze_user_id: string;
-    coze_conversation_id: string | null; active_request_id: string | null;
+    coze_conversation_id: string | null; dify_conversation_id: string | null; active_request_id: string | null;
     started_at: string; last_activity_at: string; config_version: number | null;
     config_snapshot: ExperimentSessionSnapshot | null; session_secret_hash: string;
   }>(`SELECT s.id, s.public_id, s.participant_id, p.external_code, s.experiment_id,
-             s.status, s.coze_user_id, s.coze_conversation_id, s.active_request_id,
+             s.status, s.coze_user_id, s.coze_conversation_id, s.dify_conversation_id, s.active_request_id,
              s.started_at, s.last_activity_at, s.config_version, s.config_snapshot, s.session_secret_hash
       FROM experiment_sessions s
       JOIN participants p ON p.id = s.participant_id
@@ -47,6 +48,7 @@ export async function getAuthenticatedSession(entry?: ExperimentEntry | null): P
     participantCode: row.external_code, experimentId: row.experiment_id,
     status: row.status, cozeUserId: row.coze_user_id,
     cozeConversationId: row.coze_conversation_id, activeRequestId: row.active_request_id,
+    difyConversationId: row.dify_conversation_id ?? null,
     startedAt: row.started_at, lastActivityAt: row.last_activity_at,
     configVersion: row.config_version, configSnapshot: row.config_snapshot,
     sessionSecretHash: row.session_secret_hash,

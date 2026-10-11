@@ -8,17 +8,18 @@ EduLab 是一个面向教育实验研究的轻量 AI 智能体交互平台。教
 
 - Next.js App Router：学生页面和仅服务端可访问的 API
 - Coze 官方 `@coze/api` SDK：非流式创建 Chat、轮询状态并读取最终消息
+- Dify Cloud 聊天 API：SSE 流式响应、独立 conversation_id、多轮对话和请求恢复
 - 标准 PostgreSQL + `pg`：Neon 可直接使用，也可迁移到任何 PostgreSQL 服务
 - HttpOnly 会话 Cookie：浏览器无法读取会话密钥，修改 URL 不能读取其他参与者数据
 - 独立参与者身份表：姓名、学号加密保存，通过内部 Participant ID 与交互记录关联
 - 实验与分组入口隔离：每个入口独立会话，任务、规则和智能体配置随会话锁定
 - 浏览器本地 Outbox 与 Session 串行发送：降低重复点击和网络中断造成的丢失风险
 - Coze Chat/Conversation 标识与幂等请求及时持久化，恢复时延续原 AI 上下文
-- 可折叠多对话侧栏：同一参与者可以创建和切换多个独立 Coze Conversation
+- 可折叠多对话侧栏：同一参与者可以创建和切换多个独立 AI Conversation
 
 ## 本地启动
 
-1. 复制 `.env.example` 为 `.env.local`，填写 PostgreSQL、加密密钥和至少一个可用的 Coze Token。
+1. 复制 `.env.example` 为 `.env.local`，填写 PostgreSQL 和加密密钥；Coze 可使用环境 Token，Dify 应用 Key 在管理后台配置。
 2. 创建数据库结构：`npm run db:migrate`
 3. 临时设置 `EDULAB_ADMIN_PASSWORD`，创建管理员：`npm run admin:create -- researcher`
 4. 删除临时的 `EDULAB_ADMIN_PASSWORD`，启动项目：`npm run dev`
@@ -32,6 +33,10 @@ EduLab 是一个面向教育实验研究的轻量 AI 智能体交互平台。教
 
 实现依据：[Coze Chat v3](https://www.coze.com/open/docs/developer_guides/chat_v3)、[Retrieve chat](https://www.coze.com/open/docs/developer_guides/retrieve_chat)、[Personal Access Token](https://www.coze.com/open/docs/developer_guides/pat) 和 [Coze 官方 JavaScript SDK](https://github.com/coze-dev/coze-js)。
 
+## Dify 配置
+
+后台新增智能体时选择 Dify，填写 API Base URL（Cloud 默认 `https://api.dify.ai/v1`）和应用 API Key，无需 Bot ID。保存并测试后沿用现有实验分组和入口流程。部署前需应用 `0014_dify_agents.sql`；旧 Coze 配置和会话保持兼容。配置步骤、会话隔离、流式恢复及验证说明见 [Dify Cloud 接入](docs/dify-integration.md)。
+
 ## 管理后台
 
 管理员从 `/admin` 登录，可以设置：
@@ -42,13 +47,13 @@ EduLab 是一个面向教育实验研究的轻量 AI 智能体交互平台。教
 - 任务标题、说明、要求、学习材料、提示和欢迎语
 - 是否开放聊天、最多发送次数、每条消息字数和实验时长
 - 是否及时保存消息正文及草稿到数据库，支持断点恢复
-- 通过紧凑表格管理多个 Coze 智能体的内部名称、API 地址、Bot ID、Token 和启用状态
+- 通过紧凑表格管理 Coze / Dify 智能体的内部名称、提供商、API 地址、Key 和启用状态；Coze 另需 Bot ID
 - 新增或切换实验；为固定智能体或均衡随机组生成独立短链接
 - 一键复制识别名称与完整链接，同时开放、暂停和继续各组报名，结束后可删除链接；有实验记录的入口码保留，确认无记录且智能体不再使用的空入口码才允许复用
 - 勾选或全选参与者，批量导出数据库交互记录 ZIP；另行导出加密身份对应表解密后的 CSV
 - 删除测试参与者的整组数据库记录，或删除从未投入场次使用的智能体
 
-管理员密码使用 scrypt 哈希保存，连续失败会暂时锁定账号。Coze Token 使用 AES-256-GCM 加密后保存到 PostgreSQL，后台不会返回明文。`ADMIN_SESSION_SECRET` 和 `SETTINGS_ENCRYPTION_KEY` 必须作为部署环境密钥长期保存。
+管理员密码使用 scrypt 哈希保存，连续失败会暂时锁定账号。Coze Token 和 Dify API Key 使用 AES-256-GCM 加密后保存到 PostgreSQL，后台不会返回明文。`ADMIN_SESSION_SECRET` 和 `SETTINGS_ENCRYPTION_KEY` 必须作为部署环境密钥长期保存。
 
 新增实验、保存设置和智能体、创建或停止入口都会写入管理员审计记录。已有学生报名的智能体配置在停止报名或删除链接后仍禁止修改；后台显示“实验配置已锁定”，服务端也拒绝绕过页面的修改。一个实验可同时开放多个入口；生成入口时固定已保存的任务与规则，每个学生会话再锁定分配的智能体。新入口不会关闭原入口，停止新报名也不阻止已有被试恢复。后台已移除原首页入口管理；各组使用 `/join/` 后跟 4 个字符的独立链接。复制内容只有识别名称和链接，复制成功会在按钮内提示，3 秒后恢复。已停止的入口可继续报名；确认实验结束后可删除链接，研究数据仍保留并可导出。有记录、或智能体仍被其他入口使用的旧码不释放；仅无记录且已不再使用的空入口码允许复用，生成时优先分配从未使用过的新码。各组被试编号在同一实验内统一分配，不会重复。操作说明见 [多实验与分组入口](docs/multi-experiment-links.md)。
 
@@ -58,13 +63,13 @@ EduLab 是一个面向教育实验研究的轻量 AI 智能体交互平台。教
 
 学生端默认是对话优先界面，左侧用于新建和切换多个对话，可随时收起。任务说明属于可选功能，默认关闭；后台将其放在设置末位，开启后学生通过聊天页的轻量入口按需查看，不占用对话侧栏。每个对话使用独立的 Coze Conversation 和独立浏览器记录，切换时不会混合消息。次数和时长限制按同一参与者的整次实验累计，不能通过新建对话重置。
 
-学生打开实验入口时先填写学号，姓名可以不填；首尾空格会被清除，历史姓名单项记录仍可恢复，提交后服务端才按实验顺序生成 `P001`、`P002` 等 Participant ID，并在同一个事务中创建独立 HttpOnly Session 和加密身份记录。姓名去除首尾空格并忽略英文大小写后完全等于 `测试`、`ceshi` 或 `test` 时，系统改用独立递增的 `T001`、`T002` 测试编号，不占用正式被试的 `P` 编号。未填写时刷新页面不会产生空参与者或空会话。姓名和学号使用 `SETTINGS_ENCRYPTION_KEY` 加密后存入独立的 `participant_identity_profiles` 表；学生只能通过自己的 Session 读写自己的信息，已登录管理员才能查看对应表。平台不会自动把这些身份字段发送给 Coze，也不会自动写入 `messages`、`chat_requests` 或学生下载的 JSON。研究分析继续使用 Participant ID，只有需要后续访谈时才通过后台对应到具体学生。页面开场欢迎语仅为界面提示，不计入消息、轮次或导出记录。
+学生打开实验入口时先填写学号，姓名可以不填；首尾空格会被清除，历史姓名单项记录仍可恢复，提交后服务端才按实验顺序生成 `P001`、`P002` 等 Participant ID，并在同一个事务中创建独立 HttpOnly Session 和加密身份记录。姓名去除首尾空格并忽略英文大小写后完全等于 `测试`、`ceshi` 或 `test` 时，系统改用独立递增的 `T001`、`T002` 测试编号，不占用正式被试的 `P` 编号。未填写时刷新页面不会产生空参与者或空会话。姓名和学号使用 `SETTINGS_ENCRYPTION_KEY` 加密后存入独立的 `participant_identity_profiles` 表；学生只能通过自己的 Session 读写自己的信息，已登录管理员才能查看对应表。平台不会自动把这些身份字段发送给 AI 提供商，也不会自动写入 `messages`、`chat_requests` 或学生下载的 JSON。研究分析继续使用 Participant ID，只有需要后续访谈时才通过后台对应到具体学生。页面开场欢迎语仅为界面提示，不计入消息、轮次或导出记录。
 
 同一台实验设备由多名学生依次使用时，已填写身份的学生可以从左下角身份信息弹窗选择“开始下一位参与者”。系统会先校验当前没有进行中的 AI 回复，并在数据库保存开启时完成当前记录整理；数据库正文保存关闭时会自动下载包含该参与者全部本地对话的 JSON 归档。随后仅清除 Participant Session，保留 Access Code 验证，下一位学生直接填写信息并获得下一个顺序编号。切换操作带有明确确认提示，不出现在主聊天工具栏。
 
 学生端会在参与者点击发送时先同步更新当前 Session 的浏览器本地副本，再请求 AI；AI 回复到达后继续合并写入。刷新页面会同时结合本地副本与 Coze Chat 恢复双方消息，并提供 JSON 导出。导出内容包含参与者编号、Session ID、Coze Conversation / Chat / Message 标识、实验信息、严格消息顺序、对话轮次、角色、正文、发送时间、AI 回复起止时间和延迟。浏览器存储不是跨设备的中央备份，参与者清除浏览器数据后无法恢复，因此关闭数据库正文保存时必须要求参与者在实验结束前下载并提交记录。
 
-聊天期间，学生消息和幂等请求在调用 AI 前提交数据库，AI 回复完成后与请求状态在同一事务中保存。发送成功与否由服务端确认；写入失败会提示，并保留本机尚未确认的内容。草稿在停止输入约 900 毫秒后自动保存，版本冲突不会静默覆盖。关闭、刷新或离开仍在进行的页面时仍保留原生离开确认和 Beacon 补充上传。恢复沿用原 Coze Conversation、Bot ID、限制、开始时间与结束状态，详见 [实验编号与断点恢复](docs/session-recovery.md)。
+聊天期间，学生消息和幂等请求在调用 AI 前提交数据库，AI 回复完成后与请求状态在同一事务中保存。发送成功与否由服务端确认；写入失败会提示，并保留本机尚未确认的内容。草稿在停止输入约 900 毫秒后自动保存，版本冲突不会静默覆盖。关闭、刷新或离开仍在进行的页面时仍保留原生离开确认和 Beacon 补充上传。恢复沿用原提供商 Conversation、智能体配置、限制、开始时间与结束状态，详见 [实验编号与断点恢复](docs/session-recovery.md)。
 
 关闭“实验结束时备份完整对话到数据库”只会停止保存学生和 AI 的消息正文。PostgreSQL 仍用于参与者编号、加密身份对应表、场次分配和 Session 创建；因此数据库中断会影响进入、发送和保存操作；页面会明确提示，不能把浏览器副本当作已成功提交的研究记录。
 
@@ -86,7 +91,7 @@ EduLab 是一个面向教育实验研究的轻量 AI 智能体交互平台。教
 - `participants`：系统自动生成或研究者预先指定的实验内编号
 - `participant_identity_profiles`：与 Participant ID 一对一关联的加密姓名、学号
 - `experiment_sessions`：一次参与过程、Coze Conversation、开始/活动/完成时间
-- `ai_agent_configs`：多个 Coze 智能体及其加密凭证
+- `ai_agent_configs`：多个 Coze / Dify 智能体及其加密凭证
 - `experiment_runs`：分组入口、短码、任务配置快照和分配规则，兼容原课程场次
 - `participant_agent_assignments`：参与者、场次与锁定智能体的对应关系
 - `chat_requests`：每次发送的幂等状态、对话轮次、Coze Chat 标识、失败与恢复信息

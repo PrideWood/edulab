@@ -5,6 +5,7 @@ import { activateExperimentRun, closeActiveExperimentRun, deleteAgentConfig, del
 import { assertSameOrigin, getAuthenticatedAdmin } from "@/lib/admin-auth";
 import { formatAgentTestFailure } from "@/lib/agent-test-error";
 import { testCozeConnection } from "@/lib/coze";
+import { testDifyConnection } from "@/lib/dify";
 import { ApiError, errorResponse } from "@/lib/http";
 
 const httpsUrl = z.url().refine((value) => {
@@ -12,27 +13,29 @@ const httpsUrl = z.url().refine((value) => {
   return url.protocol === "https:" || (url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname));
 }, "API 地址必须使用 HTTPS");
 
+const connectionSchema = z.object({
+  id: z.uuid().optional(), provider: z.enum(["coze", "dify"]).default("coze"),
+  baseUrl: httpsUrl, botId: z.string().trim().max(200).default(""),
+  token: z.string().trim().max(2000).optional(),
+});
+const validateProvider = (agent: z.infer<typeof connectionSchema>, ctx: z.RefinementCtx) => {
+  if (agent.provider === "coze" && !agent.botId) ctx.addIssue({ code: "custom", path: ["botId"], message: "Coze 需要 Bot ID。" });
+  const url = new URL(agent.baseUrl);
+  if (url.username || url.password || url.search || url.hash) ctx.addIssue({ code: "custom", path: ["baseUrl"], message: "API Base URL 不能包含账号、查询参数或片段。" });
+};
+
 const inputSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("save_agent"),
     testAfterSave: z.boolean().optional(),
-    agent: z.object({
-      id: z.uuid().optional(),
+    agent: connectionSchema.extend({
       internalName: z.string().trim().min(1).max(100),
-      baseUrl: httpsUrl,
-      botId: z.string().trim().min(1).max(200),
-      token: z.string().trim().max(2000).optional(),
       enabled: z.boolean(),
-    }),
+    }).superRefine(validateProvider),
   }),
   z.object({
     action: z.literal("test_agent"),
-    agent: z.object({
-      id: z.uuid().optional(),
-      baseUrl: httpsUrl,
-      botId: z.string().trim().min(1).max(200),
-      token: z.string().trim().max(2000).optional(),
-    }),
+    agent: connectionSchema.superRefine(validateProvider),
   }),
   z.object({
     action: z.literal("activate_run"),
@@ -57,6 +60,7 @@ const deleteSchema = z.object({
 function controlError(error: unknown) {
   const message = error instanceof Error ? error.message : "";
   if (message === "AGENT_NOT_FOUND") return new ApiError(404, message, "找不到这个智能体配置。");
+  if (message === "DIFY_KEY_NOT_CONFIGURED" || message === "PROVIDER_KEY_REQUIRED") return new ApiError(400, message, "请为选定的提供商输入新的 API Key。Dify 不会使用 Coze Token。");
   if (message === "AGENT_TOKEN_DECRYPT_FAILED") return new ApiError(409, message, "数据库中的 Token 无法解密。请确认本地与 Vercel 的 SETTINGS_ENCRYPTION_KEY 一致且未更换；也可重新输入 Token 并保存。");
   if (message === "ACTIVE_AGENT_LOCKED") return new ApiError(409, message, "开放入口正在使用这个智能体，配置暂时不能修改。请先停止报名；已有实验记录的配置需保留，请新增智能体配置。");
   if (message === "AGENT_RECORDS_LOCKED") return new ApiError(409, message, "这个智能体或其分组已有关联实验记录，停止报名或删除链接后也不能修改。请新增智能体配置并创建新入口。");
@@ -92,12 +96,13 @@ export async function POST(request: Request) {
     if (input.data.action === "test_agent") {
       const connection = await resolveAgentTestConnection({ ...input.data.agent, experimentId: experimentId });
       try {
-        await testCozeConnection({ ...connection, timeoutMs: 20_000 });
+        if (connection.provider === "dify") await testDifyConnection({ ...connection, timeoutMs: 20_000 });
+        else await testCozeConnection({ ...connection, timeoutMs: 20_000 });
       } catch (error) {
         const upstream = error as { status?: number; code?: string };
-        const status = upstream.code === "COZE_TEST_TIMEOUT" ? 504
+        const status = upstream.code === "COZE_TEST_TIMEOUT" || upstream.code === "DIFY_TEST_TIMEOUT" ? 504
           : upstream.status && [400, 401, 403, 404, 408, 429].includes(upstream.status) ? 422 : 502;
-        throw new ApiError(status, "AGENT_CONNECTION_FAILED", formatAgentTestFailure(error, { secret: connection.token }));
+        throw new ApiError(status, "AGENT_CONNECTION_FAILED", formatAgentTestFailure(error, { secret: connection.token, provider: connection.provider }));
       }
       return NextResponse.json({ test: { ok: true, message: "连接成功" } });
     } else if (input.data.action === "save_agent") {
@@ -105,14 +110,15 @@ export async function POST(request: Request) {
       if (input.data.testAfterSave) {
         // Read back the committed credential: never test the submitted draft here.
         const connection = await resolveAgentTestConnection({
-          id: saved.id, experimentId: experimentId, baseUrl: saved.baseUrl, botId: saved.botId,
+          id: saved.id, experimentId: experimentId, provider: saved.provider, baseUrl: saved.baseUrl, botId: saved.botId,
         });
         let test;
         try {
-          await testCozeConnection({ ...connection, timeoutMs: 20_000 });
-          test = { ok: true, message: "配置已保存，数据库 Token 连接成功。" };
+          if (connection.provider === "dify") await testDifyConnection({ ...connection, timeoutMs: 20_000 });
+          else await testCozeConnection({ ...connection, timeoutMs: 20_000 });
+          test = { ok: true, message: "配置已保存，数据库 API Key 连接成功。" };
         } catch (error) {
-          test = { ok: false, message: "配置已保存，但连接失败：" + formatAgentTestFailure(error, { secret: connection.token }) };
+          test = { ok: false, message: "配置已保存，但连接失败：" + formatAgentTestFailure(error, { secret: connection.token, provider: connection.provider }) };
         }
         return NextResponse.json({ control: await getAgentControl(experimentId), test });
       }

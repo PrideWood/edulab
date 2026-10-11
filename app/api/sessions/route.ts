@@ -119,6 +119,7 @@ export async function POST(request: Request) {
       const snapshot = {
         ...baseSnapshot,
         ai: {
+          provider: assignedAgent.provider,
           baseUrl: assignedAgent.baseUrl,
           botId: assignedAgent.botId,
           agentId: assignedAgent.agentId,
@@ -150,7 +151,7 @@ export async function POST(request: Request) {
     const profile = await getParticipantProfile(created.participantId);
 
     const response = NextResponse.json({
-      session: { id: publicId, status: "active", startedAt: startedAt.toISOString(), lastActivityAt: startedAt.toISOString(), participantCode: created.participantCode, cozeConversationId: null, experimentRunId: created.assignedAgent.runId, agentId: created.assignedAgent.agentId },
+      session: { id: publicId, status: "active", startedAt: startedAt.toISOString(), lastActivityAt: startedAt.toISOString(), participantCode: created.participantCode, cozeConversationId: null, provider: created.assignedAgent.provider, difyConversationId: null, experimentRunId: created.assignedAgent.runId, agentId: created.assignedAgent.agentId },
       experiment: created.snapshot.experiment,
       draft: { text: "", revision: 0 }, messages: [], participantProfile: profile, pending: false, failedRequest: null,
       controls: {

@@ -22,6 +22,9 @@ export const transcriptInputSchema = z.object({
     clientRequestId: z.uuid().nullable(),
     cozeMessageId: z.string().min(1).max(200).nullable(),
     cozeChatId: z.string().min(1).max(200).nullable(),
+    provider: z.enum(["coze", "dify"]).optional(),
+    providerMessageId: z.string().min(1).max(200).nullable().optional(),
+    providerTaskId: z.string().min(1).max(200).nullable().optional(),
   })).max(2000),
 });
 
@@ -200,7 +203,12 @@ export async function persistTranscript(
       content: authoritativeContent, client_request_id: message.role === "user" ? message.clientRequestId : null,
       coze_message_id: message.cozeMessageId, coze_chat_id: request.coze_chat_id,
       sent_at: sentAt, reply_started_at: replyStartedAt, reply_completed_at: replyCompletedAt,
-      latency_ms: latencyMs, metadata: { storage_mode: options.storageMode, browser_sent_at: message.sentAt },
+      latency_ms: latencyMs, metadata: { storage_mode: options.storageMode, browser_sent_at: message.sentAt,
+        ...(request.metadata.provider === "dify" ? {
+          provider: "dify", provider_message_id: message.role === "assistant" ? request.metadata.dify_message_id ?? null : null,
+          provider_task_id: request.metadata.dify_task_id ?? null,
+        } : {}),
+      },
     });
   }
   if (messageRows.length) {

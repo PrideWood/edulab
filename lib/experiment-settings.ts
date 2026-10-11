@@ -24,7 +24,7 @@ export interface ExperimentSessionSnapshot {
   experiment: ExperimentConfig;
   limits: ExperimentLimits;
   storage: { databaseMessagesEnabled: boolean };
-  ai: { baseUrl: string; botId: string; agentId?: string; runId?: string; internalName?: string };
+  ai: { provider?: "coze" | "dify"; baseUrl: string; botId: string; agentId?: string; runId?: string; internalName?: string };
 }
 
 interface SettingsRow {
@@ -120,17 +120,20 @@ export function buildSessionSnapshot(settings: ExperimentSettings): ExperimentSe
 
 export async function getRuntimeAiConfig(experimentId: string, snapshot: ExperimentSessionSnapshot | null) {
   if (snapshot?.ai.agentId) {
-    const agents = await query<{ coze_token_ciphertext: string | null; coze_token_iv: string | null; coze_token_tag: string | null }>(
-      `SELECT coze_token_ciphertext, coze_token_iv, coze_token_tag FROM ai_agent_configs WHERE id=$1 AND experiment_id=$2`,
+    const agents = await query<{ provider?: "coze" | "dify"; coze_token_ciphertext: string | null; coze_token_iv: string | null; coze_token_tag: string | null }>(
+      `SELECT provider, coze_token_ciphertext, coze_token_iv, coze_token_tag FROM ai_agent_configs WHERE id=$1 AND experiment_id=$2`,
       [snapshot.ai.agentId, experimentId]);
     const agent = agents.rows[0];
     if (!agent) throw new Error("ASSIGNED_AGENT_NOT_FOUND");
+    const provider = snapshot.ai.provider ?? "coze";
+    if (provider !== (agent.provider ?? "coze")) throw new Error("ASSIGNED_PROVIDER_MISMATCH");
     const token = agent.coze_token_ciphertext && agent.coze_token_iv && agent.coze_token_tag
       ? decryptSecret({ ciphertext: agent.coze_token_ciphertext, iv: agent.coze_token_iv, tag: agent.coze_token_tag })
-      : process.env.COZE_API_TOKEN ?? "";
-    return { token, botId: snapshot.ai.botId, baseUrl: snapshot.ai.baseUrl };
+      : provider === "coze" ? process.env.COZE_API_TOKEN ?? "" : "";
+    return { provider, token, botId: snapshot.ai.botId, baseUrl: snapshot.ai.baseUrl };
   }
 
+  if (snapshot?.ai.provider === "dify") throw new Error("ASSIGNED_AGENT_NOT_FOUND");
   let row: SettingsRow | undefined;
   try { row = (await query<SettingsRow>(SETTINGS_SELECT, [experimentId])).rows[0]; } catch { /* Environment fallback below. */ }
   let token = process.env.COZE_API_TOKEN ?? "";
@@ -138,6 +141,7 @@ export async function getRuntimeAiConfig(experimentId: string, snapshot: Experim
     token = decryptSecret({ ciphertext: row.coze_token_ciphertext, iv: row.coze_token_iv, tag: row.coze_token_tag });
   }
   return {
+    provider: "coze" as const,
     token,
     botId: snapshot?.ai.botId || row?.coze_bot_id || process.env.COZE_BOT_ID || "",
     baseUrl: snapshot?.ai.baseUrl || row?.coze_api_base_url || process.env.COZE_API_BASE_URL || "https://api.coze.com",

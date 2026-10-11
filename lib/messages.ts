@@ -17,8 +17,9 @@ export async function listMessages(sessionId: string): Promise<StoredMessage[]> 
     sent_at: string; reply_started_at: string | null; reply_completed_at: string | null;
     latency_ms: number | null; client_request_id: string | null; coze_message_id: string | null;
     coze_chat_id: string | null; status: "completed";
+    metadata: { provider?: "dify"; provider_message_id?: string | null; provider_task_id?: string | null };
   }>(`SELECT id, sequence_no, turn_index, role, content, sent_at, reply_started_at,
-             reply_completed_at, latency_ms, client_request_id, coze_message_id, coze_chat_id, status
+             reply_completed_at, latency_ms, client_request_id, coze_message_id, coze_chat_id, status, metadata
       FROM messages WHERE session_id = $1 ORDER BY sequence_no ASC`, [sessionId]);
   return result.rows.map((row) => ({
     id: row.id, sequenceNo: row.sequence_no, turnIndex: row.turn_index, role: row.role, content: row.content,
@@ -26,12 +27,14 @@ export async function listMessages(sessionId: string): Promise<StoredMessage[]> 
     replyCompletedAt: row.reply_completed_at, latencyMs: row.latency_ms,
     clientRequestId: row.client_request_id, cozeMessageId: row.coze_message_id,
     cozeChatId: row.coze_chat_id, status: row.status,
+    ...(row.metadata?.provider === "dify" ? { provider: "dify" as const,
+      providerMessageId: row.metadata.provider_message_id ?? null, providerTaskId: row.metadata.provider_task_id ?? null } : {}),
   }));
 }
 
 export async function getLatestFailedRequest(sessionId: string) {
-  const result = await query<{ content: string; status: string; coze_chat_id: string | null; error_code: string | null; error_message: string | null }>(
-    `SELECT COALESCE(r.metadata->>'user_content', m.content) AS content, r.status, r.coze_chat_id, r.error_code, r.error_message
+  const result = await query<{ content: string; status: string; coze_chat_id: string | null; error_code: string | null; error_message: string | null; provider?: string }>(
+    `SELECT COALESCE(r.metadata->>'user_content', m.content) AS content, r.status, r.coze_chat_id, r.error_code, r.error_message, r.metadata->>'provider' AS provider
      FROM chat_requests r LEFT JOIN messages m ON m.id = r.user_message_id
      WHERE r.session_id = $1 AND r.status IN ('failed', 'uncertain')
        AND NOT EXISTS (
@@ -43,12 +46,12 @@ export async function getLatestFailedRequest(sessionId: string) {
   );
   const row = result.rows[0];
   if (!row?.content) return null;
-  if (row.status === "uncertain" && !row.coze_chat_id) {
+  if (row.status === "uncertain" && (!row.coze_chat_id || row.provider === "dify")) {
     return { content: row.content, message: "这条消息的 AI 请求结果无法确认，消息记录仍保留。请联系教师核验，暂勿重复发送。", retryable: false };
   }
   const internalCodes = new Set(["UNEXPECTED_ERROR", "COZE_CREATE_UNCERTAIN", "UNKNOWN_AFTER_CREATE", "RECOVERY_TIMEOUT", "COZE_TIMEOUT"]);
   const message = row.error_code && row.error_message && !internalCodes.has(row.error_code)
-    ? `Coze 返回错误（${row.error_code}）：${row.error_message}`
+    ? `${row.provider === "dify" ? "Dify" : "Coze"} 返回错误（${row.error_code}）：${row.error_message}`
     : "上一条消息未能获得 AI 回复，你可以重新发送。";
   return { content: row.content, message, retryable: true };
 }

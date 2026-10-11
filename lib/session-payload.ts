@@ -29,6 +29,8 @@ export async function buildSessionPayload(session: AuthenticatedSession, options
       id: session.publicId, status: state.status, startedAt: session.startedAt,
       lastActivityAt: session.lastActivityAt, participantCode: session.participantCode,
       cozeConversationId: session.cozeConversationId,
+      provider: session.configSnapshot?.ai.provider ?? "coze",
+      difyConversationId: session.difyConversationId ?? null,
       experimentRunId: session.configSnapshot?.ai.runId ?? null,
       agentId: session.configSnapshot?.ai.agentId ?? null,
     },

@@ -180,7 +180,7 @@ test("Coze failures preserve the provider error instead of parsing a missing mes
   assert.match(cozeSource, /throw failure/);
   assert.match(messageRoute, /error instanceof CozeChatError/);
   assert.match(messageRoute, /formatCozeError\(error\)/);
-  assert.match(messagesSource, /Coze 返回错误/);
+  assert.match(messagesSource, /row\.provider === "dify" \? "Dify" : "Coze"/);
 });
 
 test("student device switching finalizes the participant and clears only the participant session", async () => {
@@ -312,9 +312,9 @@ test("admin agent configuration uses a compact editable table", async () => {
   const adminStyles = await readFile("app/admin/admin.css", "utf8");
   assert.match(adminWorkspace, /className="agent-table"/);
   assert.match(adminWorkspace, /className="admin-content"/);
-  assert.match(adminWorkspace, /<th>API 地址<\/th>/);
+  assert.match(adminWorkspace, /<th>API Base URL<\/th>/);
   assert.match(adminWorkspace, /<th>Bot ID<\/th>/);
-  assert.match(adminWorkspace, /<th>API Token<\/th>/);
+  assert.match(adminWorkspace, /<th>API Key<\/th>/);
   assert.match(adminWorkspace, /function AgentTableRow/);
   assert.match(adminWorkspace, /agent-row-save/);
   assert.match(adminWorkspace, /agent-row-delete/);

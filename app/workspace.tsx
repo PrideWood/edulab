@@ -10,6 +10,7 @@ import { buildTranscriptExport, safeExportSegment } from "@/lib/transcript-expor
 import { uploadTranscript } from "@/lib/transcript-upload";
 import { FullscreenController, useFullscreenState } from "./fullscreen-controller";
 import { BrandLogo } from "./brand-logo";
+import { readChatStream } from "@/lib/chat-stream";
 
 const OUTBOX_PREFIX = "edulab_pending_message:";
 const TRANSCRIPT_PREFIX = "edulab_transcript:";
@@ -88,6 +89,7 @@ function transcriptUploadBody(messages: StoredMessage[]) {
       clientRequestId: message.clientRequestId,
       cozeMessageId: message.cozeMessageId,
       cozeChatId: message.cozeChatId,
+      ...(message.provider === "dify" ? {provider: message.provider, providerMessageId: message.providerMessageId ?? null, providerTaskId: message.providerTaskId ?? null} : {}),
     })),
   });
 }
@@ -145,7 +147,7 @@ function timeLabel(value: string) {
   return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value));
 }
 
-function MessageBody({ message }: { message: StoredMessage }) {
+function MessageBody({ message }: { message: Pick<StoredMessage, "role" | "content"> }) {
   if (message.role === "user") return <>{message.content}</>;
   return (
     <div className="markdown-content">
@@ -173,6 +175,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
   const [clock, setClock] = useState(0);
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState(false);
+  const [streamingReply, setStreamingReply] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [storageError, setStorageError] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -300,6 +303,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
     setMessages(mergedMessages);
     writeLocalTranscript(payload.session, mergedMessages, experimentId);
     setPending(payload.pending);
+    setStreamingReply("");
     setControls(payload.controls);
     if (payload.failedRequest) {
       setError(payload.failedRequest.message);
@@ -442,6 +446,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
     setRetryContent(null);
     setUploadStatus("");
     setPending(true);
+    setStreamingReply("");
     const turnIndex = Math.max(0, ...messageLedgerRef.current.map((message) => message.turnIndex ?? 0)) + 1;
     const userSequence = Math.max(0, ...messageLedgerRef.current.filter((message) => message.sequenceNo < Number.MAX_SAFE_INTEGER).map((message) => message.sequenceNo)) + 1;
     try { localStorage.setItem(outboxKey(activeSessionId), JSON.stringify({ content, clientRequestId })); }
@@ -465,9 +470,12 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
       const response = await fetch(apiUrl("/api/messages"), {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content, clientRequestId, turnIndex, userSequence }),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(65000),
       });
-      const payload = await readResponse(response);
+      const payload = response.ok && response.headers.get("content-type")?.includes("text/event-stream")
+        ? await readChatStream(response, { sessionId: activeSessionId, clientRequestId,
+          onAnswer: answer => { if (sessionIdRef.current === activeSessionId) setStreamingReply(answer); } })
+        : await readResponse(response);
       if (sessionIdRef.current !== activeSessionId || payload.session.id !== activeSessionId) {
         await releaseInvalidatedSession();
         return;
@@ -489,6 +497,11 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
         const recovered = await readResponse(await fetch(apiUrl("/api/sessions"), { cache: "no-store" }));
         applyPayload(recovered);
         if (recovered.pending) await pollUntilSettled();
+        const recoveredUser = messageLedgerRef.current.find(message => message.clientRequestId === clientRequestId);
+        if (recoveredUser && messageLedgerRef.current.some(message => message.role === "assistant" && message.turnIndex === recoveredUser.turnIndex)) {
+          setRetryContent(null);
+          setError(null);
+        }
         if (!recovered.messages.some(message => message.clientRequestId === clientRequestId)) {
           draftRef.current.text = content;
           setText(content);
@@ -499,7 +512,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
         // Keep the outbox and input for a later retry; do not claim cloud persistence.
       }
     }
-    } finally { sendingRef.current = false; }
+    } finally { sendingRef.current = false; setStreamingReply(""); }
   }, [applyPayload, pollUntilSettled, releaseInvalidatedSession, apiUrl, experimentId]);
 
   useEffect(() => {
@@ -597,7 +610,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
     const container = messagesViewRef.current;
     if (!container) return;
     container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
-  }, [messages, pending]);
+  }, [messages, pending, streamingReply]);
   useEffect(() => {
     if (!controls?.endsAt || session?.status !== "active") return;
     const initial = window.setTimeout(() => setClock(Date.now()), 0);
@@ -903,6 +916,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
             clientRequestId: message.clientRequestId,
             cozeMessageId: message.cozeMessageId,
             cozeChatId: message.cozeChatId,
+            ...(message.provider === "dify" ? {provider: message.provider, providerMessageId: message.providerMessageId ?? null, providerTaskId: message.providerTaskId ?? null} : {}),
           })),
         };
       }),
@@ -1002,7 +1016,9 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
             <p className="day-label">{session ? `开始于 ${timeLabel(session.startedAt)}` : "新对话"}</p>
             {messages.length === 0 && !loading && <div className="conversation-welcome" role="note"><p className="welcome-title">你好，我是{experiment.assistantName}。</p><p className="welcome-copy">{experiment.welcome}</p></div>}
             {messages.map((message) => <div className={`message-row ${message.role}`} key={message.id}><div className="message-stack"><div className="bubble"><MessageBody message={message} /></div><div className={`message-time ${message.role}`}>{timeLabel(message.sentAt)}</div></div></div>)}
-            {pending && <div className="message-row assistant"><div className="bubble typing" aria-label="AI 正在回复"><span /><span /><span /></div></div>}
+            {pending && (streamingReply
+              ? <div className="message-row assistant"><div className="message-stack"><div className="bubble"><MessageBody message={{ role: "assistant", content: streamingReply }} /></div></div></div>
+              : <div className="message-row assistant"><div className="bubble typing" aria-label="AI 正在回复"><span /><span /><span /></div></div>)}
             {storageError && <div className="error-card" role="alert">本机保存空间不可用，请先下载交互记录并联系实验人员，暂勿刷新或关闭页面。</div>}
             {error && <div className="error-card" role="alert"><span>{error}</span>{retryContent && <button onClick={() => retryMessage(retryContent)} disabled={pending}>重新发送</button>}</div>}
             {loading && <div className="loading-note">正在准备实验会话…</div>}

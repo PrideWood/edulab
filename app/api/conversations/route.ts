@@ -22,6 +22,7 @@ const inputSchema = z.discriminatedUnion("action", [
 interface SessionRow {
   id: string; public_id: string; participant_id: string; experiment_id: string;
   status: "active" | "completed"; coze_user_id: string; coze_conversation_id: string | null;
+  dify_conversation_id: string | null;
   active_request_id: string | null; started_at: string; last_activity_at: string;
   config_version: number | null; config_snapshot: ExperimentSessionSnapshot | null;
   session_secret_hash: string;
@@ -32,6 +33,7 @@ function authenticatedFromRow(row: SessionRow, participantCode: string): Authent
     id: row.id, publicId: row.public_id, participantId: row.participant_id,
     participantCode, experimentId: row.experiment_id, status: row.status,
     cozeUserId: row.coze_user_id, cozeConversationId: row.coze_conversation_id,
+    difyConversationId: row.dify_conversation_id ?? null,
     activeRequestId: row.active_request_id, startedAt: row.started_at,
     lastActivityAt: row.last_activity_at, configVersion: row.config_version,
     configSnapshot: row.config_snapshot, sessionSecretHash: row.session_secret_hash,
@@ -99,7 +101,7 @@ export async function POST(request: Request) {
              experiment_run_id, agent_id)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$9,'{"conversation_title":"新对话","transcript_authority":"server"}'::jsonb,$10,$11)
            RETURNING id, public_id, participant_id, experiment_id, status, coze_user_id,
-             coze_conversation_id, active_request_id, started_at, last_activity_at,
+             coze_conversation_id, dify_conversation_id, active_request_id, started_at, last_activity_at,
              config_version, config_snapshot, session_secret_hash`,
           [id, publicId, current.participantId, current.experimentId, current.sessionSecretHash,
             `edulab_${publicId.replaceAll("-", "")}`, snapshot.version, JSON.stringify(snapshot), now,
@@ -111,7 +113,7 @@ export async function POST(request: Request) {
     } else {
       const result = await query<SessionRow>(
         `SELECT id, public_id, participant_id, experiment_id, status, coze_user_id,
-           coze_conversation_id, active_request_id, started_at, last_activity_at,
+           coze_conversation_id, dify_conversation_id, active_request_id, started_at, last_activity_at,
            config_version, config_snapshot, session_secret_hash
          FROM experiment_sessions
          WHERE public_id = $1 AND participant_id = $2 AND experiment_id = $3 AND session_secret_hash = $4`,

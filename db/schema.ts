@@ -15,5 +15,8 @@ export interface StoredMessage {
   clientRequestId: string | null;
   cozeMessageId: string | null;
   cozeChatId: string | null;
+  provider?: "coze" | "dify";
+  providerMessageId?: string | null;
+  providerTaskId?: string | null;
   status: "completed";
 }

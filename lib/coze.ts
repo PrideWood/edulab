@@ -98,6 +98,7 @@ export async function beginChatRequest(session: AuthenticatedSession, clientRequ
     );
     const turnIndex = turn.rows[0].turn_index;
     const metadata = {
+      provider: session.configSnapshot?.ai.provider ?? "coze",
       database_messages_enabled: databaseMessagesEnabled,
       storage_mode: "server_autosave",
       user_sequence: locked.rows[0].sequence_no,
@@ -492,6 +493,10 @@ async function loadUnstoredRequestMessages(session: AuthenticatedSession, reques
 }
 
 export async function getUnstoredCompletedRequestMessages(session: AuthenticatedSession, request: RequestRecord) {
+  if (session.configSnapshot?.ai.provider === "dify") {
+    const { getDifyCompletedRequestMessages } = await import("./dify-chat");
+    return getDifyCompletedRequestMessages(session, request);
+  }
   return loadUnstoredRequestMessages(session, request);
 }
 
@@ -506,6 +511,10 @@ export async function markRequestFailed(sessionId: string, requestId: string, co
 }
 
 export async function recoverPendingRequest(session: AuthenticatedSession): Promise<{ pending: boolean; messages: StoredMessage[] }> {
+  if (session.configSnapshot?.ai.provider === "dify") {
+    const { recoverDifyPendingRequest } = await import("./dify-chat");
+    return recoverDifyPendingRequest(session);
+  }
   const pending = await query<{ id: string; client_request_id: string; turn_index: number; coze_chat_id: string | null; coze_conversation_id: string | null; started_at: Date; requested_at: string; metadata: Record<string, unknown> }>(
     `SELECT id, client_request_id, turn_index, coze_chat_id, coze_conversation_id, started_at, requested_at, metadata FROM chat_requests
      WHERE session_id = $1 AND status = 'in_progress' ORDER BY started_at ASC LIMIT 1`,

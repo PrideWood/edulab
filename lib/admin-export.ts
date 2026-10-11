@@ -34,6 +34,7 @@ interface SessionExportRow {
   started_at: Date | string;
   last_activity_at: Date | string;
   coze_conversation_id: string | null;
+  dify_conversation_id: string | null;
   experiment_run_id: string | null;
   agent_id: string | null;
   config_snapshot: unknown;
@@ -53,6 +54,7 @@ interface MessageExportRow {
   client_request_id: string | null;
   coze_message_id: string | null;
   coze_chat_id: string | null;
+  metadata?: { provider?: "dify"; provider_message_id?: string | null; provider_task_id?: string | null };
 }
 
 function iso(value: Date | string) {
@@ -93,6 +95,7 @@ function storedMessage(row: MessageExportRow): StoredMessage {
     clientRequestId: row.client_request_id,
     cozeMessageId: row.coze_message_id,
     cozeChatId: row.coze_chat_id,
+    ...(row.metadata?.provider === "dify" ? {provider: "dify" as const, providerMessageId: row.metadata.provider_message_id ?? null, providerTaskId: row.metadata.provider_task_id ?? null} : {}),
     status: "completed",
   };
 }
@@ -146,7 +149,7 @@ export async function buildInteractionArchive(input: {
     const participants = await selectedParticipants(client, input.experimentId, input.participantIds, input.runId);
     const sessions = (await client.query<SessionExportRow>(
       `SELECT id, public_id, participant_id, status, started_at, last_activity_at,
-         coze_conversation_id, experiment_run_id, agent_id, config_snapshot
+         coze_conversation_id, dify_conversation_id, experiment_run_id, agent_id, config_snapshot
        FROM experiment_sessions
        WHERE experiment_id = $1 AND participant_id = ANY($2::uuid[]) AND ($3::uuid IS NULL OR experiment_run_id=$3)
        ORDER BY participant_id, started_at, id`,
@@ -156,7 +159,7 @@ export async function buildInteractionArchive(input: {
     const messages = sessionIds.length === 0 ? [] : (await client.query<MessageExportRow>(
       `SELECT id, session_id, sequence_no, turn_index, role, content, sent_at,
          reply_started_at, reply_completed_at, latency_ms, client_request_id,
-         coze_message_id, coze_chat_id
+         coze_message_id, coze_chat_id, metadata
        FROM messages
        WHERE session_id = ANY($1::uuid[])
        ORDER BY session_id, sequence_no, sent_at, id`,
@@ -203,6 +206,8 @@ export async function buildInteractionArchive(input: {
             lastActivityAt: iso(session.last_activity_at),
             participantCode: participant.external_code,
             cozeConversationId: session.coze_conversation_id,
+            provider: snapshot?.ai.provider ?? "coze",
+            difyConversationId: session.dify_conversation_id ?? null,
             experimentRunId: session.experiment_run_id,
             agentId: session.agent_id,
           },
