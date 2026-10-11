@@ -11,12 +11,16 @@ export interface ExperimentLimits {
   sessionDurationMinutes: number | null;
 }
 
+export interface HistoryMemorySettings { enabled: boolean; maxInputTokens: number }
+export const DEFAULT_HISTORY_MEMORY: HistoryMemorySettings = { enabled:true,maxInputTokens:6000 };
+
 export interface ExperimentSettings {
   version: number;
   experiment: ExperimentConfig;
   limits: ExperimentLimits;
   storage: { databaseMessagesEnabled: boolean };
   ai: { baseUrl: string; botId: string; hasToken: boolean };
+  memory?: HistoryMemorySettings;
 }
 
 export interface ExperimentSessionSnapshot {
@@ -25,6 +29,7 @@ export interface ExperimentSessionSnapshot {
   limits: ExperimentLimits;
   storage: { databaseMessagesEnabled: boolean };
   ai: { provider?: "coze" | "dify"; baseUrl: string; botId: string; agentId?: string; runId?: string; internalName?: string };
+  memory?: HistoryMemorySettings;
 }
 
 interface SettingsRow {
@@ -49,6 +54,8 @@ interface SettingsRow {
   coze_token_ciphertext: string | null;
   coze_token_iv: string | null;
   coze_token_tag: string | null;
+  history_memory_enabled?: boolean;
+  history_memory_max_input_tokens?: number;
 }
 
 function fallbackSettings(experimentId = defaultExperiment.id): ExperimentSettings {
@@ -57,6 +64,7 @@ function fallbackSettings(experimentId = defaultExperiment.id): ExperimentSettin
     experiment: { ...defaultExperiment, id: experimentId, requirements: [...defaultExperiment.requirements] },
     limits: { maxUserMessages: null, maxMessageChars: 2000, sessionDurationMinutes: null },
     storage: { databaseMessagesEnabled: true },
+    memory: { ...DEFAULT_HISTORY_MEMORY },
     ai: {
       baseUrl: process.env.COZE_API_BASE_URL ?? "https://api.coze.com",
       botId: process.env.COZE_BOT_ID ?? "",
@@ -81,6 +89,7 @@ function mapRow(row: SettingsRow): ExperimentSettings {
       sessionDurationMinutes: row.session_duration_minutes,
     },
     storage: { databaseMessagesEnabled: row.database_message_storage_enabled },
+    memory: { enabled:row.history_memory_enabled ?? true,maxInputTokens:row.history_memory_max_input_tokens ?? 6000 },
     ai: {
       baseUrl: row.coze_api_base_url,
       botId: row.coze_bot_id ?? "",
@@ -93,7 +102,7 @@ const SETTINGS_SELECT = `SELECT experiment_id, version, task_visible, chat_enabl
   task_introduction, task_requirements, task_material, task_hint, assistant_name, welcome_message,
   max_user_messages, max_message_chars, session_duration_minutes, database_message_storage_enabled,
   coze_api_base_url, coze_bot_id,
-  coze_token_ciphertext, coze_token_iv, coze_token_tag
+  coze_token_ciphertext, coze_token_iv, coze_token_tag, history_memory_enabled, history_memory_max_input_tokens
   FROM experiment_settings WHERE experiment_id = $1`;
 
 export async function getExperimentSettings(experimentId = defaultExperiment.id, fallback = true) {
@@ -114,6 +123,7 @@ export function buildSessionSnapshot(settings: ExperimentSettings): ExperimentSe
     experiment: { ...settings.experiment, requirements: [...settings.experiment.requirements] },
     limits: { ...settings.limits },
     storage: { ...settings.storage },
+    memory: { ...(settings.memory ?? DEFAULT_HISTORY_MEMORY) },
     ai: { baseUrl: settings.ai.baseUrl, botId: settings.ai.botId },
   };
 }
@@ -153,6 +163,7 @@ export interface SaveExperimentSettingsInput {
   limits: ExperimentLimits;
   storage: { databaseMessagesEnabled: boolean };
   ai: { baseUrl: string; botId: string; token?: string };
+  memory?: HistoryMemorySettings;
 }
 
 export async function saveExperimentSettings(input: SaveExperimentSettingsInput, adminUserId: string) {
@@ -161,6 +172,7 @@ export async function saveExperimentSettings(input: SaveExperimentSettingsInput,
     const before = current.rows[0] ? mapRow(current.rows[0]) : null;
     const encrypted = input.ai.token?.trim() ? encryptSecret(input.ai.token.trim()) : null;
     const version = (current.rows[0]?.version ?? 0) + 1;
+    const memory = input.memory ?? before?.memory ?? DEFAULT_HISTORY_MEMORY;
     const values = [
       input.experiment.id, version, input.experiment.taskVisible, input.experiment.chatEnabled,
       input.experiment.label, input.experiment.title, input.experiment.introduction,
@@ -172,14 +184,15 @@ export async function saveExperimentSettings(input: SaveExperimentSettingsInput,
       encrypted?.iv ?? current.rows[0]?.coze_token_iv ?? null,
       encrypted?.tag ?? current.rows[0]?.coze_token_tag ?? null,
       adminUserId,
+      memory.enabled,memory.maxInputTokens,
     ];
     await client.query(
       `INSERT INTO experiment_settings (experiment_id, version, task_visible, chat_enabled, task_label,
         task_title, task_introduction, task_requirements, task_material, task_hint, assistant_name,
         welcome_message, max_user_messages, max_message_chars, session_duration_minutes,
         database_message_storage_enabled, coze_api_base_url, coze_bot_id, coze_token_ciphertext,
-        coze_token_iv, coze_token_tag, updated_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+        coze_token_iv, coze_token_tag, updated_by, history_memory_enabled, history_memory_max_input_tokens)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
        ON CONFLICT (experiment_id) DO UPDATE SET version = EXCLUDED.version,
         task_visible = EXCLUDED.task_visible, chat_enabled = EXCLUDED.chat_enabled,
         task_label = EXCLUDED.task_label, task_title = EXCLUDED.task_title,
@@ -189,6 +202,8 @@ export async function saveExperimentSettings(input: SaveExperimentSettingsInput,
         max_user_messages = EXCLUDED.max_user_messages, max_message_chars = EXCLUDED.max_message_chars,
         session_duration_minutes = EXCLUDED.session_duration_minutes,
         database_message_storage_enabled = EXCLUDED.database_message_storage_enabled,
+        history_memory_enabled = EXCLUDED.history_memory_enabled,
+        history_memory_max_input_tokens = EXCLUDED.history_memory_max_input_tokens,
         coze_api_base_url = EXCLUDED.coze_api_base_url, coze_bot_id = EXCLUDED.coze_bot_id,
         coze_token_ciphertext = EXCLUDED.coze_token_ciphertext, coze_token_iv = EXCLUDED.coze_token_iv,
         coze_token_tag = EXCLUDED.coze_token_tag, updated_by = EXCLUDED.updated_by, updated_at = now()`,

@@ -198,6 +198,9 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
   const [resumeCode, setResumeCode] = useState("");
   const [resumeIdentity, setResumeIdentity] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
+  const [codeNoticeOpen,setCodeNoticeOpen] = useState(false);
+  const [newInteractionOpen,setNewInteractionOpen] = useState(false);
+  const registrationRequestRef = useRef<string | null>(null);
   const [draftStatus, setDraftStatus] = useState("");
   const [draftConflict, setDraftConflict] = useState(false);
   const draftRef = useRef({ sessionId: "", text: "", savedText: "", revision: 0, conflict: false });
@@ -227,6 +230,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
     setControls(null);
     setConversations([]);
     setParticipantProfile(null);
+    setCodeNoticeOpen(false);
+    setNewInteractionOpen(false);
     setProfileFullName("");
     setProfileStudentNumber("");
     setText("");
@@ -785,19 +790,26 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
 
   async function saveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!profileStudentNumber.trim() && (!participantProfile || participantProfile.studentNumber)) {
-      setProfileError("请填写学号，姓名可以不填。");
+    if (!profileFullName.trim()) {
+      setProfileError("请填写姓名，学号可以不填。");
       return;
     }
     setProfileSaving(true);
     setProfileError("");
     try {
+      const registrationKey = `edulab_registration:${entryToken ?? experimentId}`;
+      if (!session && !registrationRequestRef.current) {
+        let requestId: string | null = null;
+        try { requestId = localStorage.getItem(registrationKey); } catch { /* The in-memory retry ID still prevents double clicks. */ }
+        registrationRequestRef.current = requestId && /^[0-9a-f-]{36}$/i.test(requestId) ? requestId : crypto.randomUUID();
+        try { localStorage.setItem(registrationKey,registrationRequestRef.current); } catch { setStorageError(true); }
+      }
       const response = await fetch(apiUrl(session ? "/api/participant-profile" : "/api/sessions"), {
         method: session ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(session
-          ? { fullName: profileFullName, studentNumber: profileStudentNumber }
-          : { profile: { fullName: profileFullName, studentNumber: profileStudentNumber } }),
+          ? { fullName: profileFullName, studentNumber: profileStudentNumber,revision:participantProfile?.revision ?? 0 }
+          : { profile: { fullName: profileFullName, studentNumber: profileStudentNumber },registrationRequestId:registrationRequestRef.current }),
       });
       const data = await response.json();
       if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "参与者信息保存失败。");
@@ -805,7 +817,10 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
         setParticipantProfile(data.profile as ParticipantProfile);
       } else {
         applyPayload(data as SessionPayload);
-        await refreshConversations();
+        registrationRequestRef.current = null;
+        try { localStorage.removeItem(registrationKey); } catch { /* The server record has committed. */ }
+        setCodeNoticeOpen(true);
+        await refreshConversations().catch(() => setError("身份已创建，但交互列表暂时加载失败，请刷新后继续。"));
       }
       setProfileOpen(false);
     } catch (profileSaveError) {
@@ -817,7 +832,26 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
     } finally { setProfileSaving(false); }
   }
 
-  async function changeConversation(action: { action: "create" } | { action: "switch"; sessionId: string }) {
+  async function startNewInteraction(confirmed = false) {
+    if (!session || pending || conversationBusy) return;
+    const key = `edulab_new_interaction:${entryToken ?? experimentId}:${session.participantCode}`;
+    let action: {action:"start_interaction";clientRequestId:string;expectedSessionId:string} | null = null;
+    try {
+      const saved = JSON.parse(localStorage.getItem(key) ?? "null");
+      if (saved?.action==="start_interaction" && /^[0-9a-f-]{36}$/i.test(saved.clientRequestId)
+        && /^[0-9a-f-]{36}$/i.test(saved.expectedSessionId)) action=saved;
+    } catch { /* Create a retry ID if browser storage is unavailable. */ }
+    if (!action) {
+      if (!confirmed) { setNewInteractionOpen(true); return; }
+      action={action:"start_interaction",clientRequestId:crypto.randomUUID(),expectedSessionId:session.id};
+      try { localStorage.setItem(key,JSON.stringify(action)); } catch { setStorageError(true); }
+    }
+    setNewInteractionOpen(false);
+    await changeConversation(action);
+  }
+
+  async function changeConversation(action: { action: "create" } | { action: "switch"; sessionId: string }
+    | {action:"start_interaction";clientRequestId:string;expectedSessionId:string}) {
     if (pending || conversationBusy || uploadRef.current || (action.action === "switch" && action.sessionId === session?.id)) return;
     setUploadStatus("");
     setConversationBusy(true);
@@ -833,12 +867,20 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
       const data = await response.json();
       if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "暂时无法切换对话。");
       applyPayload(data.payload as SessionPayload);
+      if (action.action==="start_interaction" && session) {
+        try { localStorage.removeItem(`edulab_new_interaction:${entryToken ?? experimentId}:${session.participantCode}`); } catch { /* The committed request remains idempotent. */ }
+      }
       setConversations(data.conversations as ConversationSummary[]);
       setTaskOpen(false);
     } catch (conversationError) {
       if (isInvalidSessionError(conversationError)) {
         await releaseInvalidatedSession();
         return;
+      }
+      if (action.action === "start_interaction" && session && conversationError instanceof ClientApiError
+        && ["SESSION_CHANGED", "NEWER_INTERACTION_EXISTS"].includes(conversationError.code)) {
+        try { localStorage.removeItem(`edulab_new_interaction:${entryToken ?? experimentId}:${session.participantCode}`); } catch { /* Retry after selecting the latest interaction. */ }
+        await refreshConversations().catch(() => undefined);
       }
       setError(conversationError instanceof Error ? conversationError.message : "暂时无法切换对话。");
     } finally { setConversationBusy(false); }
@@ -960,6 +1002,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
       setControls(null);
       setConversations([]);
       setParticipantProfile(null);
+      setCodeNoticeOpen(false);
+      setNewInteractionOpen(false);
       setProfileFullName("");
       setProfileStudentNumber("");
       setText("");
@@ -985,7 +1029,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
 
   const participantCodeDetails = session && participantProfile && <div className="participant-code-details">
     <p>你的实验编号</p><strong>{session.participantCode}</strong>
-    <p className="profile-hint">{controls?.databaseMessagesEnabled ? "请记住或保存该编号。意外关闭后，可用编号及原学号（或姓名）继续实验。" : "请保存编号；此实验未启用云端对话存储，请及时下载记录。"}</p>
+    <p className="profile-hint">{controls?.databaseMessagesEnabled ? "请记住或保存该编号。意外关闭后，可用编号及姓名或学号继续实验。" : "请保存编号；此实验未启用云端对话存储，请及时下载记录。"}</p>
     <button type="button" className="participant-code-copy" onClick={copyParticipantCode}>复制编号</button><span role="status">{copyStatus}</span>
   </div>;
 
@@ -997,9 +1041,9 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
           <div className="conversation-sidebar-head">
             <div className="brand sidebar-brand"><button className="brand-mark brand-toggle" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}><BrandLogo size={32} /></button>{!sidebarCollapsed && <div className="brand-name">EduLab</div>}</div>
           </div>
-          <button className="new-conversation" onClick={() => changeConversation({ action: "create" })} disabled={loading || pending || conversationBusy || !canChat}><span>＋</span>{!sidebarCollapsed && <em>新建对话</em>}</button>
+          <button className="new-conversation" onClick={() => void startNewInteraction()} disabled={loading || pending || conversationBusy || !session || !participantProfile}><span>＋</span>{!sidebarCollapsed && <em>开始新一次交互</em>}</button>
           <nav className="conversation-list">
-            {conversations.map((conversation) => <button key={conversation.id} className={conversation.id === session?.id ? "conversation-item active" : "conversation-item"} onClick={() => changeConversation({ action: "switch", sessionId: conversation.id })} disabled={pending || conversationBusy} title={conversation.title}><span className="conversation-icon">{conversation.title.slice(0, 1)}</span>{!sidebarCollapsed && <span className="conversation-copy"><strong>{conversation.title}</strong><small>{conversation.status === "completed" ? "已结束" : timeLabel(conversation.lastActivityAt)}</small></span>}</button>)}
+            {conversations.map((conversation) => <button key={conversation.id} className={conversation.id === session?.id ? "conversation-item active" : "conversation-item"} onClick={() => changeConversation({ action: "switch", sessionId: conversation.id })} disabled={pending || conversationBusy} title={`${conversation.title} · ${new Date(conversation.startedAt).toLocaleString("zh-CN")} · ${conversation.id}`}><span className="conversation-icon">{conversation.title.slice(0, 1)}</span>{!sidebarCollapsed && <span className="conversation-copy"><strong>{conversation.title}</strong><small>{conversation.status === "completed" ? "已结束 · " + new Date(conversation.startedAt).toLocaleDateString("zh-CN") : "继续 · " + new Date(conversation.startedAt).toLocaleDateString("zh-CN") + " " + timeLabel(conversation.startedAt)}</small></span>}</button>)}
           </nav>
           <button className={`participant-profile-button ${participantProfile ? "complete" : "required"}`} onClick={openParticipantProfile} title="填写或修改基本信息"><span className="participant-profile-icon" aria-hidden="true">S</span>{!sidebarCollapsed && <span className="participant-profile-copy"><strong>{participantProfile?.fullName || participantProfile?.studentNumber || "待填写"}</strong>{participantProfile?.fullName && participantProfile.studentNumber && <small>{participantProfile.studentNumber}</small>}</span>}</button>
         </aside>
@@ -1035,6 +1079,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
           </div>
         </section>
       </section>
+      {codeNoticeOpen && <div className="profile-modal-backdrop"><section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="code-notice-title"><div className="profile-modal-head"><h2 id="code-notice-title">请保存你的被试编号</h2><button type="button" onClick={() => setCodeNoticeOpen(false)} aria-label="关闭编号提醒">×</button></div>{participantCodeDetails}<p className="profile-hint">以后参加本项目时，请用此编号和姓名或学号继续。编号也可在左下角参与者信息中查看。</p><button type="button" className="profile-save" onClick={() => setCodeNoticeOpen(false)}>已记下，开始交互</button></section></div>}
+      {newInteractionOpen && <div className="profile-modal-backdrop"><section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="new-interaction-title"><div className="profile-modal-head"><h2 id="new-interaction-title">开始新的学习任务？</h2><button type="button" onClick={()=>setNewInteractionOpen(false)} aria-label="取消新交互">×</button></div><p className="profile-hint">系统会保存并结束当前这次交互，创建独立会话。你的编号、原分组和历史记录保持不变，未发送的草稿保留在原会话中。</p><button type="button" className="profile-save" onClick={()=>void startNewInteraction(true)}>确认开始新一次交互</button></section></div>}
       {profileOpen && <div className="profile-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && participantProfile) setProfileOpen(false); }}>
         <section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title">
           <div className="profile-modal-head"><div><p>参与者信息</p><h2 id="profile-title">{participantProfile ? "查看或修改基本信息" : !session && entryMode === "resume" ? "继续之前的实验" : "开始前请填写基本信息"}</h2></div>{participantProfile && <button type="button" onClick={() => setProfileOpen(false)} aria-label="关闭">×</button>}</div>
@@ -1042,14 +1088,14 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
           {!session && <div className="entry-tabs" role="group" aria-label="实验入口"><button type="button" aria-pressed={entryMode === "new"} onClick={() => { setEntryMode("new"); setProfileError(""); }} disabled={profileSaving}>首次参加实验</button><button type="button" aria-pressed={entryMode === "resume"} onClick={() => { setEntryMode("resume"); setProfileError(""); }} disabled={profileSaving}>继续之前的实验</button></div>}
           {!session && entryMode === "resume" ? <form className="profile-form" onSubmit={resumeExperiment}>
             <label><span>实验编号</span><input value={resumeCode} onChange={(event) => setResumeCode(event.target.value)} maxLength={80} autoComplete="off" placeholder="例如 P001" required /></label>
-            <label><span>身份校验</span><input value={resumeIdentity} onChange={(event) => setResumeIdentity(event.target.value)} type="password" maxLength={100} autoComplete="off" placeholder="原学号；未填学号时输入原姓名" required /></label>
-            <p className="profile-hint">为保护实验记录，请输入最初填写的学号；未填学号时使用原姓名。恢复后请使用本窗口继续。</p>
+            <label><span>身份校验</span><input value={resumeIdentity} onChange={(event) => setResumeIdentity(event.target.value)} type="password" maxLength={100} autoComplete="off" placeholder="当前姓名或学号" required /></label>
+            <p className="profile-hint">使用本项目的原编号及当前姓名或学号核验身份，恢复原分组的未完成会话。需要新的学习任务时，进入后点击“开始新一次交互”。</p>
             {profileError && <p className="profile-error" role="alert">{profileError}</p>}
             <button className="profile-save" type="submit" disabled={profileSaving}>{profileSaving ? "恢复中…" : "恢复实验"}</button>
           </form> : <form className="profile-form" onSubmit={saveProfile}>
-            <label><span>姓名</span><input value={profileFullName} onChange={(event) => setProfileFullName(event.target.value)} maxLength={100} autoComplete="name" placeholder="请输入姓名" /></label>
-            <label><span>学号</span><input value={profileStudentNumber} onChange={(event) => setProfileStudentNumber(event.target.value)} maxLength={100} autoComplete="off" placeholder="请输入学号" required={!participantProfile || Boolean(participantProfile.studentNumber)} /></label>
-            <p className="profile-hint">学号用于核对实验记录，姓名可以不填。请使用研究者要求的信息。</p>
+            <label><span>姓名</span><input value={profileFullName} onChange={(event) => setProfileFullName(event.target.value)} maxLength={100} autoComplete="name" placeholder="请输入姓名" required /></label>
+            <label><span>学号</span><input value={profileStudentNumber} onChange={(event) => setProfileStudentNumber(event.target.value)} maxLength={100} autoComplete="off" placeholder="学号选填" /></label>
+            <p className="profile-hint">姓名必填，允许重名；学号选填。有原编号请使用“继续之前的实验”，不要重复首次报名。</p>
             {profileError && <p className="profile-error" role="alert">{profileError}</p>}
             <button className="profile-save" type="submit" disabled={profileSaving || participantSwitching}>{profileSaving ? "保存中…" : participantProfile ? "保存修改" : "保存并开始"}</button>
             {participantProfile && <div className="next-participant"><button type="button" onClick={startNextParticipant} disabled={pending || profileSaving || participantSwitching}>{participantSwitching ? "正在保存并切换…" : "开始下一位参与者"}</button><p>仅在实验人员要求时使用。切换后当前参与者将无法在此浏览器继续操作。</p></div>}

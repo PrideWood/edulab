@@ -30,13 +30,14 @@ export async function recoverParticipant(code: string, identity: string, entry?:
       "SELECT id FROM participants WHERE experiment_id=$1 AND external_code=$2 FOR UPDATE",
       [experimentId, participantCode],
     );
-    const invalid = () => new ApiError(404, "RECOVERY_NOT_FOUND", "编号不存在或身份校验不匹配，请检查编号及原学号（未填学号时使用原姓名）。");
+    const invalid = () => new ApiError(404, "RECOVERY_NOT_FOUND", "编号不存在、身份信息不匹配或不属于此分组。请核对当前项目的编号、姓名或学号，并使用原分组链接。");
     if (!participant.rows[0]) throw invalid();
     const participantId = participant.rows[0].id;
     const profiles = await client.query("SELECT * FROM participant_identity_profiles WHERE participant_id=$1", [participantId]);
     if (!profiles.rows[0]) throw new ApiError(409, "RECOVERY_IDENTITY_REQUIRED", "此历史记录没有身份信息，请联系教师核验，无法仅凭编号恢复。");
     const profile = profileFromRow(profiles.rows[0]);
-    if (identity.trim() !== (profile.studentNumber || profile.fullName)) throw invalid();
+    const suppliedIdentity = identity.trim();
+    if (!suppliedIdentity || ![profile.studentNumber.trim(),profile.fullName.trim()].filter(Boolean).includes(suppliedIdentity)) throw invalid();
     const sessions = await client.query<{
       id: string; public_id: string; status: "active" | "completed"; coze_user_id: string;
       coze_conversation_id: string | null; active_request_id: string | null;
@@ -45,6 +46,7 @@ export async function recoverParticipant(code: string, identity: string, entry?:
       config_snapshot: ExperimentSessionSnapshot | null; session_secret_hash: string;
     }>(`SELECT s.* FROM experiment_sessions s WHERE participant_id=$1 AND experiment_id=$2 AND ($3::uuid IS NULL OR experiment_run_id=$3)
         ORDER BY COALESCE(s.public_id::text = (SELECT metadata->>'resume_session_id' FROM participants WHERE id=$1), false) DESC,
+          (s.status='active') DESC,
           last_activity_at DESC, started_at DESC, id DESC LIMIT 1 FOR UPDATE`, [participantId, experimentId, entry?.runId ?? null]);
     const row = sessions.rows[0];
     if (!row) throw invalid();
@@ -75,10 +77,11 @@ export async function recoverParticipant(code: string, identity: string, entry?:
     const secretHash = hashSecret(secret);
     // Rotate the existing family together, keeping its counts, start time,
     // conversations and assignments. Earlier browsers lose write access.
-    await client.query(`UPDATE experiment_sessions SET session_secret_hash=$3,
+    await client.query(`UPDATE experiment_sessions SET session_secret_hash=$2,
       metadata=metadata || jsonb_build_object('last_recovered_at', now(), 'recovery_count', COALESCE((metadata->>'recovery_count')::integer, 0) + 1),
-      last_activity_at=CASE WHEN id=$4 THEN now() ELSE last_activity_at END
-      WHERE participant_id=$1 AND session_secret_hash=$2`, [participantId, row.session_secret_hash, secretHash, row.id]);
+      last_activity_at=CASE WHEN id=$3 THEN now() ELSE last_activity_at END
+      WHERE participant_id=$1 AND experiment_id=$4 AND ($5::uuid IS NULL OR experiment_run_id=$5)`,
+    [participantId, secretHash, row.id, experimentId, entry?.runId ?? null]);
     const session: AuthenticatedSession = {
       id: row.id, publicId: row.public_id, participantId, participantCode,
       experimentId, status: row.status, cozeUserId: row.coze_user_id,

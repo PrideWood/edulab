@@ -192,11 +192,13 @@ test("student device switching finalizes the participant and clears only the par
   assert.doesNotMatch(resetRoute, /ACCESS_COOKIE/);
 });
 
-test("multiple conversations are isolated to the authenticated participant session family", async () => {
+test("multiple conversations are isolated to the authenticated participant, project and original group", async () => {
   const route = await readFile("app/api/conversations/route.ts", "utf8");
   const workspace = await readFile("app/workspace.tsx", "utf8");
   const limits = await readFile("lib/experiment-limits.ts", "utf8");
-  assert.match(route, /participant_id = \$2 AND experiment_id = \$3 AND session_secret_hash = \$4/);
+  assert.match(route, /participant_id = \$2 AND experiment_id = \$3/);
+  assert.match(route, /experiment_run_id IS NOT DISTINCT FROM/);
+  assert.match(route, /sessionTransaction\(current/);
   assert.match(route, /action: z\.literal\("create"\)/);
   assert.match(route, /action: z\.literal\("switch"\)/);
   assert.match(workspace, /conversation-sidebar/);

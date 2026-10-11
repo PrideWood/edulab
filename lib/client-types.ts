@@ -6,6 +6,7 @@ export interface ParticipantProfile {
   fullName: string;
   studentNumber: string;
   updatedAt: string;
+  revision?: number;
 }
 
 export interface SessionPayload {

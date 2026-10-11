@@ -11,6 +11,9 @@ export async function getSessionUsage(session: AuthenticatedSession, client?: Po
   const sql = `WITH family AS (
     SELECT id, started_at, metadata FROM experiment_sessions
     WHERE participant_id=$1 AND experiment_id=$2 AND session_secret_hash=$3
+      AND (metadata->>'interaction_id') IS NOT DISTINCT FROM
+        (SELECT metadata->>'interaction_id' FROM experiment_sessions WHERE id=$4)
+      AND experiment_run_id IS NOT DISTINCT FROM (SELECT experiment_run_id FROM experiment_sessions WHERE id=$4)
   ), legacy AS (
     SELECT (metadata->'legacy_usage_floor'->>'count')::bigint AS count,
       (metadata->'legacy_usage_floor'->>'through')::timestamptz AS through
@@ -22,7 +25,7 @@ export async function getSessionUsage(session: AuthenticatedSession, client?: Po
       + count(r.id) FILTER (WHERE legacy.through IS NOT NULL AND r.requested_at > legacy.through))::text AS count,
     min(s.started_at)::text AS started_at
     FROM family s LEFT JOIN chat_requests r ON r.session_id=s.id LEFT JOIN legacy ON true`;
-  const values = [session.participantId, session.experimentId, session.sessionSecretHash];
+  const values = [session.participantId, session.experimentId, session.sessionSecretHash, session.id];
   const result = client
     ? await client.query<{ count: string; started_at: string | null }>(sql, values)
     : await query<{ count: string; started_at: string | null }>(sql, values);

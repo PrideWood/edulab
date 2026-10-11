@@ -38,6 +38,8 @@ interface SessionExportRow {
   experiment_run_id: string | null;
   agent_id: string | null;
   config_snapshot: unknown;
+  metadata: Record<string,unknown>;
+  draft_text: string;
 }
 
 interface MessageExportRow {
@@ -149,7 +151,7 @@ export async function buildInteractionArchive(input: {
     const participants = await selectedParticipants(client, input.experimentId, input.participantIds, input.runId);
     const sessions = (await client.query<SessionExportRow>(
       `SELECT id, public_id, participant_id, status, started_at, last_activity_at,
-         coze_conversation_id, dify_conversation_id, experiment_run_id, agent_id, config_snapshot
+         coze_conversation_id, dify_conversation_id, experiment_run_id, agent_id, config_snapshot, metadata, draft_text
        FROM experiment_sessions
        WHERE experiment_id = $1 AND participant_id = ANY($2::uuid[]) AND ($3::uuid IS NULL OR experiment_run_id=$3)
        ORDER BY participant_id, started_at, id`,
@@ -216,8 +218,11 @@ export async function buildInteractionArchive(input: {
           browserBackupIncluded: false,
           messages: messagesBySession.get(session.id) ?? [],
         });
+        const completeRecord = {...record,participant:{...record.participant,id:session.participant_id},interaction:{id:session.metadata?.interaction_id ?? null,
+          previousSessionId:session.metadata?.previous_session_id ?? null},
+          historyMemory:session.metadata?.history_memory ?? null,draft:session.draft_text};
         const participantFolder = safeExportSegment(participant.external_code, "participant");
-        files[`interactions/${participantFolder}/session_${session.public_id}.json`] = strToU8(JSON.stringify(record, null, 2));
+        files[`interactions/${participantFolder}/session_${session.public_id}.json`] = strToU8(JSON.stringify(completeRecord, null, 2));
       }
     }
 

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { buildEntryInvitation } from "@/lib/entry-links";
 import type { ExperimentSettings } from "@/lib/experiment-settings";
+import type { ParticipantProfile } from "@/lib/client-types";
 import { BrandLogo } from "../brand-logo";
 
 type Section = "participants" | "content" | "limits" | "storage" | "ai";
@@ -11,6 +12,7 @@ type ParticipantDirectoryRow = {
   id: string; participantCode: string; fullName: string; studentNumber: string;
   profileUpdatedAt: string | null; sessionCount: number; turnCount: number;
   createdAt: string; lastActivityAt: string | null;
+  profileRevision: number;
 };
 type AgentSummary = {
   id: string; internalName: string; provider: "coze" | "dify"; baseUrl: string; botId: string;
@@ -177,6 +179,7 @@ export function AdminWorkspace() {
   const updateExperiment = (patch: Partial<ExperimentSettings["experiment"]>) => setSettings({ ...settings, experiment: { ...settings.experiment, ...patch } });
   const updateLimits = (patch: Partial<ExperimentSettings["limits"]>) => setSettings({ ...settings, limits: { ...settings.limits, ...patch } });
   const updateStorage = (patch: Partial<ExperimentSettings["storage"]>) => setSettings({ ...settings, storage: { ...settings.storage, ...patch } });
+  const updateMemory = (patch: Partial<NonNullable<ExperimentSettings["memory"]>>) => setSettings({...settings,memory:{enabled:true,maxInputTokens:6000,...settings.memory,...patch}});
 
   return (
     <main className="admin-shell">
@@ -192,10 +195,10 @@ export function AdminWorkspace() {
         <div className="admin-content">
           {creatingExperiment && <section className="settings-card"><h2>新增实验</h2><p>复制当前实验的任务、规则与智能体配置；新实验的修改和数据独立保存，不复制被试记录或场次。</p><form className="new-experiment-form" onSubmit={addExperiment}><label>实验名称<input value={newExperimentName} maxLength={120} required onChange={(event) => setNewExperimentName(event.target.value)} /></label><button className="admin-save" disabled={saving || !newExperimentName.trim()}>创建实验</button></form>{error && <p role="alert">{error}</p>}</section>}
           {section === "participants" && <label className="run-filter">查看分组入口<select value={runFilter} onChange={(event) => { setRunFilter(event.target.value); runFilterRef.current=event.target.value; setParticipants([]); void loadParticipants(); }}><option value="">全部分组</option>{runs.map((run) => <option key={run.id} value={run.id}>{run.name}{run.entryDeletedAt ? "（链接已删除）" : ""}</option>)}</select></label>}
-          {section === "participants" && <ParticipantDirectory key={`${settings.experiment.id}:${runFilter}`} experimentId={settings.experiment.id} runId={runFilter} participants={participants} loading={participantsLoading} error={participantsError} onDeleted={(participantId) => setParticipants((current) => current.filter((participant) => participant.id !== participantId))} />}
+          {section === "participants" && <ParticipantDirectory key={`${settings.experiment.id}:${runFilter}`} experimentId={settings.experiment.id} runId={runFilter} participants={participants} loading={participantsLoading} error={participantsError} onDeleted={(participantId) => setParticipants((current) => current.filter((participant) => participant.id !== participantId))} onUpdated={(id,profile)=>setParticipants(rows=>rows.map(row=>row.id===id?{...row,fullName:profile.fullName,studentNumber:profile.studentNumber,profileUpdatedAt:profile.updatedAt,profileRevision:profile.revision ?? 0}:row))} />}
           {section === "content" && <ContentSettings settings={settings} update={updateExperiment} />}
           {section === "limits" && <LimitSettings settings={settings} updateExperiment={updateExperiment} updateLimits={updateLimits} />}
-          {section === "storage" && <StorageSettings settings={settings} update={updateStorage} />}
+          {section === "storage" && <StorageSettings settings={settings} update={updateStorage} updateMemory={updateMemory} />}
           {section === "ai" && <AgentRunSettings key={settings.experiment.id} experimentId={settings.experiment.id} onRunsChanged={setRuns} />}
         </div>
       </section>
@@ -245,11 +248,14 @@ function DangerConfirmation({ title, description, expectedValue, expectedLabel, 
   </div>;
 }
 
-function ParticipantDirectory({ participants, loading, error, onDeleted, experimentId, runId }: {
+function ParticipantDirectory({ participants, loading, error, onDeleted, onUpdated, experimentId, runId }: {
   experimentId: string; runId: string;
   participants: ParticipantDirectoryRow[]; loading: boolean; error: string; onDeleted: (participantId: string) => void;
+  onUpdated: (participantId:string,profile:ParticipantProfile) => void;
 }) {
   const [pendingDelete, setPendingDelete] = useState<ParticipantDirectoryRow | null>(null);
+  const [editing,setEditing] = useState<ParticipantDirectoryRow | null>(null);
+  const [viewing,setViewing] = useState<ParticipantDirectoryRow | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
   const [deleteStatus, setDeleteStatus] = useState("");
@@ -325,11 +331,73 @@ function ParticipantDirectory({ participants, loading, error, onDeleted, experim
     <section className="settings-card participant-directory">
       <div className="settings-card-head"><div><h2>参与者身份对应表</h2><p>姓名和学号经过加密后存储，并通过内部 Participant ID 与会话关联。聊天记录和学生导出的 JSON 不包含这些直接身份信息。</p></div><span className="secure-badge">仅管理员可见</span></div>
       {participants.length > 0 && <div className="participant-export-toolbar"><div><strong>已选择 {availableSelection.length} 位</strong><span>交互记录只包含数据库中已经完成上传的内容</span></div><div><button className="participant-export-button" disabled={availableSelection.length === 0 || Boolean(exporting)} onClick={() => void exportSelected("interactions_zip")}>{exporting === "interactions_zip" ? "正在整理…" : "导出交互记录 (.zip)"}</button><button className="participant-identity-export" disabled={availableSelection.length === 0 || Boolean(exporting)} onClick={() => void exportSelected("identity_csv")}>{exporting === "identity_csv" ? "正在整理…" : "导出身份对应表 (.csv)"}</button></div></div>}
-      {error ? <p className="directory-error" role="alert">{error}</p> : loading && participants.length === 0 ? <p className="directory-empty">正在读取参与者信息…</p> : participants.length === 0 ? <p className="directory-empty">还没有参与者进入实验。</p> : <div className="directory-table-wrap"><table className="directory-table"><thead><tr><th className="directory-select-cell"><SelectionCheckbox checked={allSelected} indeterminate={availableSelection.length > 0 && !allSelected} label="全选当前列表中的参与者" disabled={Boolean(exporting)} onChange={toggleAll} /></th><th>Participant ID</th><th>姓名</th><th>学号</th><th>对话</th><th>轮次</th><th>最后活动</th><th>操作</th></tr></thead><tbody>{participants.map((participant) => <tr key={participant.id}><td className="directory-select-cell"><SelectionCheckbox checked={selectedSet.has(participant.id)} label={`选择参与者 ${participant.participantCode}`} disabled={Boolean(exporting)} onChange={() => toggleParticipant(participant.id)} /></td><td><code>{participant.participantCode}</code></td><td>{participant.fullName || <span className="missing-value">未填写</span>}</td><td>{participant.studentNumber || <span className="missing-value">未填写</span>}</td><td>{participant.sessionCount}</td><td>{participant.turnCount}</td><td>{formatDate(participant.lastActivityAt)}</td><td><button className="table-danger" disabled={Boolean(exporting) || Boolean(runId)} onClick={() => { setDeleteError(""); setPendingDelete(participant); }}>删除记录</button></td></tr>)}</tbody></table></div>}
+      {error ? <p className="directory-error" role="alert">{error}</p> : loading && participants.length === 0 ? <p className="directory-empty">正在读取参与者信息…</p> : participants.length === 0 ? <p className="directory-empty">还没有参与者进入实验。</p> : <div className="directory-table-wrap"><table className="directory-table"><thead><tr><th className="directory-select-cell"><SelectionCheckbox checked={allSelected} indeterminate={availableSelection.length > 0 && !allSelected} label="全选当前列表中的参与者" disabled={Boolean(exporting)} onChange={toggleAll} /></th><th>Participant ID</th><th>姓名</th><th>学号</th><th>对话</th><th>轮次</th><th>最后活动</th><th>操作</th></tr></thead><tbody>{participants.map((participant) => <tr key={participant.id}><td className="directory-select-cell"><SelectionCheckbox checked={selectedSet.has(participant.id)} label={`选择参与者 ${participant.participantCode}`} disabled={Boolean(exporting)} onChange={() => toggleParticipant(participant.id)} /></td><td><code>{participant.participantCode}</code></td><td>{participant.fullName || <span className="missing-value">未填写</span>}</td><td>{participant.studentNumber || <span className="missing-value">未填写</span>}</td><td>{participant.sessionCount}</td><td>{participant.turnCount}</td><td>{formatDate(participant.lastActivityAt)}</td><td><div className="participant-row-actions"><button className="admin-refresh" onClick={()=>setEditing(participant)}>编辑信息</button><button className="admin-refresh" onClick={()=>setViewing(participant)}>查看交互</button><button className="table-danger" disabled={Boolean(exporting) || Boolean(runId)} onClick={() => { setDeleteError(""); setPendingDelete(participant); }}>删除记录</button></div></td></tr>)}</tbody></table></div>}
     </section>
     <div className="security-note"><strong>访谈联系时如何对应</strong><p>交互数据继续使用 Participant ID。研究者只在需要联系参与者时，通过此表将 Participant ID 对应到姓名或学号，避免直接身份信息进入 AI 对话和导出文件。</p></div>
     {pendingDelete && <DangerConfirmation title={`删除 ${pendingDelete.participantCode} 的全部数据库记录？`} description={`将永久删除该参与者的身份对应、${pendingDelete.sessionCount} 个会话、${pendingDelete.turnCount} 个轮次、消息和智能体分配。此操作无法撤销。对应实验页面在返回前台或再次操作时会退出旧会话并清除该参与者的浏览器本地记录。`} expectedValue={pendingDelete.participantCode} expectedLabel="Participant ID" busy={deleting} error={deleteError} onCancel={() => setPendingDelete(null)} onConfirm={(confirmation) => void removeParticipant(confirmation)} />}
+    {editing && <ParticipantIdentityEditor key={editing.id} participant={editing} experimentId={experimentId} onClose={()=>setEditing(null)} onSaved={profile=>{onUpdated(editing.id,profile);setEditing(null);setDeleteStatus(`被试 ${editing.participantCode} 的身份信息已更新，编号与实验记录保持不变。`);}} />}
+    {viewing && <ParticipantInteractionViewer key={viewing.id} participant={viewing} experimentId={experimentId} onClose={()=>setViewing(null)} />}
   </div>;
+}
+
+function ParticipantIdentityEditor({participant,experimentId,onClose,onSaved}:{participant:ParticipantDirectoryRow;experimentId:string;onClose:()=>void;onSaved:(profile:ParticipantProfile)=>void}) {
+  const [fullName,setFullName] = useState(participant.fullName);
+  const [studentNumber,setStudentNumber] = useState(participant.studentNumber);
+  const [busy,setBusy] = useState(false);
+  const [error,setError] = useState("");
+  const [changes,setChanges] = useState<Array<{id:string;changedAt:string;administrator:string;before:ParticipantProfile|null;after:ParticipantProfile}>>([]);
+  useEffect(()=>{
+    let cancelled=false;
+    void fetch(`/api/admin/participants?experimentId=${encodeURIComponent(experimentId)}&identityHistory=${participant.id}`,{cache:"no-store"})
+      .then(async response=>{const data=await response.json();if(!response.ok)throw new Error(data?.error?.message ?? "修改记录读取失败。");if(!cancelled)setChanges(data.changes);})
+      .catch(failure=>{if(!cancelled)setError(failure instanceof Error?failure.message:"修改记录读取失败。");});
+    return()=>{cancelled=true;};
+  },[experimentId,participant.id]);
+  async function save(event:FormEvent<HTMLFormElement>) {
+    event.preventDefault();if(busy)return;setBusy(true);setError("");
+    try {
+      const response=await fetch(`/api/admin/participants?experimentId=${encodeURIComponent(experimentId)}`,{method:"PUT",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({participantId:participant.id,fullName,studentNumber,revision:participant.profileRevision})});
+      const data=await response.json();if(!response.ok)throw new Error(data?.error?.message ?? "身份信息保存失败。");onSaved(data.profile);
+    }catch(failure){setError(failure instanceof Error?failure.message:"身份信息保存失败。");}finally{setBusy(false);}
+  }
+  return <div className="danger-dialog-backdrop"><section className="danger-dialog participant-record-dialog" role="dialog" aria-modal="true" aria-labelledby="identity-editor-title">
+    <div className="participant-record-head"><div><h2 id="identity-editor-title">纠正被试信息</h2><p>被试编号：<strong>{participant.participantCode}</strong>。编号、原分组及全部交互记录保持不变。</p></div><button className="admin-refresh" onClick={onClose} disabled={busy}>关闭</button></div>
+    <form className="form-grid" onSubmit={save}><label><span>姓名（必填，允许重名）</span><input value={fullName} maxLength={100} required onChange={event=>setFullName(event.target.value)} /></label><label><span>学号（选填，项目内唯一）</span><input value={studentNumber} maxLength={100} onChange={event=>setStudentNumber(event.target.value)} /></label>{error&&<p className="directory-error wide" role="alert">{error}</p>}<button className="admin-save" disabled={busy||!fullName.trim()}>{busy?"保存中…":"保存信息"}</button></form>
+    <details className="identity-change-list"><summary>最近的修改记录（最多 100 条）</summary>{changes.length?changes.map(change=><div key={change.id}><p>{formatDate(change.changedAt)} · {change.administrator}</p><p>姓名：{change.before?.fullName||"未填写"} → {change.after.fullName||"未填写"}</p><p>学号：{change.before?.studentNumber||"未填写"} → {change.after.studentNumber||"未填写"}</p></div>):<p>暂无修改记录。</p>}</details>
+  </section></div>;
+}
+
+type InteractionRecord = {id:string;title:string;status:string;startedAt:string;lastActivityAt:string;
+  experimentRunId:string|null;agentId:string|null;turnCount:number;messageCount:number;memory:Record<string,unknown>|null};
+function ParticipantInteractionViewer({participant,experimentId,onClose}:{participant:ParticipantDirectoryRow;experimentId:string;onClose:()=>void}) {
+  const endpoint=`/api/admin/participants?experimentId=${encodeURIComponent(experimentId)}&participantId=${participant.id}`;
+  const [sessions,setSessions]=useState<InteractionRecord[]>([]);
+  const [selected,setSelected]=useState("");
+  const [record,setRecord]=useState<{session:InteractionRecord;draft:string;messages:Array<{id:string;role:string;content:string;sequenceNo:number;sentAt:string}>}|null>(null);
+  const [error,setError]=useState("");
+  const [loading,setLoading]=useState(true);
+  useEffect(()=>{
+    let cancelled=false;
+    void fetch(endpoint,{cache:"no-store"}).then(async response=>{const data=await response.json();if(!response.ok)throw new Error(data?.error?.message ?? "会话读取失败。");
+      if(!cancelled){setSessions(data.sessions);setSelected(data.sessions[0]?.id ?? "");if(!data.sessions.length)setLoading(false);}})
+      .catch(failure=>{if(!cancelled){setError(failure instanceof Error?failure.message:"会话读取失败。");setLoading(false);}});
+    return()=>{cancelled=true;};
+  },[endpoint]);
+  useEffect(()=>{
+    if(!selected)return;let cancelled=false;
+    void fetch(`${endpoint}&sessionId=${selected}`,{cache:"no-store"}).then(async response=>{const data=await response.json();if(!response.ok)throw new Error(data?.error?.message ?? "记录读取失败。");if(!cancelled)setRecord(data);})
+      .catch(failure=>{if(!cancelled)setError(failure instanceof Error?failure.message:"记录读取失败。");})
+      .finally(()=>{if(!cancelled)setLoading(false);});
+    return()=>{cancelled=true;};
+  },[endpoint,selected]);
+  return <div className="danger-dialog-backdrop"><section className="danger-dialog participant-record-dialog" role="dialog" aria-modal="true" aria-labelledby="interaction-viewer-title">
+    <div className="participant-record-head"><div><h2 id="interaction-viewer-title">{participant.participantCode} 的交互记录</h2><p>每次交互按开始时间区分，保留独立会话和原始消息。</p></div><button className="admin-refresh" onClick={onClose}>关闭</button></div>
+    <label><span>选择会话</span><select value={selected} onChange={event=>{setLoading(true);setRecord(null);setError("");setSelected(event.target.value);}}>{sessions.map(session=><option key={session.id} value={session.id}>{formatDate(session.startedAt)} · {session.title} · {session.status==="completed"?"已结束":"未完成"}</option>)}</select></label>
+    {error&&<p className="directory-error" role="alert">{error}</p>}{!loading&&!sessions.length&&!error&&<p>此被试暂无交互会话。</p>}{loading?<p>正在读取…</p>:record&&<><p className="record-session-id">会话 ID：{record.session.id}<br/>开始：{formatDate(record.session.startedAt)} · 消息：{record.session.messageCount}</p>
+      <div className="record-messages">{record.messages.length?record.messages.map(message=><article key={message.id}><small>{message.sequenceNo} · {message.role==="user"?"学生":"AI"} · {formatDate(message.sentAt)}</small><p>{message.content}</p></article>):<p>此会话暂无已保存的对话消息。</p>}</div>
+      {record.draft&&<details><summary>保留的未发送草稿</summary><p className="record-draft">{record.draft}</p></details>}
+      {record.session.memory&&<details><summary>历史加载信息</summary><pre className="memory-manifest">{JSON.stringify(record.session.memory,null,2)}</pre></details>}</>}</section></div>;
 }
 
 function AdminLogin({ onSubmit, error }: { onSubmit: (event: FormEvent<HTMLFormElement>) => void; error: string }) {
@@ -353,9 +421,9 @@ function LimitSettings({ settings, updateExperiment, updateLimits }: { settings:
   </div>;
 }
 
-function StorageSettings({ settings, update }: { settings: ExperimentSettings; update: (patch: Partial<ExperimentSettings["storage"]>) => void }) {
+function StorageSettings({ settings, update, updateMemory }: { settings: ExperimentSettings; update: (patch: Partial<ExperimentSettings["storage"]>) => void; updateMemory:(patch:Partial<NonNullable<ExperimentSettings["memory"]>>)=>void }) {
   const enabled = settings.storage.databaseMessagesEnabled;
-  return <div className="settings-stack"><section className={`settings-card ${enabled ? "" : "storage-disabled"}`}><div className="settings-card-head"><div><h2>实验结束时备份完整对话到数据库</h2><p>开启后，学生消息在调用 AI 前保存，AI 回复完成后保存，支持跨设备恢复。</p></div><label className="switch" aria-label="实验结束时备份完整对话到数据库"><input type="checkbox" checked={enabled} onChange={(event) => update({ databaseMessagesEnabled: event.target.checked })} /><span /></label></div><div className="storage-mode"><strong>{enabled ? "数据库自动保存 + 浏览器副本 + 人工导出" : "仅使用浏览器本地记录与人工导出"}</strong><p>{enabled ? "每轮及时保存，生成中断后使用原请求继续恢复；结束时再次核对完整性。" : "数据库不保存学生和 AI 的消息正文。请确保参与者完成前下载并提交交互记录。"}</p></div></section><div className="security-note"><strong>刷新不会清除当前会话记录</strong><p>每条已显示的消息都会同步到当前浏览器的本地存储，页面刷新后会自动恢复。但更换设备、清除浏览器数据或使用隐私模式仍可能丢失本地副本。</p></div><div className="security-note"><strong>进入实验仍需要数据库</strong><p>编号、身份和分组保存在数据库中。数据库中断时会明确提示保存失败，并保留本机未确认的输入，不会宣称消息已成功保存。</p></div></div>;
+  return <div className="settings-stack"><section className={`settings-card ${enabled ? "" : "storage-disabled"}`}><div className="settings-card-head"><div><h2>实验结束时备份完整对话到数据库</h2><p>开启后，学生消息在调用 AI 前保存，AI 回复完成后保存，支持跨设备恢复。</p></div><label className="switch" aria-label="实验结束时备份完整对话到数据库"><input type="checkbox" checked={enabled} onChange={(event) => update({ databaseMessagesEnabled: event.target.checked })} /><span /></label></div><div className="storage-mode"><strong>{enabled ? "数据库自动保存 + 浏览器副本 + 人工导出" : "仅使用浏览器本地记录与人工导出"}</strong><p>{enabled ? "每轮及时保存，生成中断后使用原请求继续恢复；结束时再次核对完整性。" : "数据库不保存学生和 AI 的消息正文。请确保参与者完成前下载并提交交互记录。"}</p></div></section><section className="settings-card"><div className="settings-card-head"><div><h2>跨会话历史记忆</h2><p>开始新一次交互时继承同一被试、同一项目及原分组的完整历史。各组使用一致规则，新交互生效。</p></div><label className="switch" aria-label="跨会话历史记忆"><input type="checkbox" checked={settings.memory?.enabled ?? true} onChange={event=>updateMemory({enabled:event.target.checked})}/><span/></label></div><div className="form-grid"><label><span>历史与首条问题的输入预算（估算 Token）</span><input type="number" min={512} max={100000} value={settings.memory?.maxInputTokens ?? 6000} onChange={event=>updateMemory({maxInputTokens:Math.max(512,Math.min(100000,Number(event.target.value)||6000))})}/><small>按实际模型窗口设置，并为智能体提示词和回复预留空间。超出预算时明确阻止发送，不自动删减历史。</small></label></div><p className="profile-hint">完整历史依赖数据库保存。关闭历史记忆会明确记录为“不继承”，原始历史仍保留。</p></section><div className="security-note"><strong>刷新不会清除当前会话记录</strong><p>每条已显示的消息都会同步到当前浏览器的本地存储，页面刷新后会自动恢复。但更换设备、清除浏览器数据或使用隐私模式仍可能丢失本地副本。</p></div><div className="security-note"><strong>进入实验仍需要数据库</strong><p>编号、身份和分组保存在数据库中。数据库中断时会明确提示保存失败，并保留本机未确认的输入，不会宣称消息已成功保存。</p></div></div>;
 }
 
 function AgentRunSettings({ experimentId, onRunsChanged }: { experimentId: string; onRunsChanged: (runs: RunSummary[]) => void }) {

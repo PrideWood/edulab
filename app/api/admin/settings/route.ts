@@ -26,6 +26,7 @@ const inputSchema = z.object({
     sessionDurationMinutes: optionalLimit.refine((value) => value === null || value <= 7 * 24 * 60),
   }),
   storage: z.object({ databaseMessagesEnabled: z.boolean() }),
+  memory:z.object({enabled:z.boolean(),maxInputTokens:z.number().int().min(512).max(100000)}).optional(),
   ai: z.object({
     baseUrl: z.url().refine((value) => {
       const url = new URL(value);

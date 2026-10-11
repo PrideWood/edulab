@@ -78,11 +78,11 @@ export async function POST(request: Request) {
     if (session.configSnapshot?.ai.provider === "dify") {
       const activeSession = session;
       return createDifyChatResponse(activeSession, begun.request, input.data.content,
-        messages => responsePayload(activeSession, false, messages));
+        messages => responsePayload(activeSession, false, messages),begun.providerContent);
     }
 
     let chat;
-    try { chat = await createCozeChat(session, requestId, input.data.clientRequestId, input.data.content); }
+    try { chat = await createCozeChat(session, requestId, input.data.clientRequestId, input.data.content,begun.providerContent); }
     catch (error) {
       await markRequestFailed(session.id, requestId, "COZE_CREATE_UNCERTAIN", error instanceof Error ? error.message : "Coze request failed", "uncertain");
       throw new ApiError(502, "COZE_UNAVAILABLE", databaseMessagesEnabled

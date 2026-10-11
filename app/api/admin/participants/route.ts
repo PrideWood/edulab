@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { assertAdminRun, getAdminExperimentId } from "@/lib/experiment-entry";
-import { query } from "@/db";
-import { deleteParticipantRecord } from "@/lib/admin-records";
+import { query, transaction } from "@/db";
+import { deleteParticipantRecord, getParticipantInteractions } from "@/lib/admin-records";
 import { assertSameOrigin, getAuthenticatedAdmin } from "@/lib/admin-auth";
 import { ApiError, errorResponse } from "@/lib/http";
-import { profileFromRow } from "@/lib/participant-profile";
+import { profileFromRow, updateParticipantIdentity, listParticipantIdentityChanges } from "@/lib/participant-profile";
 import { SESSION_COOKIE } from "@/lib/security";
 import { clearRuntimeCookie, getRuntimeSession } from "@/lib/runtime-session";
 
@@ -22,6 +22,7 @@ interface ParticipantRow {
   student_number_iv: string | null;
   student_number_tag: string | null;
   updated_at: string | null;
+  revision: number | null;
   session_count: string;
   turn_count: string;
   last_activity_at: string | null;
@@ -30,6 +31,11 @@ interface ParticipantRow {
 const deleteSchema = z.object({
   participantId: z.uuid(),
   confirmationCode: z.string().trim().min(1).max(100),
+});
+
+const editSchema = z.object({
+  participantId:z.uuid(), fullName:z.string().trim().min(1,"请填写姓名。").max(100),
+  studentNumber:z.string().trim().max(100).default(""), revision:z.number().int().nonnegative(),
 });
 
 function participantDeleteError(error: unknown) {
@@ -44,12 +50,25 @@ export async function GET(request?: Request) {
     const admin = await getAuthenticatedAdmin();
     if (!admin) throw new ApiError(401, "ADMIN_REQUIRED", "请先登录管理后台。");
     const experimentId = await getAdminExperimentId(request);
+    const recordParticipantId = request ? new URL(request.url).searchParams.get("participantId") : null;
+    if (recordParticipantId) {
+      const sessionId = request ? new URL(request.url).searchParams.get("sessionId") : null;
+      if (!z.uuid().safeParse(recordParticipantId).success || sessionId && !z.uuid().safeParse(sessionId).success) {
+        throw new ApiError(400,"INVALID_PARTICIPANT","参与者或会话标识无效。");
+      }
+      return NextResponse.json(await getParticipantInteractions(experimentId,recordParticipantId,sessionId),{headers:{"Cache-Control":"private, no-store"}});
+    }
+    const historyParticipantId = request ? new URL(request.url).searchParams.get("identityHistory") : null;
+    if (historyParticipantId) {
+      if (!z.uuid().safeParse(historyParticipantId).success) throw new ApiError(400,"INVALID_PARTICIPANT","参与者标识无效。");
+      return NextResponse.json({ changes:await listParticipantIdentityChanges(experimentId,historyParticipantId) },{headers:{"Cache-Control":"private, no-store"}});
+    }
     const runId = await assertAdminRun(experimentId, request ? new URL(request.url).searchParams.get("runId") : null);
     const result = await query<ParticipantRow>(
       `SELECT p.id, p.external_code, p.created_at,
          profile.full_name_ciphertext, profile.full_name_iv, profile.full_name_tag,
          profile.student_number_ciphertext, profile.student_number_iv, profile.student_number_tag,
-         profile.updated_at,
+         profile.updated_at, profile.revision,
          count(DISTINCT session.id)::text AS session_count,
          count(DISTINCT request.id)::text AS turn_count,
          max(session.last_activity_at)::text AS last_activity_at
@@ -71,6 +90,7 @@ export async function GET(request?: Request) {
         fullName: profile?.fullName ?? "",
         studentNumber: profile?.studentNumber ?? "",
         profileUpdatedAt: profile?.updatedAt ?? null,
+        profileRevision: profile?.revision ?? 0,
         sessionCount: Number(row.session_count),
         turnCount: Number(row.turn_count),
         createdAt: row.created_at,
@@ -78,6 +98,19 @@ export async function GET(request?: Request) {
       };
     });
     return NextResponse.json({ participants }, { headers: { "Cache-Control": "private, no-store" } });
+  } catch (error) { return errorResponse(error); }
+}
+
+export async function PUT(request: Request) {
+  try {
+    assertSameOrigin(request);
+    const admin = await getAuthenticatedAdmin();
+    if (!admin) throw new ApiError(401,"ADMIN_REQUIRED","请先登录管理后台。");
+    const experimentId = await getAdminExperimentId(request);
+    const input = editSchema.safeParse(await request.json());
+    if (!input.success) throw new ApiError(400,"INVALID_PARTICIPANT_PROFILE",input.error.issues[0]?.message ?? "参与者信息无效。");
+    const profile = await transaction(client => updateParticipantIdentity(client,{...input.data,experimentId},admin.id));
+    return NextResponse.json({participantId:input.data.participantId,profile},{headers:{"Cache-Control":"private, no-store"}});
   } catch (error) { return errorResponse(error); }
 }
 

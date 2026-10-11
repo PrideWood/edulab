@@ -9,6 +9,7 @@ import type { AuthenticatedSession } from "@/lib/session";
 import type { SessionPayload } from "@/lib/client-types";
 import { persistTranscript } from "@/lib/transcript";
 import { DifyChatError, difyUser, findDifyMessage, runDifyChat, safeDifyError, type DifyReply } from "@/lib/dify";
+import { originalStudentMessage } from "@/lib/session-memory";
 
 interface DifyRequestRow {
   id: string; client_request_id: string; turn_index: number; status: RequestRecord["status"];
@@ -116,7 +117,8 @@ async function historyReply(session: AuthenticatedSession, request: RequestRecor
   if (message.error || message.status === "error" || message.status === "failed") throw new DifyChatError("DIFY_MESSAGE_FAILED", "Dify 会话中的这次请求未成功完成。", 502, true);
   if (message.status !== "normal" || !message.answer?.trim()) return null;
   const completedAt = new Date().toISOString();
-  return { query: message.query, reply: { conversationId, messageId,
+  const memory = request.metadata.history_memory as {injected?:boolean} | undefined;
+  return { query: originalStudentMessage(message.query,memory?.injected === true), reply: { conversationId, messageId,
     taskId: typeof request.metadata.dify_task_id === "string" ? request.metadata.dify_task_id : null,
     answer: message.answer, replyStartedAt: new Date(message.created_at * 1000).toISOString(), completedAt } };
 }
@@ -165,7 +167,7 @@ export async function recoverDifyPendingRequest(session: AuthenticatedSession): 
 }
 
 export function createDifyChatResponse(session: AuthenticatedSession, request: RequestRecord, content: string,
-  payload: (messages: StoredMessage[]) => Promise<SessionPayload>) {
+  payload: (messages: StoredMessage[]) => Promise<SessionPayload>, providerContent = content) {
   const encoder = new TextEncoder();
   let disconnected = false;
   let completion: Promise<void> = Promise.resolve();
@@ -185,7 +187,7 @@ export function createDifyChatResponse(session: AuthenticatedSession, request: R
           emit({ event: "start", sessionId: session.publicId, clientRequestId: request.clientRequestId });
           let lastIds = "", lastCheckpoint = 0;
           const result = await runDifyChat({ ...config, user: difyUser(session), conversationId: session.difyConversationId ?? null,
-            content, signal: AbortSignal.timeout(50_000), onProgress: async reply => {
+            content:providerContent, signal: AbortSignal.timeout(50_000), onProgress: async reply => {
               const ids = JSON.stringify([reply.conversationId, reply.messageId, reply.taskId]);
               if (ids !== lastIds || reply.completedAt || Date.now() - lastCheckpoint >= 1000) {
                 await checkpoint(session, request, reply);

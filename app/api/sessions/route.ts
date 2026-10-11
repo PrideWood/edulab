@@ -5,32 +5,32 @@ import { getStudentEntry, sessionCookieName } from "@/lib/experiment-entry";
 import { experiment } from "@/config/experiment";
 import { transaction } from "@/db";
 import { errorResponse, ApiError } from "@/lib/http";
-import { getAuthenticatedSession } from "@/lib/session";
+import { getAuthenticatedSession, type AuthenticatedSession } from "@/lib/session";
 import { buildSessionPayload } from "@/lib/session-payload";
 import { hashSecret, newSessionSecret, normalizeParticipantCode, verifyParticipantAccess } from "@/lib/security";
 import { buildSessionSnapshot, getExperimentSettings } from "@/lib/experiment-settings";
-import { getParticipantProfile, saveParticipantProfileWithClient } from "@/lib/participant-profile";
+import { getParticipantProfile, profileFromRow, saveParticipantProfileWithClient } from "@/lib/participant-profile";
 import { isTestParticipantName } from "@/lib/participant-code";
 import { createParticipantWithAvailableCode } from "@/lib/participant-code-allocation";
 import { assignAgentWithClient } from "@/lib/agent-control";
 import { clearRuntimeCookie } from "@/lib/runtime-session";
 import { assertSameOrigin } from "@/lib/admin-auth";
 import { importLegacyRuntime } from "@/lib/legacy-runtime";
+import { captureSessionMemory } from "@/lib/session-memory";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
 const profileSchema = z.object({
-  fullName: z.string().trim().max(100),
-  studentNumber: z.string().trim().min(1, "请填写学号，姓名可以不填。").max(100),
-}).refine((value) => value.fullName.length > 0 || value.studentNumber.length > 0, {
-  message: "请至少填写姓名或学号中的一项。",
+  fullName: z.string().trim().min(1, "请填写姓名，学号可以不填。").max(100),
+  studentNumber: z.string().trim().max(100).default(""),
 });
 
 const inputSchema = z.object({
   participantCode: z.string().trim().min(1).max(80).optional(),
   access: z.string().max(200).optional(),
   profile: profileSchema.optional(),
+  registrationRequestId:z.uuid().optional(),
 }).superRefine((value, context) => {
   if (value.access && !value.participantCode) {
     context.addIssue({ code: "custom", message: "参与者链接信息无效。" });
@@ -84,17 +84,46 @@ export async function POST(request: Request) {
     const publicId = randomUUID();
     const sessionId = randomUUID();
     const settings = await getExperimentSettings(experimentId,false);
-    const baseSnapshot = entry?.snapshot ?? buildSessionSnapshot(settings);
+    const baseSnapshot = { ...(entry?.snapshot ?? buildSessionSnapshot(settings)),memory:settings.memory };
     const startedAt = new Date();
     const created = await transaction(async (client) => {
+      if (input.data.registrationRequestId) {
+        await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`edulab:registration:${experimentId}:${input.data.registrationRequestId}`]);
+        const prior = await client.query<{id:string;external_code:string;metadata:{registration_run_id?:string}}>(
+          "SELECT id,external_code,metadata FROM participants WHERE experiment_id=$1 AND metadata->>'registration_request_id'=$2 FOR UPDATE",
+          [experimentId,input.data.registrationRequestId]);
+        if (prior.rows[0]) {
+          const participant = prior.rows[0];
+          const profileRows = await client.query("SELECT * FROM participant_identity_profiles WHERE participant_id=$1", [participant.id]);
+          const profile = profileRows.rows[0] ? profileFromRow(profileRows.rows[0]) : null;
+          if (!profile || !input.data.profile || profile.fullName.trim()!==input.data.profile.fullName
+            || profile.studentNumber.trim()!==input.data.profile.studentNumber || (participant.metadata.registration_run_id ?? null)!==(entry?.runId ?? null)) {
+            throw new ApiError(409,"REGISTRATION_ALREADY_USED","此报名请求已使用，请通过原分组链接，使用原编号和姓名或学号继续实验。");
+          }
+          const row = (await client.query(`SELECT * FROM experiment_sessions WHERE participant_id=$1 AND experiment_id=$2
+            AND experiment_run_id IS NOT DISTINCT FROM $3::uuid ORDER BY (status='active') DESC,started_at DESC,id DESC LIMIT 1 FOR UPDATE`,
+          [participant.id,experimentId,entry?.runId ?? null])).rows[0];
+          if (!row) throw new ApiError(409,"REGISTRATION_INCOMPLETE","已有报名记录缺少会话，请联系教师，系统不会重复报名。");
+          const secretHash = hashSecret(secret);
+          await client.query(`UPDATE experiment_sessions SET session_secret_hash=$3 WHERE participant_id=$1 AND experiment_id=$2
+            AND experiment_run_id IS NOT DISTINCT FROM $4::uuid`, [participant.id,experimentId,secretHash,entry?.runId ?? null]);
+          const resumed: AuthenticatedSession = {id:row.id,publicId:row.public_id,participantId:participant.id,
+            participantCode:participant.external_code,experimentId,status:row.status,cozeUserId:row.coze_user_id,
+            cozeConversationId:row.coze_conversation_id,difyConversationId:row.dify_conversation_id,
+            activeRequestId:row.active_request_id,startedAt:row.started_at,lastActivityAt:row.last_activity_at,
+            configVersion:row.config_version,configSnapshot:row.config_snapshot,sessionSecretHash:secretHash};
+          return {resumed};
+        }
+      }
       let participantId: string;
       let participantCode: string;
+      const registration = input.data.registrationRequestId ? {registration_request_id:input.data.registrationRequestId,registration_run_id:entry?.runId ?? null} : {};
       if (requestedParticipantCode) {
         const participant = await client.query<{ id: string }>(
-          `INSERT INTO participants (id, experiment_id, external_code) VALUES ($1, $2, $3)
+          `INSERT INTO participants (id, experiment_id, external_code, metadata) VALUES ($1, $2, $3, $4::jsonb)
            ON CONFLICT (experiment_id, external_code) DO NOTHING
            RETURNING id`,
-          [randomUUID(), experimentId, requestedParticipantCode],
+          [randomUUID(), experimentId, requestedParticipantCode,JSON.stringify(registration)],
         );
         if (!participant.rows[0]) throw new ApiError(409, "PARTICIPANT_EXISTS", "此编号已有实验记录，请选择继续之前的实验，系统不会创建重复记录。");
         participantId = participant.rows[0].id;
@@ -104,8 +133,8 @@ export async function POST(request: Request) {
         participantCode = `__pending_${participantId}`;
         // Uncommitted placeholder permits profile/assignment work in parallel.
         // The final P/T code is allocated immediately before COMMIT.
-        await client.query(`INSERT INTO participants (id, experiment_id, external_code) VALUES ($1,$2,$3)`,
-          [participantId, experimentId, participantCode]);
+        await client.query(`INSERT INTO participants (id, experiment_id, external_code,metadata) VALUES ($1,$2,$3,$4::jsonb)`,
+          [participantId, experimentId, participantCode,JSON.stringify(registration)]);
       }
       if (input.data.profile) {
         await saveParticipantProfileWithClient(
@@ -131,11 +160,13 @@ export async function POST(request: Request) {
         `INSERT INTO experiment_sessions (id, public_id, participant_id, experiment_id, session_secret_hash,
            coze_user_id, config_version, config_snapshot, started_at, last_activity_at, metadata,
            experiment_run_id, agent_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $9, '{"conversation_title":"新对话","transcript_authority":"server"}'::jsonb, $10, $11)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $9,
+           jsonb_build_object('conversation_title','新对话','transcript_authority','server','interaction_id',($1::uuid)::text), $10, $11)`,
         [sessionId, publicId, participantId, experimentId, hashSecret(secret),
           `edulab_${publicId.replaceAll("-", "")}`, snapshot.version, JSON.stringify(snapshot), startedAt,
           assignedAgent.runId, assignedAgent.agentId],
       );
+      await captureSessionMemory(client,{id:sessionId,participantId,experimentId,configSnapshot:snapshot});
       if (!requestedParticipantCode) {
         const codePrefix = isTestParticipantName(input.data.profile?.fullName ?? "") ? "T" : "P";
         const numbered = await createParticipantWithAvailableCode(client, experimentId, codePrefix, participantId);
@@ -143,6 +174,14 @@ export async function POST(request: Request) {
       }
       return { participantId, participantCode, assignedAgent, snapshot };
     });
+
+    if (created.resumed) {
+      const response = NextResponse.json(await buildSessionPayload(created.resumed));
+      response.cookies.set(sessionCookieName(entry),`${created.resumed.publicId}.${secret}`,{
+        httpOnly:true,sameSite:"lax",secure:process.env.NODE_ENV==="production",path:"/",maxAge:60*60*8,
+      });
+      return response;
+    }
 
     const endsAt = created.snapshot.limits.sessionDurationMinutes
       ? new Date(startedAt.getTime() + created.snapshot.limits.sessionDurationMinutes * 60_000).toISOString()

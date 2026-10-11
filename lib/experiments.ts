@@ -23,17 +23,17 @@ export async function createExperiment(name: string, sourceId: string, adminId: 
       experiment_id,version,task_visible,chat_enabled,task_label,task_title,task_introduction,
       task_requirements,task_material,task_hint,assistant_name,welcome_message,max_user_messages,
       max_message_chars,session_duration_minutes,database_message_storage_enabled,coze_api_base_url,
-      coze_bot_id,coze_token_ciphertext,coze_token_iv,coze_token_tag,updated_by)
+      coze_bot_id,coze_token_ciphertext,coze_token_iv,coze_token_tag,updated_by,history_memory_enabled,history_memory_max_input_tokens)
       SELECT $1,1,task_visible,chat_enabled,task_label,task_title,task_introduction,
       task_requirements,task_material,task_hint,assistant_name,welcome_message,max_user_messages,
       max_message_chars,session_duration_minutes,database_message_storage_enabled,coze_api_base_url,
-      coze_bot_id,coze_token_ciphertext,coze_token_iv,coze_token_tag,$3
+      coze_bot_id,coze_token_ciphertext,coze_token_iv,coze_token_tag,$3,history_memory_enabled,history_memory_max_input_tokens
       FROM experiment_settings WHERE experiment_id=$2`, [id,sourceId,adminId]);
     if (!copied.rowCount) throw new ApiError(409, "EXPERIMENT_SETTINGS_MISSING", "来源实验尚未保存配置，请先保存后重试。");
     const agents = await client.query<{ id: string }>("SELECT id FROM ai_agent_configs WHERE experiment_id=$1", [sourceId]);
     for (const agent of agents.rows) await client.query(`INSERT INTO ai_agent_configs (id,experiment_id,internal_name,
-      coze_api_base_url,coze_bot_id,coze_token_ciphertext,coze_token_iv,coze_token_tag,enabled,updated_by)
-      SELECT $1,$2,internal_name,coze_api_base_url,coze_bot_id,coze_token_ciphertext,coze_token_iv,coze_token_tag,enabled,$3
+      provider,coze_api_base_url,coze_bot_id,coze_token_ciphertext,coze_token_iv,coze_token_tag,enabled,updated_by)
+      SELECT $1,$2,internal_name,provider,coze_api_base_url,coze_bot_id,coze_token_ciphertext,coze_token_iv,coze_token_tag,enabled,$3
       FROM ai_agent_configs WHERE id=$4`, [randomUUID(),id,adminId,agent.id]);
     await client.query(`INSERT INTO admin_audit_log (id,admin_user_id,action,experiment_id,after_data)
       VALUES ($1,$2,'experiment.create',$3,$4::jsonb)`, [randomUUID(),adminId,id,JSON.stringify({ name,sourceId })]);

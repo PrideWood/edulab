@@ -13,7 +13,7 @@ import { formatAgentTestFailure } from '../lib/agent-test-error.js';
 // Every connection explicitly uses ONLY that schema; no public table is touched.
 async function harness(db, sharedSources) {
   const files = ['config/experiment.ts', 'lib/security.ts', 'lib/secret-crypto.ts',
-    'lib/session.ts', 'lib/session-usage.ts', 'lib/session-write.ts', 'lib/http.ts', 'lib/admin-auth.ts',
+    'lib/session.ts', 'lib/session-usage.ts', 'lib/session-write.ts', 'lib/session-memory.ts', 'lib/http.ts', 'lib/admin-auth.ts',
     'lib/participant-profile.ts', 'lib/participant-code-allocation.ts', 'lib/agent-control.ts',
     'lib/experiment-settings.ts', 'lib/experiment-limits.ts', 'lib/messages.ts', 'lib/coze.ts',
     'lib/dify.ts', 'lib/dify-chat.ts', 'lib/sse.ts', 'lib/transcript.ts', 'lib/session-payload.ts', 'lib/runtime-session.ts', 'lib/session-draft.ts',
@@ -29,6 +29,10 @@ async function harness(db, sharedSources) {
   let providerPending = false;
   const difyCalls = [], difyHistory = new Map(), afterTasks = [];
   let difyMode = 'normal';
+  const mockQuestion = content => {
+    if (!content.startsWith('EduLab 历史背景 v1：')) return content;
+    return JSON.parse(content.slice(content.indexOf('\n') + 1)).question;
+  };
   const difyFetch = async (url, options) => {
     const parsed = new URL(url);
     if (parsed.pathname.endsWith('/messages')) {
@@ -41,9 +45,9 @@ async function harness(db, sharedSources) {
     if (difyMode === 'error') return Response.json({code:'unauthorized',message:options.headers.Authorization},{status:401});
     const conversation_id = body.conversation_id || crypto.randomUUID(), message_id = crypto.randomUUID(), task_id = crypto.randomUUID();
     difyHistory.set(message_id,{id:message_id,conversation_id,user:body.user,query:body.query,
-      answer:`Dify 回复：${body.query}`,created_at:Math.floor(Date.now()/1000),status:'normal',error:null});
+      answer:`Dify 回复：${mockQuestion(body.query)}`,created_at:Math.floor(Date.now()/1000),status:'normal',error:null});
     const events = [{event:'message',conversation_id,message_id,task_id,answer:'Dify '},
-      {event:'message',conversation_id,message_id,task_id,answer:`回复：${body.query}`}];
+      {event:'message',conversation_id,message_id,task_id,answer:`回复：${mockQuestion(body.query)}`}];
     if (difyMode !== 'interrupted') events.push({event:'message_end',conversation_id,message_id,task_id});
     return new Response(new ReadableStream({start(controller) {
       for (const event of events) controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
@@ -62,7 +66,7 @@ async function harness(db, sharedSources) {
       retrieve: async (_conversationId, chatId) => ({ ...chats.get(chatId).chat, status: providerPending ? 'in_progress' : 'completed' }),
       messages: { list: async (_conversationId, chatId) => [
         { id: `user-${chatId}`, role: 'user', type: 'question', content: chats.get(chatId).content, created_at: Math.floor(Date.now()/1000) },
-        { id: `answer-${chatId}`, role: 'assistant', type: 'answer', content: `回复：${chats.get(chatId).content}`, created_at: Math.floor(Date.now()/1000) },
+        { id: `answer-${chatId}`, role: 'assistant', type: 'answer', content: `回复：${mockQuestion(chats.get(chatId).content)}`, created_at: Math.floor(Date.now()/1000) },
       ] },
     };
   }
@@ -113,6 +117,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
     const migrations = (await readdir('db/migrations')).filter(file => file.endsWith('.sql')).sort();
     for (const file of migrations) await pool.query(await readFile(`db/migrations/${file}`, 'utf8'));
     let failMessageWrite = false, failLinkDeleteAudit = false, failKeyRotateAudit = false, failKeyWrite = false;
+    let failIdentityAudit = false, failInteractionMemoryWrite = false;
     const query = async (sql, values) => {
       if (failMessageWrite && /INSERT INTO messages/.test(sql)) throw new Error('synthetic database write failure');
       return pool.query(sql, values);
@@ -124,6 +129,8 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
         if (failLinkDeleteAudit && /INSERT INTO admin_audit_log/.test(sql) && sql.includes('experiment.run.link.delete')) throw new Error('synthetic audit write failure');
         if (failKeyRotateAudit && /INSERT INTO admin_audit_log/.test(sql) && sql.includes('ai.agent.key.rotate')) throw new Error('synthetic key audit failure');
         if (failKeyWrite && /UPDATE ai_agent_configs SET coze_token_ciphertext/.test(sql)) throw new Error('synthetic key write failure');
+        if (failIdentityAudit && /INSERT INTO admin_audit_log/.test(sql) && sql.includes('participant.identity.update')) throw new Error('synthetic identity audit failure');
+        if (failInteractionMemoryWrite && /UPDATE experiment_sessions SET metadata=metadata.*history_memory/.test(sql)) throw new Error('synthetic memory write failure');
         return client.query(sql, values);
       } };
       try { await client.query('BEGIN'); const value = await work(facade); await client.query('COMMIT'); return value; }
@@ -413,12 +420,12 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
     });
     const scopedRequest = (group,body,path='/api/sessions') => h.request(body,`http://localhost${path}?entry=${group.entryToken}`);
     let linkedA, linkedB, linkedOther, participantA, participantB, otherGroup;
-    await t.test('entry validation and required student numbers cannot create empty or misplaced records', async () => {
+    await t.test('entry validation and required names cannot create empty or misplaced records', async () => {
       const before = (await pool.query('SELECT count(*)::int AS n FROM participants')).rows[0].n;
       for (const token of ['missing','abcdefgh','ffffffffffffffffffffffffffffffff']) {
         assert.equal((await sessions.POST(h.request({ profile:{ fullName:'错误',studentNumber:'bad' } },`http://localhost/api/sessions?entry=${token}`))).status,404);
       }
-      assert.equal((await sessions.POST(scopedRequest(groups[0],{ profile:{ fullName:'同名',studentNumber:'  ' } }))).status,400);
+      assert.equal((await sessions.POST(scopedRequest(groups[0],{ profile:{ fullName:'  ',studentNumber:'optional-001' } }))).status,400);
       assert.equal((await pool.query('SELECT count(*)::int AS n FROM participants')).rows[0].n,before);
     });
     await t.test('links isolate cookies, codes, same-name identities and assigned agents across groups and experiments', async () => {
@@ -687,7 +694,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       // Reopening admits new students to precisely the same configuration.
       await control.reopenExperimentRun(study.id,groups[0].id,adminId);
       const browser = await harness(db,h.sources);
-      const created = await browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'',studentNumber:'after-frozen-pause' } },`http://localhost/api/sessions?entry=${groups[0].entryToken}`));
+      const created = await browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'合成学生',studentNumber:'after-frozen-pause' } },`http://localhost/api/sessions?entry=${groups[0].entryToken}`));
       assert.equal(created.status,201);
       assert.equal(created.body.session.agentId,groups[0].fixedAgentId);
       await browser.load('app/api/messages/route.ts').POST(browser.request({ clientRequestId:crypto.randomUUID(),content:'保持原智能体' },`http://localhost/api/messages?entry=${groups[0].entryToken}`));
@@ -698,7 +705,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       const run = await control.activateExperimentRun({ experimentId:otherStudy.id,name:'首次报名即锁定',
         assignmentMode:'balanced_random',fixedAgentId:null,randomAgentIds:agents.map(agent => agent.id),makeDefault:false },adminId);
       const browser = await harness(db,h.sources);
-      const created = await browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'',studentNumber:'freeze-before-chat' } },`http://localhost/api/sessions?entry=${run.entryToken}`));
+      const created = await browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'合成学生',studentNumber:'freeze-before-chat' } },`http://localhost/api/sessions?entry=${run.entryToken}`));
       assert.equal(created.status,201);
       assert.equal((await pool.query('SELECT count(*)::int AS n FROM messages m JOIN experiment_sessions s ON s.id=m.session_id WHERE s.experiment_run_id=$1',[run.id])).rows[0].n,0);
       await control.closeActiveExperimentRun(otherStudy.id,adminId,run.id);
@@ -756,7 +763,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       const next = await newFixedRun(await newAgent('另一个新配置'),'重新使用后不复用旧码');
       assert.notEqual(next.entryToken,empty.entryToken);
       const browser = await harness(db,h.sources);
-      assert.equal((await browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'',studentNumber:'released-agent-now-used' } },`http://localhost/api/sessions?entry=${active.entryToken}`))).status,201);
+      assert.equal((await browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'合成学生',studentNumber:'released-agent-now-used' } },`http://localhost/api/sessions?entry=${active.entryToken}`))).status,201);
       await deleteEmptyLink(active);
       h.forceToken(empty.entryToken);
       assert.notEqual((await newFixedRun(await newAgent('历史记录保护配置'),'有记录后拒绝旧码')).entryToken,empty.entryToken);
@@ -789,7 +796,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
     await t.test('snapshot-only historical associations still lock editing and deletion', async () => {
       const agent = await newAgent('仅快照关联的配置'), run = await newFixedRun(agent,'历史快照入口');
       const browser = await harness(db,h.sources);
-      const created = await browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'',studentNumber:'snapshot-only' } },`http://localhost/api/sessions?entry=${run.entryToken}`));
+      const created = await browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'合成学生',studentNumber:'snapshot-only' } },`http://localhost/api/sessions?entry=${run.entryToken}`));
       assert.equal(created.status,201);
       await control.closeActiveExperimentRun(otherStudy.id,adminId,run.id);
       // Simulate older records whose relationship exists only in the snapshot.
@@ -806,7 +813,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
         const agent = await newAgent(`报名并发配置${attempt}`), run = await newFixedRun(agent,`报名并发入口${attempt}`);
         const browser = await harness(db,h.sources);
         const [signup,edit,paused] = await Promise.all([
-          browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'',studentNumber:`concurrent-freeze-${attempt}` } },`http://localhost/api/sessions?entry=${run.entryToken}`)),
+          browser.load('app/api/sessions/route.ts').POST(browser.request({ profile:{ fullName:'合成学生',studentNumber:`concurrent-freeze-${attempt}` } },`http://localhost/api/sessions?entry=${run.entryToken}`)),
           lifecycleApi.POST(adminRequest({ action:'save_agent',agent:agentInput(agent,{ botId:`concurrent-edit-${attempt}` }) },otherStudy.id)),
           lifecycleApi.POST(adminRequest({ action:'close_active_run',runId:run.id },otherStudy.id)),
         ]);
@@ -1099,6 +1106,385 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
         assert.equal(decrypt(await row()),`${newKey}-deleted`);
         assert.equal((await pool.query('SELECT count(*)::int AS n FROM participants WHERE experiment_id=$1',[experimentId])).rows[0].n,1);
         assert.equal((await pool.query('SELECT count(*)::int AS n FROM messages WHERE session_id=$1',[active.id])).rows[0].n,4);
+      });
+    }
+    for (const provider of ['coze','dify']) {
+      const projectId = 'repeat-' + provider;
+      const projectSettings = await settingsLib.getExperimentSettings('recovery-test',false);
+      await pool.query('INSERT INTO experiments(id,name) VALUES ($1,$2)',[projectId,'多次参与 ' + provider]);
+      let settings = {...projectSettings,experiment:{...projectSettings.experiment,id:projectId,title:'原学习任务',taskVisible:true,chatEnabled:true},
+        storage:{databaseMessagesEnabled:true},limits:{maxUserMessages:2,maxMessageChars:2000,sessionDurationMinutes:60},
+        memory:{enabled:true,maxInputTokens:6000}};
+      await settingsLib.saveExperimentSettings(settings,adminId);
+      const agents = [];
+      for (const suffix of ['A','B']) agents.push(await control.saveAgentConfig({
+        experimentId:projectId,provider,internalName:'学习助手 ' + suffix,
+        baseUrl:provider==='coze'?'https://api.coze.com':'https://api.dify.ai/v1',
+        botId:provider==='coze'?'repeat-bot-' + suffix:'',token:'synthetic-repeat-' + provider + suffix,enabled:true,
+      },adminId));
+      const links = [];
+      for (const agent of agents) links.push(await control.activateExperimentRun({
+        experimentId:projectId,name:agent.internalName,assignmentMode:'fixed',fixedAgentId:agent.id,randomAgentIds:[],makeDefault:false,
+      },adminId));
+      const browser = await harness(db,h.sources);
+      const req = (device,body,path='/api/sessions',group=links[0]) =>
+        device.request(body,'http://localhost' + path + '?entry=' + group.entryToken);
+      const getPayload = async (device=browser,group=links[0]) => {
+        const response=await device.load('app/api/sessions/route.ts').GET(req(device,{},'/api/sessions',group));
+        assert.equal(response.status,200);return response.body;
+      };
+      const send = async (device,content,group=links[0]) => {
+        const response=await device.load('app/api/messages/route.ts').POST(req(device,{clientRequestId:crypto.randomUUID(),content},'/api/messages',group));
+        if (provider==='coze' || response.status!==200) return response;
+        const events=(await response.text()).split('\n\n').filter(Boolean).map(frame=>JSON.parse(frame.slice(6)));
+        const error=events.find(event=>event.event==='error');
+        assert.equal(error,undefined);
+        return {status:200,body:events.find(event=>event.event==='completed').payload};
+      };
+      const start = async (device=browser,operation,group=links[0]) => {
+        operation ??= {action:'start_interaction',clientRequestId:crypto.randomUUID(),expectedSessionId:(await getPayload(device,group)).session.id};
+        return device.load('app/api/conversations/route.ts').POST(req(device,operation,'/api/conversations',group));
+      };
+      const internalSession = async (device=browser,group=links[0]) => device.load('lib/session.ts').getAuthenticatedSession(await entries.getExperimentEntry(group.entryToken));
+      const directory=h.load('app/api/admin/participants/route.ts');
+      const adminReq=(body={},suffix='',scope=projectId)=>h.request(body,'http://localhost/api/admin/participants?experimentId=' + scope + suffix);
+      const latestProviderInput=device=>provider==='coze'?device.creates.at(-1).additional_messages[0].content:device.difyCalls.at(-1).query;
+      const providerCalls=device=>provider==='coze'?device.creates.length:device.difyCalls.length;
+      const parseBackground=text=>JSON.parse(text.slice(text.indexOf('\n')+1));
+      let first, participant, firstInternalId, other, otherInternal, firstMessages, second, secondInternal, third;
+
+      await t.test(provider + ': required trimmed name, optional number and duplicate names create separate stable identities',async()=>{
+        assert.equal((await browser.load('app/api/sessions/route.ts').POST(req(browser,{profile:{fullName:'  '}}))).status,400);
+        first=await browser.load('app/api/sessions/route.ts').POST(req(browser,{profile:{fullName:'  同名学生  '},registrationRequestId:crypto.randomUUID()}));
+        assert.equal(first.status,201);assert.equal(first.body.session.participantCode,'P001');
+        assert.equal(first.body.participantProfile.fullName,'同名学生');assert.equal(first.body.participantProfile.studentNumber,'');
+        participant=(await internalSession()).participantId;firstInternalId=(await internalSession()).id;
+        const duplicate=await harness(db,h.sources);
+        const duplicateResult=await duplicate.load('app/api/sessions/route.ts').POST(req(duplicate,{profile:{fullName:'同名学生',studentNumber:'  '}}));
+        assert.equal(duplicateResult.status,201);assert.equal(duplicateResult.body.session.participantCode,'P002');
+        assert.notEqual((await internalSession(duplicate)).participantId,participant);
+        other=await harness(db,h.sources);
+        const otherResult=await other.load('app/api/sessions/route.ts').POST(req(other,{profile:{fullName:'同名学生',studentNumber:'repeat-number'}},'/api/sessions',links[1]));
+        assert.equal(otherResult.status,201);assert.equal(otherResult.body.session.participantCode,'P003');
+        otherInternal=await other.load('lib/session.ts').getAuthenticatedSession(await entries.getExperimentEntry(links[1].entryToken));
+        assert.equal(otherInternal.configSnapshot.ai.agentId,agents[1].id);
+      });
+      await t.test(provider + ': repeated initial registration is idempotent across browsers and validates the bound identity and group',async()=>{
+        const devices=await Promise.all([harness(db,h.sources),harness(db,h.sources)]);
+        const registrationRequestId=crypto.randomUUID(),input={profile:{fullName:'重复提交学生'},registrationRequestId};
+        const replies=await Promise.all(devices.map(device=>device.load('app/api/sessions/route.ts').POST(req(device,input))));
+        assert.deepEqual(replies.map(reply=>reply.status).sort(),[200,201]);
+        assert.equal(replies[0].body.session.id,replies[1].body.session.id);
+        assert.equal(replies[0].body.session.participantCode,replies[1].body.session.participantCode);
+        const registered=(await pool.query("SELECT id FROM participants WHERE experiment_id=$1 AND metadata->>'registration_request_id'=$2",[projectId,registrationRequestId])).rows;
+        assert.equal(registered.length,1);
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM experiment_sessions WHERE participant_id=$1',[registered[0].id])).rows[0].n,1);
+        const fresh=await harness(db,h.sources);
+        assert.equal((await fresh.load('app/api/sessions/route.ts').POST(req(fresh,{...input,profile:{fullName:'不同的人'}}))).body.error.code,'REGISTRATION_ALREADY_USED');
+        assert.equal((await fresh.load('app/api/sessions/route.ts').POST(req(fresh,input,'/api/sessions',links[1]))).body.error.code,'REGISTRATION_ALREADY_USED');
+        assert.equal((await fresh.load('app/api/sessions/route.ts').POST(req(fresh,input))).status,200);
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM experiment_sessions WHERE participant_id=$1',[registered[0].id])).rows[0].n,1);
+      });
+      await t.test(provider + ': concurrent nonempty student numbers are unique across all groups without merging names',async()=>{
+        const devices=await Promise.all([harness(db,h.sources),harness(db,h.sources)]);
+        const replies=await Promise.all(devices.map((device,index)=>device.load('app/api/sessions/route.ts').POST(req(device,{
+          profile:{fullName:'同名学生',studentNumber:'  concurrent-number  '},registrationRequestId:crypto.randomUUID(),
+        },'/api/sessions',links[index]))));
+        assert.deepEqual(replies.map(reply=>reply.status).sort(),[201,409]);
+        assert.equal(replies.find(reply=>reply.status===409).body.error.code,'STUDENT_NUMBER_EXISTS');
+        const rows=(await pool.query('SELECT external_code FROM participants WHERE experiment_id=$1 ORDER BY external_code',[projectId])).rows;
+        assert.deepEqual(rows.map(row=>row.external_code),['P001','P002','P003','P004','P005']);
+      });
+      await t.test(provider + ': existing same-device credentials restore drafts and the server rejects other groups and identities',async()=>{
+        assert.equal((await browser.load('app/api/sessions/draft/route.ts').PUT(req(browser,{sessionId:first.body.session.id,text:'尚未发送的原任务草稿',revision:0},'/api/sessions/draft'))).status,200);
+        const fresh=await harness(db,h.sources);
+        const count=(await pool.query('SELECT count(*)::int AS n FROM participants WHERE experiment_id=$1',[projectId])).rows[0].n;
+        assert.equal((await fresh.load('app/api/sessions/resume/route.ts').POST(req(fresh,{participantCode:'P001',identity:'同名学生'},'/api/sessions/resume',links[1]))).status,404);
+        assert.equal((await fresh.load('app/api/sessions/resume/route.ts').POST(req(fresh,{participantCode:'P999',identity:'同名学生'},'/api/sessions/resume'))).status,404);
+        assert.equal((await fresh.load('app/api/sessions/resume/route.ts').POST(req(fresh,{participantCode:'P001',identity:'wrong'},'/api/sessions/resume'))).status,404);
+        assert.equal((await getPayload()).draft.text,'尚未发送的原任务草稿');
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM participants WHERE experiment_id=$1',[projectId])).rows[0].n,count);
+      });
+      await t.test(provider + ': ended interaction stays ended, while a new task gets an independent session and current project requirements',async()=>{
+        assert.equal((await send(other,'其他组的秘密背景',links[1])).status,200);
+        assert.equal((await send(browser,'请记住本人的关键词月亮')).status,200);
+        assert.equal((await send(browser,'原任务分析第二步')).status,200);
+        const finished=await getPayload();
+        assert.equal(finished.controls.remainingMessages,0);
+        firstMessages=(await pool.query('SELECT id,role,content FROM messages WHERE session_id=$1 ORDER BY sequence_no',[firstInternalId])).rows;
+        assert.equal(firstMessages.length,4);
+        assert.equal((await browser.load('app/api/sessions/draft/route.ts').PUT(req(browser,{sessionId:first.body.session.id,text:'尚未发送的原任务草稿',revision:finished.draft.revision},'/api/sessions/draft'))).status,200);
+        assert.equal((await browser.load('app/api/sessions/complete/route.ts').POST(req(browser,{messages:[],storedMessageCount:4},'/api/sessions/complete'))).status,200);
+        const completedAt=(await pool.query('SELECT completed_at FROM experiment_sessions WHERE id=$1',[firstInternalId])).rows[0].completed_at;
+        settings={...settings,experiment:{...settings.experiment,title:'第二次学习任务',requirements:['当前要求：先说明推理依据']}};
+        await settingsLib.saveExperimentSettings(settings,adminId);
+        await control.closeActiveExperimentRun(projectId,adminId,links[0].id);
+        second=await start();
+        assert.equal(second.status,200);
+        secondInternal=await internalSession();
+        assert.equal(secondInternal.participantId,participant);assert.notEqual(secondInternal.id,firstInternalId);
+        assert.equal(second.body.payload.session.participantCode,'P001');
+        assert.equal(second.body.payload.session.agentId,agents[0].id);
+        assert.equal(second.body.payload.session.experimentRunId,links[0].id);
+        assert.equal(second.body.payload.experiment.title,'第二次学习任务');
+        assert.equal(second.body.payload.controls.usedMessages,0);assert.equal(second.body.payload.controls.remainingMessages,2);
+        assert.equal(second.body.payload.messages.length,0);
+        assert.ok(new Date(second.body.payload.session.startedAt)>new Date(first.body.session.startedAt));
+        assert.equal((await pool.query('SELECT completed_at FROM experiment_sessions WHERE id=$1',[firstInternalId])).rows[0].completed_at.getTime(),completedAt.getTime());
+        const memory=(await pool.query('SELECT metadata FROM experiment_sessions WHERE id=$1',[secondInternal.id])).rows[0].metadata.history_memory;
+        assert.equal(memory.policy,'full_or_block');assert.equal(memory.status,'ready');assert.equal(memory.messageCount,4);
+        assert.deepEqual(memory.sourceSessionIds,[first.body.session.id]);
+        assert.equal((await getPayload()).session.id,second.body.payload.session.id);
+      });
+      await t.test(provider + ': first new-task call receives all original ordered history without importing it into the new transcript',async()=>{
+        const sent=await send(browser,'本次的问题是什么？');
+        assert.equal(sent.status,200);
+        const input=latestProviderInput(browser),background=parseBackground(input);
+        assert.equal(background.schema,'edulab-history-v1');assert.equal(background.question,'本次的问题是什么？');
+        assert.equal(background.currentTask.title,'第二次学习任务');
+        assert.deepEqual(background.currentTask.requirements,['当前要求：先说明推理依据']);
+        assert.deepEqual(background.history.map(message=>message.role),['user','assistant','user','assistant']);
+        assert.deepEqual(background.history.map(message=>message.content),firstMessages.map(message=>message.content));
+        assert.deepEqual(background.history.map(message=>message.messageId),firstMessages.map(message=>message.id));
+        assert.equal(input.includes('其他组的秘密背景'),false);assert.equal(input.includes('concurrent-number'),false);
+        if (provider==='coze') {
+          assert.equal(browser.creates.at(-1).additional_messages.length,1);
+          assert.equal(browser.creates.at(-1).additional_messages[0].role,'user');
+          assert.notEqual(sent.body.session.cozeConversationId,(await pool.query('SELECT coze_conversation_id FROM experiment_sessions WHERE id=$1',[firstInternalId])).rows[0].coze_conversation_id);
+        } else {
+          assert.notEqual(sent.body.session.difyConversationId,(await pool.query('SELECT dify_conversation_id FROM experiment_sessions WHERE id=$1',[firstInternalId])).rows[0].dify_conversation_id);
+          assert.notEqual(browser.difyCalls.at(-1).user,browser.difyCalls[0].user);
+        }
+        const raw=(await pool.query('SELECT role,content FROM messages WHERE session_id=$1 ORDER BY sequence_no',[secondInternal.id])).rows;
+        assert.equal(raw.length,2);assert.equal(raw[0].content,'本次的问题是什么？');
+        assert.equal(raw.some(message=>message.content.startsWith('EduLab 历史背景 v1：')),false);
+        const request=(await pool.query('SELECT metadata FROM chat_requests WHERE session_id=$1',[secondInternal.id])).rows[0];
+        assert.equal(request.metadata.history_memory.injected,true);
+        assert.deepEqual(request.metadata.history_memory.sourceMessageIds,firstMessages.map(message=>message.id));
+        assert.equal(JSON.stringify(request.metadata.history_memory).includes('请记住本人的关键词月亮'),false);
+      });
+      await t.test(provider + ': follow-up uses current provider context; fresh-device resume rotates credentials without creating another interaction',async()=>{
+        const before=await getPayload(),oldSession=await internalSession(),count=providerCalls(browser);
+        const follow=await send(browser,'继续当前分析');
+        assert.equal(follow.status,200);assert.equal(latestProviderInput(browser),'继续当前分析');
+        if (provider==='coze') assert.equal(browser.creates.at(-1).conversation_id,before.session.cozeConversationId);
+        else assert.equal(browser.difyCalls.at(-1).conversation_id,before.session.difyConversationId);
+        const fresh=await harness(db,h.sources);
+        const cookieName=entries.sessionCookieName(await entries.getExperimentEntry(links[0].entryToken));
+        const restored=await fresh.load('app/api/sessions/resume/route.ts').POST(req(fresh,{participantCode:' p001 ',identity:'  同名学生  '},'/api/sessions/resume'));
+        assert.equal(restored.status,200);
+        assert.equal((await getPayload(fresh)).session.id,second.body.payload.session.id);
+        assert.equal((await getPayload(fresh)).messages.length,4);
+        assert.equal((await getPayload(fresh)).controls.usedMessages,2);
+        assert.equal(providerCalls(browser),count+1);
+        await assert.rejects(()=>browser.load('lib/session-write.ts').sessionTransaction(oldSession,async()=>{}),error=>error.code==='SESSION_REPLACED');
+        browser.jar.set(cookieName,fresh.jar.get(cookieName));
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM experiment_sessions WHERE participant_id=$1',[participant])).rows[0].n,2);
+      });
+      await t.test(provider + ': duplicate and competing new-task actions create one session and preserve all past drafts',async()=>{
+        const operation={action:'start_interaction',clientRequestId:crypto.randomUUID(),expectedSessionId:second.body.payload.session.id};
+        const devices=await Promise.all([harness(db,h.sources),harness(db,h.sources)]);
+        for (const device of devices) for (const [key,value] of browser.jar) device.jar.set(key,value);
+        const replies=await Promise.all(devices.map(device=>start(device,operation)));
+        assert.ok(replies.every(reply=>reply.status===200));
+        assert.equal(replies[0].body.payload.session.id,replies[1].body.payload.session.id);
+        third=replies[0].body.payload;
+        for (const [key,value] of devices[0].jar) browser.jar.set(key,value);
+        const stale=await devices[1].load('app/api/conversations/route.ts').POST(req(devices[1],{...operation,clientRequestId:crypto.randomUUID()},'/api/conversations'));
+        assert.equal(stale.status,409);assert.equal(stale.body.error.code,'SESSION_CHANGED');
+        assert.equal((await start(browser,operation)).body.payload.session.id,third.session.id);
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM experiment_sessions WHERE participant_id=$1',[participant])).rows[0].n,3);
+        assert.equal((await pool.query('SELECT draft_text FROM experiment_sessions WHERE id=$1',[firstInternalId])).rows[0].draft_text,'尚未发送的原任务草稿');
+        const memory=(await pool.query('SELECT metadata FROM experiment_sessions WHERE public_id=$1',[third.session.id])).rows[0].metadata.history_memory;
+        assert.equal(memory.messageCount,8);assert.equal(memory.sourceSessionIds.length,2);
+        assert.equal((await send(browser,'第三次学习问题')).status,200);
+        const background=parseBackground(latestProviderInput(browser));
+        assert.equal(background.history.length,8);
+        assert.equal(background.history.some(message=>message.content.startsWith('EduLab 历史背景 v1：')),false);
+      });
+      await t.test(provider + ': admin identity edits retain IDs, codes, assignments and every session and audit encrypted before/after values',async()=>{
+        asAdmin();
+        const beforeParticipant=(await pool.query('SELECT * FROM participants WHERE id=$1',[participant])).rows;
+        const beforeSessions=(await pool.query('SELECT * FROM experiment_sessions WHERE participant_id=$1 ORDER BY id',[participant])).rows;
+        const beforeAssignments=(await pool.query('SELECT * FROM participant_agent_assignments WHERE participant_id=$1',[participant])).rows;
+        const current=(await getPayload()).participantProfile;
+        const edited=await directory.PUT(adminReq({participantId:participant,fullName:'  更正后的姓名  ',studentNumber:'  corrected-number  ',revision:current.revision,participantCode:'P999'}));
+        assert.equal(edited.status,200);assert.equal(edited.body.profile.fullName,'更正后的姓名');
+        assert.equal(edited.body.profile.studentNumber,'corrected-number');
+        assert.deepEqual((await pool.query('SELECT * FROM participants WHERE id=$1',[participant])).rows,beforeParticipant);
+        assert.deepEqual((await pool.query('SELECT * FROM experiment_sessions WHERE participant_id=$1 ORDER BY id',[participant])).rows,beforeSessions);
+        assert.deepEqual((await pool.query('SELECT * FROM participant_agent_assignments WHERE participant_id=$1',[participant])).rows,beforeAssignments);
+        const rows=(await pool.query("SELECT * FROM admin_audit_log WHERE experiment_id=$1 AND action='participant.identity.update'",[projectId])).rows;
+        assert.equal(rows.length,1);assert.equal(rows[0].admin_user_id,adminId);assert.ok(rows[0].created_at);
+        assert.equal(JSON.stringify(rows).includes('corrected-number'),false);
+        const audit=(await directory.GET(adminReq({},'&identityHistory=' + participant))).body.changes;
+        assert.equal(audit[0].before.fullName,'同名学生');assert.equal(audit[0].before.studentNumber,'');
+        assert.equal(audit[0].after.fullName,'更正后的姓名');assert.equal(audit[0].administrator,'合成管理员');
+        assert.equal((await directory.PUT(adminReq({participantId:participant,fullName:'stale',revision:current.revision}))).body.error.code,'PROFILE_CHANGED');
+        assert.equal((await directory.PUT(adminReq({participantId:participant,fullName:'更正后的姓名',studentNumber:'repeat-number',revision:edited.body.profile.revision}))).body.error.code,'STUDENT_NUMBER_EXISTS');
+        const fresh=await harness(db,h.sources);
+        await pool.query('DELETE FROM participant_recovery_attempts WHERE bucket_hash=$1',[h.load('lib/security.ts').hashSecret(projectId + ':P001')]);
+        for (const identity of ['同名学生','wrong-number']) {
+          assert.equal((await fresh.load('app/api/sessions/resume/route.ts').POST(req(fresh,{participantCode:'P001',identity},'/api/sessions/resume'))).status,404);
+        }
+        for (const identity of ['更正后的姓名','corrected-number']) {
+          assert.equal((await fresh.load('app/api/sessions/resume/route.ts').POST(req(fresh,{participantCode:'P001',identity},'/api/sessions/resume'))).status,200);
+          assert.equal((await getPayload(fresh)).session.id,third.session.id);
+        }
+        for (const [key,value] of fresh.jar) browser.jar.set(key,value);
+      });
+      await t.test(provider + ': identity validation, audit failures and project scope never partially save an edit',async()=>{
+        asAdmin();
+        const current=(await getPayload()).participantProfile;
+        const update={participantId:participant,fullName:'保存失败的姓名',studentNumber:'new-number',revision:current.revision};
+        h.jar.delete('edulab_admin');assert.equal((await directory.PUT(adminReq(update))).status,401);
+        asAdmin();assert.equal((await directory.PUT(adminReq(update,'',study.id))).status,404);
+        const crossOrigin=adminReq(update);crossOrigin.headers.set('origin','https://other.example');
+        assert.equal((await directory.PUT(crossOrigin)).status,403);
+        failIdentityAudit=true;
+        try {assert.equal((await directory.PUT(adminReq(update))).status,500);}
+        finally {failIdentityAudit=false;}
+        assert.deepEqual((await getPayload()).participantProfile,current);
+        const edited=await directory.PUT(adminReq({...update,fullName:'同名学生',studentNumber:''}));
+        assert.equal(edited.status,200);assert.equal(edited.body.profile.studentNumber,'');
+        assert.equal((await getPayload()).session.participantCode,'P001');
+      });
+      await t.test(provider + ': admins query and export distinct timestamped sessions, original records, drafts and memory provenance',async()=>{
+        asAdmin();
+        const listing=await directory.GET(adminReq({},'&participantId=' + participant));
+        assert.equal(listing.status,200);assert.equal(listing.body.sessions.length,3);
+        assert.ok(listing.body.sessions.every(session=>session.startedAt && session.id && session.experimentRunId===links[0].id));
+        const record=await directory.GET(adminReq({},'&participantId=' + participant + '&sessionId=' + first.body.session.id));
+        assert.equal(record.body.messages.length,4);assert.equal(record.body.draft,'尚未发送的原任务草稿');
+        assert.equal((await directory.GET(adminReq({},'&participantId=' + participant + '&sessionId=' + otherInternal.publicId))).status,404);
+        assert.equal((await directory.GET(adminReq({},'&participantId=' + participant,study.id))).status,404);
+        const archive=await h.load('lib/admin-export.ts').buildInteractionArchive({experimentId:projectId,participantIds:[participant],adminUserId:adminId});
+        const unzipped=fflate.unzipSync(archive.bytes);
+        const records=Object.entries(unzipped).filter(([name])=>name.startsWith('interactions/')).map(([,bytes])=>JSON.parse(fflate.strFromU8(bytes)));
+        assert.equal(records.length,3);
+        assert.equal(new Set(records.map(record=>record.session.id)).size,3);
+        assert.ok(records.every(record=>record.participant.code==='P001' && record.participant.id===participant && record.experiment.id===projectId && record.interaction.id));
+        assert.equal(records.reduce((count,record)=>count+record.messages.length,0),10);
+        const last=records.find(record=>record.session.id===third.session.id);
+        assert.equal(last.historyMemory.messageCount,8);
+        assert.equal(last.historyMemory.sourceMessageIds.length,8);
+        assert.equal(records.find(record=>record.session.id===first.body.session.id).draft,'尚未发送的原任务草稿');
+      });
+      await t.test(provider + ': a failed new-interaction save rolls back completion and can retry the same operation',async()=>{
+        const before=(await pool.query('SELECT status,completed_at,metadata FROM experiment_sessions WHERE public_id=$1',[third.session.id])).rows;
+        const operation={action:'start_interaction',clientRequestId:crypto.randomUUID(),expectedSessionId:third.session.id};
+        failInteractionMemoryWrite=true;
+        try {assert.equal((await start(browser,operation)).status,500);}
+        finally {failInteractionMemoryWrite=false;}
+        assert.deepEqual((await pool.query('SELECT status,completed_at,metadata FROM experiment_sessions WHERE public_id=$1',[third.session.id])).rows,before);
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM experiment_sessions WHERE participant_id=$1',[participant])).rows[0].n,3);
+        assert.equal((await start(browser,operation)).status,200);
+        assert.equal((await start(browser,operation)).status,200);
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM experiment_sessions WHERE participant_id=$1',[participant])).rows[0].n,4);
+      });
+      await t.test(provider + ': changed historical content is detected before AI receives it or a new question is recorded',async()=>{
+        const current=await internalSession(),calls=providerCalls(browser);
+        await pool.query('UPDATE messages SET content=$2 WHERE id=$1',[firstMessages[0].id,'更改后的历史内容']);
+        const response=await send(browser,'核验已引用的历史');
+        assert.equal(response.status,409);assert.equal(response.body.error.code,'HISTORY_MEMORY_CHANGED');
+        assert.equal(providerCalls(browser),calls);
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM chat_requests WHERE session_id=$1',[current.id])).rows[0].n,0);
+        await pool.query('UPDATE messages SET content=$2 WHERE id=$1',[firstMessages[0].id,firstMessages[0].content]);
+      });
+      await t.test(provider + ': unconfirmed prior AI outcomes are explicitly blocked rather than omitted from history',async()=>{
+        const request=(await pool.query('SELECT id FROM chat_requests WHERE session_id=$1 ORDER BY turn_index LIMIT 1',[firstInternalId])).rows[0];
+        await pool.query("UPDATE chat_requests SET status='uncertain' WHERE id=$1",[request.id]);
+        assert.equal((await start()).status,200);
+        const memory=(await pool.query('SELECT metadata FROM experiment_sessions WHERE id=$1',[(await internalSession()).id])).rows[0].metadata.history_memory;
+        assert.equal(memory.status,'incomplete');
+        const calls=providerCalls(browser),rejected=await send(browser,'不能略过未核实的历史');
+        assert.equal(rejected.status,409);assert.equal(rejected.body.error.code,'HISTORY_MEMORY_INCOMPLETE');
+        assert.equal(providerCalls(browser),calls);
+        await pool.query("UPDATE chat_requests SET status='completed' WHERE id=$1",[request.id]);
+      });
+      await t.test(provider + ': overflow blocks before sending or recording a question; disabling memory is explicit and preserves raw history',async()=>{
+        await pool.query("UPDATE messages SET content=repeat('长',1200) WHERE id=$1",[firstMessages[0].id]);
+        settings={...settings,memory:{enabled:true,maxInputTokens:512}};
+        await settingsLib.saveExperimentSettings(settings,adminId);
+        const blocked=await start();assert.equal(blocked.status,200);
+        const blockedSession=await internalSession(),calls=providerCalls(browser);
+        const memory=(await pool.query('SELECT metadata FROM experiment_sessions WHERE id=$1',[blockedSession.id])).rows[0].metadata.history_memory;
+        assert.equal(memory.status,'too_long');assert.equal(memory.policy,'full_or_block');
+        const rejected=await send(browser,'不能悄悄截断');
+        assert.equal(rejected.status,409);assert.equal(rejected.body.error.code,'HISTORY_MEMORY_TOO_LONG');
+        assert.equal(providerCalls(browser),calls);
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM chat_requests WHERE session_id=$1',[blockedSession.id])).rows[0].n,0);
+        settings={...settings,memory:{enabled:false,maxInputTokens:6000}};
+        await settingsLib.saveExperimentSettings(settings,adminId);
+        assert.equal((await start()).status,200);
+        assert.equal((await send(browser,'明确关闭继承后的问题')).status,200);
+        const background=parseBackground(latestProviderInput(browser));
+        assert.deepEqual(background.history,[]);assert.equal(background.currentTask.title,'第二次学习任务');
+        assert.equal((await pool.query('SELECT content FROM messages WHERE id=$1',[firstMessages[0].id])).rows[0].content,'长'.repeat(1200));
+        assert.equal((await pool.query('SELECT metadata FROM experiment_sessions WHERE id=$1',[(await internalSession()).id])).rows[0].metadata.history_memory.status,'disabled');
+      });
+      await t.test(provider + ': missing historical database messages block full inheritance without silently substituting provider or browser state',async()=>{
+        await pool.query('DELETE FROM messages WHERE id=$1',[firstMessages[0].id]);
+        settings={...settings,memory:{enabled:true,maxInputTokens:10000}};
+        await settingsLib.saveExperimentSettings(settings,adminId);
+        assert.equal((await start()).status,200);
+        const pending=(await pool.query('SELECT metadata FROM experiment_sessions WHERE id=$1',[(await internalSession()).id])).rows[0].metadata.history_memory;
+        assert.equal(pending.status,'incomplete');
+        const calls=providerCalls(browser),response=await send(browser,'历史不完整也不能静默继续');
+        assert.equal(response.status,409);assert.equal(response.body.error.code,'HISTORY_MEMORY_INCOMPLETE');
+        assert.equal(providerCalls(browser),calls);
+      });
+      await t.test(provider + ': in-flight replies block a new task and are recovered once before both groups use the same history protocol',async()=>{
+        const original=(await getPayload(other,links[1])).session;
+        other.setPending(true);other.setDifyMode('interrupted');
+        const pending=await other.load('app/api/messages/route.ts').POST(req(other,{clientRequestId:crypto.randomUUID(),content:'生成中断前的问题'},'/api/messages',links[1]));
+        assert.equal(pending.status,provider==='coze'?202:200);
+        if (provider==='dify') await pending.text();
+        const busy=await start(other,{action:'start_interaction',clientRequestId:crypto.randomUUID(),expectedSessionId:original.id},links[1]);
+        assert.equal(busy.status,409);assert.equal(busy.body.error.code,'SESSION_BUSY');
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM experiment_sessions WHERE participant_id=$1',[otherInternal.participantId])).rows[0].n,1);
+        other.setPending(false);other.setDifyMode('normal');
+        const recovered=await getPayload(other,links[1]);assert.equal(recovered.pending,false);assert.equal(recovered.messages.length,4);
+        const recoveredAgain=await getPayload(other,links[1]);assert.equal(recoveredAgain.messages.length,4);
+        // Simulate participation on a later date without adding lesson scheduling.
+        await pool.query("UPDATE experiment_sessions SET started_at=started_at-interval '2 days' WHERE id=$1",[otherInternal.id]);
+        settings={...settings,memory:{enabled:true,maxInputTokens:6000}};
+        await settingsLib.saveExperimentSettings(settings,adminId);
+        const next=await start(other,undefined,links[1]);assert.equal(next.status,200);
+        assert.equal(next.body.payload.session.participantCode,original.participantCode);
+        assert.equal(next.body.payload.session.agentId,agents[1].id);
+        assert.equal(next.body.payload.controls.usedMessages,0);
+        assert.ok(new Date(next.body.payload.controls.endsAt)>new Date());
+        assert.equal((await send(other,'下一天的任务问题',links[1])).status,200);
+        const background=parseBackground(latestProviderInput(other));
+        assert.equal(background.schema,'edulab-history-v1');assert.equal(background.history.length,4);
+        assert.equal(background.history.some(message=>message.content.includes('关键词月亮')),false);
+      });
+      await t.test(provider + ': concurrent distinct start requests from the same old session cannot create competing interactions',async()=>{
+        const source=(await getPayload(other,links[1])).session;
+        const devices=await Promise.all([harness(db,h.sources),harness(db,h.sources)]);
+        for (const device of devices) for (const [key,value] of other.jar) device.jar.set(key,value);
+        const before=(await pool.query('SELECT count(*)::int AS n FROM experiment_sessions WHERE participant_id=$1',[otherInternal.participantId])).rows[0].n;
+        const results=await Promise.all(devices.map(device=>start(device,{action:'start_interaction',clientRequestId:crypto.randomUUID(),expectedSessionId:source.id},links[1])));
+        assert.deepEqual(results.map(result=>result.status).sort(),[200,409]);
+        assert.equal(results.find(result=>result.status===409).body.error.code,'NEWER_INTERACTION_EXISTS');
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM experiment_sessions WHERE participant_id=$1',[otherInternal.participantId])).rows[0].n,before+1);
+      });
+      if (provider==='dify') await t.test('Dify project copies retain provider and memory settings without copying student identities',async()=>{
+        asAdmin();
+        const copied=await studyApi.POST(h.request({name:'重复交互模板副本',sourceId:projectId},'http://localhost/api/admin/experiments'));
+        assert.equal(copied.status,201);
+        const configured=await settingsLib.getExperimentSettings(copied.body.created.id,false);
+        assert.deepEqual({...configured.memory},settings.memory);
+        const copiedAgents=(await control.getAgentControl(copied.body.created.id)).agents;
+        assert.ok(copiedAgents.every(agent=>agent.provider==='dify' && !agent.botId));
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM participants WHERE experiment_id=$1',[copied.body.created.id])).rows[0].n,0);
+        const group=await control.activateExperimentRun({experimentId:copied.body.created.id,name:'副本入口',assignmentMode:'fixed',
+          fixedAgentId:copiedAgents[0].id,randomAgentIds:[],makeDefault:false},adminId);
+        const device=await harness(db,h.sources);
+        const enrolled=await device.load('app/api/sessions/route.ts').POST(req(device,{profile:{fullName:'同名学生',studentNumber:'repeat-number'}},'/api/sessions',group));
+        assert.equal(enrolled.status,201);assert.equal(enrolled.body.session.participantCode,'P001');
+        assert.notEqual(enrolled.body.session.id,first.body.session.id);
       });
     }
   } finally {

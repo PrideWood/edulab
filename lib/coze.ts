@@ -10,6 +10,7 @@ import { sessionTransaction } from "@/lib/session-write";
 import { persistTranscript } from "@/lib/transcript";
 import { resolveSessionSnapshot } from "@/lib/experiment-limits";
 import { getRuntimeAiConfig } from "@/lib/experiment-settings";
+import { memoryForRequest, originalStudentMessage } from "@/lib/session-memory";
 
 const TERMINAL = new Set([ChatStatus.COMPLETED, ChatStatus.FAILED, ChatStatus.CANCELED, ChatStatus.REQUIRES_ACTION]);
 
@@ -72,6 +73,7 @@ export async function beginChatRequest(session: AuthenticatedSession, clientRequ
     }
 
     const snapshot = await resolveSessionSnapshot(session);
+    const memory = await memoryForRequest(client,session,content);
     const usage = await getSessionUsage(session, client);
     const endsAt = snapshot.limits.sessionDurationMinutes
       ? Date.parse(usage.startedAt) + snapshot.limits.sessionDurationMinutes * 60_000 : null;
@@ -103,6 +105,7 @@ export async function beginChatRequest(session: AuthenticatedSession, clientRequ
       storage_mode: "server_autosave",
       user_sequence: locked.rows[0].sequence_no,
       content_length: Array.from(content).length,
+      ...(memory.decision ? { history_memory:memory.decision } : {}),
       ...(databaseMessagesEnabled ? { user_content: content } : {}),
     };
     await client.query(
@@ -118,18 +121,18 @@ export async function beginChatRequest(session: AuthenticatedSession, clientRequ
       await client.query("UPDATE chat_requests SET user_message_id=$2 WHERE id=$1", [requestId, messageId]);
     }
     await client.query("UPDATE experiment_sessions SET draft_text='', draft_revision=draft_revision+1 WHERE id=$1", [session.id]);
-    return { created: true as const, request: { id: requestId, clientRequestId, turnIndex, status: "in_progress" as const, cozeChatId: null, cozeConversationId: null, requestedAt: new Date().toISOString(), metadata } };
+    return { created: true as const, providerContent:memory.content, request: { id: requestId, clientRequestId, turnIndex, status: "in_progress" as const, cozeChatId: null, cozeConversationId: null, requestedAt: new Date().toISOString(), metadata } };
   });
 }
 
-export async function createCozeChat(session: AuthenticatedSession, requestId: string, clientRequestId: string, content: string) {
+export async function createCozeChat(session: AuthenticatedSession, requestId: string, clientRequestId: string, content: string, providerContent = content) {
   const coze = await getCozeClient(session);
   const chat = await coze.client.chat.create({
     bot_id: coze.botId,
     user_id: session.cozeUserId,
     conversation_id: session.cozeConversationId ?? undefined,
     auto_save_history: true,
-    additional_messages: [{ role: RoleType.User, type: "question", content, content_type: "text" }],
+    additional_messages: [{ role: RoleType.User, type: "question", content:providerContent, content_type: "text" }],
     meta_data: { edulab_session: session.publicId, edulab_request: clientRequestId },
   });
   await transaction(async (client) => {
@@ -309,7 +312,9 @@ function transientRequestMessages(
   fallbackUserContent = "",
 ): StoredMessage[] {
   const question = userQuestion(messages);
-  const userContent = question?.content.trim() || (typeof request.metadata.user_content === "string" ? request.metadata.user_content : "") || fallbackUserContent;
+  const memory = request.metadata.history_memory as {injected?:boolean} | undefined;
+  const userContent = (typeof request.metadata.user_content === "string" ? request.metadata.user_content : "")
+    || fallbackUserContent || originalStudentMessage(question?.content.trim() ?? "",memory?.injected === true);
   const userSequence = Number(request.metadata.user_sequence ?? assistantStartSequence - 1);
   const answers = assistantAnswers(messages);
   const replyStartedAt = answers.length ? new Date(Math.min(...answers.map((message) => message.created_at * 1000))) : null;
