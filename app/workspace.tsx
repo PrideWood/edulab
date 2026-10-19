@@ -164,7 +164,7 @@ function MessageBody({ message }: { message: Pick<StoredMessage, "role" | "conte
   );
 }
 
-export function ExperimentWorkspace({ experiment: initialExperiment, entryToken }: { experiment: ExperimentConfig; entryToken?: string }) {
+export function ExperimentWorkspace({ experiment: initialExperiment, entryToken, rosterClasses }: { experiment: ExperimentConfig; entryToken?: string; rosterClasses?: string[] }) {
   const experimentId = initialExperiment.id;
   const apiUrl = useCallback((path: string) => entryToken ? `${path}?entry=${encodeURIComponent(entryToken)}` : path, [entryToken]);
   const [experiment, setExperiment] = useState(initialExperiment);
@@ -191,6 +191,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileFullName, setProfileFullName] = useState("");
   const [profileStudentNumber, setProfileStudentNumber] = useState("");
+  const [rosterClass, setRosterClass] = useState("");
   const [profileSaving, setProfileSaving] = useState(false);
   const [participantSwitching, setParticipantSwitching] = useState(false);
   const [profileError, setProfileError] = useState("");
@@ -809,7 +810,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(session
           ? { fullName: profileFullName, studentNumber: profileStudentNumber,revision:participantProfile?.revision ?? 0 }
-          : { profile: { fullName: profileFullName, studentNumber: profileStudentNumber },registrationRequestId:registrationRequestRef.current }),
+          : { profile: { fullName: profileFullName, studentNumber: profileStudentNumber },registrationRequestId:registrationRequestRef.current,
+            ...(rosterClasses ? {rosterClass} : {}) }),
       });
       const data = await response.json();
       if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "参与者信息保存失败。");
@@ -1100,9 +1102,10 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken 
             {profileError && <p className="profile-error" role="alert">{profileError}</p>}
             <button className="profile-save" type="submit" disabled={profileSaving}>{profileSaving ? "恢复中…" : "恢复实验"}</button>
           </form> : <form className="profile-form" onSubmit={saveProfile}>
+            {rosterClasses && !session && <label><span>班级</span><select value={rosterClass} onChange={event=>setRosterClass(event.target.value)} required><option value="">请选择班级</option>{rosterClasses.map(name=><option key={name} value={name}>{name}</option>)}</select></label>}
             <label><span>姓名</span><input value={profileFullName} onChange={(event) => setProfileFullName(event.target.value)} maxLength={100} autoComplete="name" placeholder="请输入姓名" required /></label>
-            <label><span>学号</span><input value={profileStudentNumber} onChange={(event) => setProfileStudentNumber(event.target.value)} maxLength={100} autoComplete="off" placeholder="学号选填" /></label>
-            <p className="profile-hint">姓名必填，允许重名；学号选填。有原编号请使用“继续之前的实验”，不要重复首次报名。</p>
+            {!rosterClasses && <label><span>学号</span><input value={profileStudentNumber} onChange={(event) => setProfileStudentNumber(event.target.value)} maxLength={100} autoComplete="off" placeholder="学号选填" /></label>}
+            <p className="profile-hint">{rosterClasses ? "请准确填写教师名单中的参与姓名，包括用于区分重名的数字。已有编号请使用继续之前的实验；匹配不到请联系教师。" : "姓名必填，允许重名；学号选填。有原编号请使用“继续之前的实验”，不要重复首次报名。"}</p>
             {profileError && <p className="profile-error" role="alert">{profileError}</p>}
             <button className="profile-save" type="submit" disabled={profileSaving || participantSwitching}>{profileSaving ? "保存中…" : participantProfile ? "保存修改" : "保存并开始"}</button>
             {participantProfile && <div className="next-participant"><button type="button" onClick={startNextParticipant} disabled={pending || profileSaving || participantSwitching}>{participantSwitching ? "正在保存并切换…" : "开始下一位参与者"}</button><p>仅在实验人员要求时使用。切换后当前参与者将无法在此浏览器继续操作。</p></div>}

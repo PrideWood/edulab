@@ -8,7 +8,7 @@ import { decryptSecret, encryptSecret } from "@/lib/secret-crypto";
 import { createRunEntryToken } from "@/lib/entry-token";
 import { hashSecret } from "@/lib/security";
 
-export type AssignmentMode = "fixed" | "balanced_random";
+export type AssignmentMode = "fixed" | "balanced_random" | "roster";
 
 export interface AgentConfigSummary {
   id: string;
@@ -119,7 +119,7 @@ function agentRecordUseSql(experimentExpression: string, agentExpression: string
     OR EXISTS (SELECT 1 FROM experiment_runs run
       WHERE run.experiment_id = ${experimentExpression}
         AND (run.fixed_agent_id = ${agentExpression} OR ${agentExpression} = ANY(run.random_agent_ids))
-        AND (EXISTS (SELECT 1 FROM participant_agent_assignments a WHERE a.experiment_run_id = run.id)
+        AND (run.metadata->>'roster_locked'='true' OR EXISTS (SELECT 1 FROM participant_agent_assignments a WHERE a.experiment_run_id = run.id)
           OR EXISTS (SELECT 1 FROM experiment_sessions s WHERE s.experiment_run_id = run.id)))
   )`;
 }
@@ -391,7 +391,7 @@ export async function resolveAgentTestConnection(input: {
 export async function activateExperimentRun(input: {
   experimentId: string;
   name: string;
-  assignmentMode: AssignmentMode;
+  assignmentMode: Exclude<AssignmentMode, "roster">;
   fixedAgentId: string | null;
   randomAgentIds: string[];
   makeDefault?: boolean;
@@ -472,9 +472,10 @@ const LIFECYCLE_RUN_SELECT = `SELECT id, name, status, assignment_mode, fixed_ag
 
 export async function reopenExperimentRun(experimentId: string, runId: string, adminUserId: string) {
   return transaction(async (client) => {
-    const initial = (await client.query<RunRow>(LIFECYCLE_RUN_SELECT, [runId, experimentId])).rows[0];
+    const initial = (await client.query<RunRow & {metadata:Record<string,unknown>}>(LIFECYCLE_RUN_SELECT, [runId, experimentId])).rows[0];
     if (!initial) throw new Error("RUN_NOT_FOUND");
     if (initial.entry_deleted_at) throw new Error("RUN_ENTRY_DELETED");
+    if (initial.assignment_mode === "roster" && !initial.metadata.roster_locked) throw new Error("ROSTER_NOT_LOCKED");
     const agentIds = initial.assignment_mode === "fixed"
       ? (initial.fixed_agent_id ? [initial.fixed_agent_id] : []) : initial.random_agent_ids;
     // Use the same agent-before-run lock order as activation and agent edits.
@@ -569,6 +570,10 @@ export async function assignAgentWithClient(
   if (!agentId) {
     if (active.assignment_mode === "fixed") {
       agentId = active.fixed_agent_id;
+    } else if (active.assignment_mode === "roster") {
+      const planned = await client.query<{agent_id:string}>(`SELECT agent_id FROM roster_entries
+        WHERE experiment_run_id=$1 AND participant_id=$2`, [active.id,participantId]);
+      agentId = planned.rows[0]?.agent_id;
     } else {
       // Serialize only balanced assignment; fixed-agent entrants can share the run.
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`edulab:assignment:${active.id}`]);

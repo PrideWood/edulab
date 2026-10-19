@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { ExperimentWorkspace } from "@/app/workspace";
 import { getExperimentEntry } from "@/lib/experiment-entry";
 import { getAuthenticatedSession } from "@/lib/session";
@@ -11,6 +11,7 @@ export default async function JoinPage({ params }: { params: Promise<{ token: st
   let entry;
   try { entry = await getExperimentEntry(token); }
   catch (error) { if (error instanceof ApiError && error.status === 404) notFound(); throw error; }
+  if(entry.assignmentMode === "roster") redirect(`/roster/${entry.token}`);
   const session = await getAuthenticatedSession(entry);
   const config = session?.configSnapshot?.experiment ?? entry.snapshot?.experiment ?? (await getExperimentSettings(entry.experimentId,false)).experiment;
   return <ExperimentWorkspace key={token} experiment={config} entryToken={token} />;

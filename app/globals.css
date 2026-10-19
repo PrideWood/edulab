@@ -235,3 +235,5 @@ h1 { margin: 0; font-size: clamp(27px, 3vw, 38px); line-height: 1.14; letter-spa
 .entry-tabs button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-dark); }
 .draft-conflict-actions { display: flex; gap: 8px; margin: 4px 8px; }
 .draft-conflict-actions button { padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--accent-dark); font-size: 12px; }
+
+.profile-form select { width: 100%; padding: 12px 14px; border: 1px solid #d8dce2; border-radius: 8px; background: #fff; color: inherit; font: inherit; }

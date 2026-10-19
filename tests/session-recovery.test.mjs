@@ -14,7 +14,7 @@ import { formatAgentTestFailure } from '../lib/agent-test-error.js';
 async function harness(db, sharedSources) {
   const files = ['config/experiment.ts', 'lib/security.ts', 'lib/secret-crypto.ts',
     'lib/session.ts', 'lib/session-usage.ts', 'lib/session-write.ts', 'lib/session-memory.ts', 'lib/http.ts', 'lib/admin-auth.ts',
-    'lib/participant-profile.ts', 'lib/participant-code-allocation.ts', 'lib/agent-control.ts',
+    'lib/participant-profile.ts', 'lib/participant-code-allocation.ts', 'lib/agent-control.ts', 'lib/roster.ts', 'lib/roster-allocation.ts', 'app/api/admin/rosters/route.ts',
     'lib/experiment-settings.ts', 'lib/experiment-limits.ts', 'lib/messages.ts', 'lib/coze.ts',
     'lib/dify.ts', 'lib/dify-chat.ts', 'lib/sse.ts', 'lib/transcript.ts', 'lib/session-payload.ts', 'lib/runtime-session.ts', 'lib/session-draft.ts',
     'lib/participant-recovery.ts', 'lib/experiment-entry.ts', 'lib/entry-links.ts', 'lib/entry-token.ts', 'lib/experiments.ts',
@@ -94,10 +94,93 @@ async function harness(db, sharedSources) {
     });
     return exports;
   }
-  const request = (body, url = 'http://localhost/api/sessions') => ({ url, headers: new Headers({ origin:'http://localhost' }), json:async () => JSON.parse(JSON.stringify(body)) });
+  const request = (body, url = 'http://localhost/api/sessions') => ({ url, headers: new Headers({ origin:'http://localhost' }), json:async () => JSON.parse(JSON.stringify(body)), text:async () => JSON.stringify(body) });
   return { load, jar, request, creates, cozeConfigs, sources, difyCalls, afterTasks, setDifyMode:value => { difyMode=value; }, setPending:value => { providerPending = value; },
     forceToken:value => forcedDraws.push(...[...value].map(char => 'abcdefghjkmnpqrstuvwxyz23456789'.indexOf(char))) };
 }
+
+test('roster rollout preserves old Coze/Dify experiments before migration and existing data after migration', { skip: !process.env.DATABASE_URL }, async () => {
+  const schema = `edulab_roster_rollout_${crypto.randomBytes(8).toString('hex')}`;
+  const databaseUrl = new URL(process.env.DATABASE_URL);
+  databaseUrl.hostname = databaseUrl.hostname.replace('-pooler.', '.');
+  const options = { connectionString: databaseUrl.toString(), connectionTimeoutMillis: 10000,
+    ssl: process.env.DATABASE_SSL === 'disable' ? false : process.env.DATABASE_SSL === 'require' ? { rejectUnauthorized: true } : undefined };
+  const admin = new pg.Client(options);
+  await admin.connect();
+  let pool;
+  try {
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    pool = new pg.Pool({ ...options, max: 4, options: `-c search_path=${schema}` });
+    assert.equal((await pool.query('SELECT current_schema() AS name')).rows[0].name, schema);
+    for (const file of (await readdir('db/migrations')).filter(file => file.endsWith('.sql') && file < '0016').sort()) {
+      await pool.query(await readFile(`db/migrations/${file}`, 'utf8'));
+    }
+    const db = { query: (sql, values) => pool.query(sql, values), transaction: async work => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN'); const result = await work(client); await client.query('COMMIT'); return result;
+      } catch (error) { await client.query('ROLLBACK'); throw error; }
+      finally { client.release(); }
+    } };
+    const h = await harness(db), adminId = crypto.randomUUID();
+    await pool.query("INSERT INTO admin_users (id,username,password_hash,display_name) VALUES ($1,'rollout','synthetic','Rollout')", [adminId]);
+    const auth = h.load('lib/admin-auth.ts');
+    const authenticate = () => h.jar.set(auth.ADMIN_COOKIE, auth.createAdminSessionToken({ id: adminId }));
+    const api = h.load('app/api/admin/rosters/route.ts');
+    const endpoint = 'http://localhost/api/admin/rosters?experimentId=recovery-test';
+    assert.equal((await api.GET(h.request({}, endpoint))).status, 401);
+    authenticate();
+    for (const response of [await api.GET(h.request({}, endpoint)), await api.POST(h.request({ action: 'save' }, endpoint))]) {
+      assert.equal(response.status, 503);
+      assert.equal(response.body.error.code, 'ROSTER_MIGRATION_REQUIRED');
+    }
+    const settings = h.load('lib/experiment-settings.ts');
+    const template = await settings.getExperimentSettings('recovery-test', false);
+    await settings.saveExperimentSettings({ ...template, storage: { databaseMessagesEnabled: true },
+      limits: { maxUserMessages: null, maxMessageChars: 2000, sessionDurationMinutes: null } }, adminId);
+    const control = h.load('lib/agent-control.ts');
+    for (const provider of ['coze', 'dify']) {
+      const agent = await control.saveAgentConfig({ experimentId: 'recovery-test', provider, internalName: `Old ${provider}`,
+        baseUrl: `https://${provider}.example/v1`, botId: provider === 'coze' ? 'synthetic-old-bot' : '',
+        token: 'synthetic-old-token', enabled: true }, adminId);
+      const link = await control.activateExperimentRun({ experimentId: 'recovery-test', name: `Old ${provider}`,
+        assignmentMode: 'fixed', fixedAgentId: agent.id, randomAgentIds: [], makeDefault: false }, adminId);
+      const browser = await harness(db, h.sources);
+      const request = (path, body) => browser.request(body, `http://localhost${path}?entry=${link.entryToken}`);
+      const joined = await browser.load('app/api/sessions/route.ts').POST(request('/api/sessions', {
+        profile: { fullName: `Old student ${provider}`, studentNumber: '' }, registrationRequestId: crypto.randomUUID(),
+      }));
+      assert.equal(joined.status, 201);
+      const sent = await browser.load('app/api/messages/route.ts').POST(request('/api/messages', {
+        content: 'Existing experiment still works', clientRequestId: crypto.randomUUID(),
+      }));
+      if (provider === 'dify') {
+        const frames = (await sent.text()).split('\n\n').filter(frame => frame.startsWith('data: ')).map(frame => JSON.parse(frame.slice(6)));
+        assert.ok(frames.some(frame => frame.event === 'completed'));
+        await Promise.all(browser.afterTasks);
+      } else {
+        assert.equal(sent.status, 200);
+        assert.equal(sent.body.messages.length, 2);
+      }
+      assert.equal((await browser.load('app/api/sessions/route.ts').GET(request('/api/sessions', {}))).status, 200);
+    }
+    const snapshot = async () => Promise.all(['participants', 'participant_identity_profiles', 'experiment_sessions', 'messages', 'chat_requests', 'experiment_runs']
+      .map(async table => (await pool.query(`SELECT * FROM ${table} ORDER BY ${table === 'participant_identity_profiles' ? 'participant_id' : 'id'}`)).rows));
+    const before = await snapshot();
+    const migration = await readFile('db/migrations/0016_roster_allocation.sql', 'utf8');
+    await db.transaction(client => client.query(migration));
+    assert.deepEqual(await snapshot(), before);
+    const available = await api.GET(h.request({}, endpoint));
+    assert.equal(available.status, 200);
+    assert.deepEqual(available.body.rosters, []);
+    assert.equal(before[0].length, 2);
+    assert.equal(before[3].length, 4);
+  } finally {
+    if (pool) await pool.end();
+    await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    await admin.end();
+  }
+});
 
 test('recovery SQL integration preserves participants, context, drafts, assignments and idempotency', { skip: !process.env.DATABASE_URL }, async t => {
   const schema = `edulab_recovery_test_${crypto.randomBytes(8).toString('hex')}`;
@@ -117,7 +200,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
     const migrations = (await readdir('db/migrations')).filter(file => file.endsWith('.sql')).sort();
     for (const file of migrations) await pool.query(await readFile(`db/migrations/${file}`, 'utf8'));
     let failMessageWrite = false, failLinkDeleteAudit = false, failKeyRotateAudit = false, failKeyWrite = false;
-    let failIdentityAudit = false, failInteractionMemoryWrite = false;
+    let failIdentityAudit = false, failInteractionMemoryWrite = false, failRosterAudit = false;
     const query = async (sql, values) => {
       if (failMessageWrite && /INSERT INTO messages/.test(sql)) throw new Error('synthetic database write failure');
       return pool.query(sql, values);
@@ -129,6 +212,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
         if (failLinkDeleteAudit && /INSERT INTO admin_audit_log/.test(sql) && sql.includes('experiment.run.link.delete')) throw new Error('synthetic audit write failure');
         if (failKeyRotateAudit && /INSERT INTO admin_audit_log/.test(sql) && sql.includes('ai.agent.key.rotate')) throw new Error('synthetic key audit failure');
         if (failKeyWrite && /UPDATE ai_agent_configs SET coze_token_ciphertext/.test(sql)) throw new Error('synthetic key write failure');
+        if (failRosterAudit && /INSERT INTO admin_audit_log/.test(sql) && values?.[2] === 'experiment.roster.save') throw new Error('synthetic roster audit failure');
         if (failIdentityAudit && /INSERT INTO admin_audit_log/.test(sql) && sql.includes('participant.identity.update')) throw new Error('synthetic identity audit failure');
         if (failInteractionMemoryWrite && /UPDATE experiment_sessions SET metadata=metadata.*history_memory/.test(sql)) throw new Error('synthetic memory write failure');
         return client.query(sql, values);
@@ -1487,6 +1571,186 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
         assert.notEqual(enrolled.body.session.id,first.body.session.id);
       });
     }
+
+    await t.test('roster allocation integration: drafts, identity claims, concurrency, exports and legacy coexistence', async t=>{
+      const projectId='roster-study';
+      asAdmin();
+      await pool.query('INSERT INTO experiments(id,name) VALUES ($1,$2)',[projectId,'名单研究']);
+      const templateSettings=await settingsLib.getExperimentSettings('recovery-test',false);
+      await settingsLib.saveExperimentSettings({...templateSettings,experiment:{...templateSettings.experiment,id:projectId},
+        storage:{databaseMessagesEnabled:true},limits:{maxUserMessages:null,maxMessageChars:2000,sessionDurationMinutes:null}},adminId);
+      const agents=[];
+      for(let i=0;i<3;i++) agents.push(await control.saveAgentConfig({experimentId:projectId,provider:'coze',internalName:`名单助手${i}`,
+        baseUrl:'https://api.coze.com',botId:`roster-bot-${i}`,token:'synthetic-roster-token',enabled:true},adminId));
+      const api=h.load('app/api/admin/rosters/route.ts'), rosterLib=h.load('lib/roster.ts');
+      const endpoint=`http://localhost/api/admin/rosters?experimentId=${projectId}`;
+      const input={action:'save',version:0,name:'全实验名单',agentIds:agents.map(agent=>agent.id),manual:false,
+        students:[9,8].flatMap((n,c)=>Array.from({length:n},(_,i)=>({className:`班${c}`,fullName:`合成学生${i}`,score:100-c*15-i*3})))};
+      let plan;
+      const call=body=>api.POST(h.request(body,endpoint));
+      const enroll=(browser,student,requestId=crypto.randomUUID())=>browser.load('app/api/sessions/route.ts').POST(browser.request({
+        profile:{fullName:student.fullName,studentNumber:''},rosterClass:student.className,registrationRequestId:requestId},
+        `http://localhost/api/sessions?entry=${plan.entryToken}`));
+      await t.test('admin permission and same-origin are required; duplicates fail without a partial draft',async()=>{
+        h.jar.clear();assert.equal((await call(input)).status,401);asAdmin();
+        const foreign=h.request(input,endpoint);foreign.headers.set('origin','http://untrusted.example');
+        assert.equal((await api.POST(foreign)).status,403);
+        assert.equal((await call({...input,students:[input.students[0],input.students[0]]})).status,400);
+        assert.equal((await rosterLib.getRosters(projectId)).length,0);
+        assert.equal((await call(input)).status,200);plan=(await rosterLib.getRosters(projectId))[0];
+        assert.equal(plan.students.length,17);assert.equal(plan.status,'draft');assert.equal(plan.locked,false);
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM participants WHERE experiment_id=$1',[projectId])).rows[0].n,0);
+        assert.equal((await call(input)).status,409);
+      });
+      await t.test('draft cannot be entered or reopened through old APIs; private data stays encrypted',async()=>{
+        const browser=await harness(db,h.sources);
+        assert.equal((await enroll(browser,input.students[0])).status,409);
+        await assert.rejects(()=>control.reopenExperimentRun(projectId,plan.id,adminId),/ROSTER_NOT_LOCKED/);
+        assert.equal((await rosterLib.rosterClasses(plan.id)).length,0);
+        const raw=(await pool.query('SELECT * FROM roster_entries WHERE experiment_run_id=$1',[plan.id])).rows;
+        assert.ok(!JSON.stringify(raw).includes('合成学生'));
+        assert.equal(new Set(raw.map(row=>row.identity_hash)).size,17);
+        const audits=(await pool.query("SELECT after_data FROM admin_audit_log WHERE experiment_id=$1 AND action='experiment.roster.save'",[projectId])).rows;
+        assert.ok(!JSON.stringify(audits).includes('合成学生'));
+        assert.ok(audits[0].after_data.encryptedRoster.ciphertext);
+      });
+      await t.test('manual draft updates use versions; failed audit rolls back every roster row and version',async()=>{
+        const edited={...input,runId:plan.id,version:plan.version,manual:true,students:plan.students.map((row,i)=>({...row,agentId:agents[i%3].id}))};
+        assert.equal((await call(edited)).status,200);
+        const current=(await rosterLib.getRosters(projectId))[0];assert.equal(current.version,2);assert.equal(current.manual,true);
+        assert.equal((await call(edited)).status,409);
+        failRosterAudit=true;
+        try{assert.equal((await call({...edited,version:current.version})).status,500);}finally{failRosterAudit=false;}
+        assert.deepEqual((await rosterLib.getRosters(projectId))[0],current);
+        assert.equal((await call({...input,runId:plan.id,version:current.version})).status,200);
+        plan=(await rosterLib.getRosters(projectId))[0];
+        const competing=await Promise.all([call({...input,runId:plan.id,version:plan.version}),call({...input,runId:plan.id,version:plan.version})]);
+        assert.deepEqual(competing.map(response=>response.status).sort(),[200,409]);
+        plan=(await rosterLib.getRosters(projectId))[0];
+        assert.equal((await call({action:'lock',runId:plan.id,version:1})).status,409);
+        assert.equal((await call({action:'lock',runId:plan.id,version:plan.version})).status,200);
+        plan=(await rosterLib.getRosters(projectId))[0];assert.equal(plan.locked,true);assert.equal(plan.status,'active');
+        assert.deepEqual(Array.from(await rosterLib.rosterClasses(plan.id)),['班0','班1']);
+        assert.equal((await call({...input,runId:plan.id,version:plan.version})).status,409);
+        assert.equal((await call({action:'lock',runId:plan.id,version:plan.version})).status,409);
+      });
+      await t.test('locking freezes all candidate conditions before any enrollment, including while paused',async()=>{
+        await control.closeActiveExperimentRun(projectId,adminId,plan.id);
+        await assert.rejects(()=>control.saveAgentConfig({id:agents[2].id,experimentId:projectId,provider:'coze',internalName:'不允许换条件',baseUrl:'https://api.coze.com',botId:agents[2].botId,enabled:true},adminId),/AGENT_RECORDS_LOCKED/);
+        await control.reopenExperimentRun(projectId,plan.id,adminId);
+      });
+      const enrolled=[];
+      await t.test('invalid names/classes and failed session creation never claim or create a participant',async()=>{
+        const browser=await harness(db,h.sources);
+        assert.equal((await enroll(browser,{className:'错误班级',fullName:'合成学生0'})).status,404);
+        assert.equal((await enroll(browser,{className:'班0',fullName:'不存在'})).status,404);
+        failInteractionMemoryWrite=true;
+        try{assert.equal((await enroll(browser,input.students[0])).status,500);}finally{failInteractionMemoryWrite=false;}
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM participants WHERE experiment_id=$1',[projectId])).rows[0].n,0);
+        assert.ok((await pool.query('SELECT participant_id FROM roster_entries WHERE experiment_run_id=$1',[plan.id])).rows.every(row=>row.participant_id===null));
+      });
+      await t.test('concurrent duplicate identities claim exactly once; distinct classes allow identical names',async()=>{
+        const devices=await Promise.all([harness(db,h.sources),harness(db,h.sources)]);
+        const results=await Promise.all(devices.map(browser=>enroll(browser,input.students[0])));
+        assert.deepEqual(results.map(result=>result.status).sort(),[201,409]);
+        const winner=results.findIndex(result=>result.status===201);
+        enrolled.push({browser:devices[winner],payload:results[winner].body,student:input.students[0]});
+        const browser=await harness(db,h.sources), other=input.students.find(row=>row.className==='班1' && row.fullName===input.students[0].fullName);
+        const result=await enroll(browser,other);assert.equal(result.status,201);
+        enrolled.push({browser,payload:result.body,student:other});
+        assert.notEqual(results[winner].body.session.participantCode,result.body.session.participantCode);
+      });
+      await t.test('same registration retry is idempotent, wrong retry class is rejected, bulk entry follows planned agents',async()=>{
+        const target=input.students[1], id=crypto.randomUUID();
+        const browser=await harness(db,h.sources), first=await enroll(browser,target,id);assert.equal(first.status,201);
+        const retryBrowser=await harness(db,h.sources), repeated=await enroll(retryBrowser,target,id);
+        assert.equal(repeated.status,200);assert.equal(repeated.body.session.id,first.body.session.id);
+        const wrong=await harness(db,h.sources);assert.equal((await enroll(wrong,{...target,className:'班1'},id)).status,409);
+        enrolled.push({browser:retryBrowser,payload:repeated.body,student:target});
+        const remaining=input.students.filter(student=>!enrolled.some(entry=>entry.student.className===student.className && entry.student.fullName===student.fullName));
+        for(const student of remaining) {
+          const device=await harness(db,h.sources), result=await enroll(device,student);
+          assert.equal(result.status,201);enrolled.push({browser:device,payload:result.body,student});
+        }
+        for(const entry of enrolled) {
+          const assigned=plan.students.find(row=>row.className===entry.student.className && row.fullName===entry.student.fullName);
+          assert.equal(entry.payload.session.agentId,assigned.agentId);
+          assert.ok(!JSON.stringify(entry.payload).includes('roster_rule'));
+        }
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM participants WHERE experiment_id=$1',[projectId])).rows[0].n,17);
+        assert.equal((await pool.query("SELECT count(*)::int AS n FROM participant_agent_assignments WHERE experiment_run_id=$1 AND assignment_mode='roster'",[plan.id])).rows[0].n,17);
+      });
+      await t.test('chat, recovery and next interactions retain the planned agent without sending roster data to AI',async()=>{
+        const entry=enrolled[0], browser=entry.browser, url=path=>`http://localhost${path}?entry=${plan.entryToken}`;
+        const reply=await browser.load('app/api/messages/route.ts').POST(browser.request({clientRequestId:crypto.randomUUID(),content:'解释光合作用'},url('/api/messages')));
+        assert.equal(reply.status,200);assert.equal(reply.body.messages.length,2);
+        assert.ok(!JSON.stringify(browser.creates).includes(entry.student.fullName));
+        assert.ok(!JSON.stringify(browser.creates).includes('stratum'));
+        const newDevice=await harness(db,h.sources);
+        const resumed=await newDevice.load('app/api/sessions/resume/route.ts').POST(newDevice.request({participantCode:entry.payload.session.participantCode,identity:entry.student.fullName},url('/api/sessions/resume')));
+        assert.equal(resumed.status,200);
+        const restored=(await newDevice.load('app/api/sessions/route.ts').GET(newDevice.request({},url('/api/sessions')))).body;
+        assert.equal(restored.session.agentId,entry.payload.session.agentId);assert.equal(restored.messages.length,2);
+        const next=await newDevice.load('app/api/conversations/route.ts').POST(newDevice.request({action:'start_interaction',clientRequestId:crypto.randomUUID(),expectedSessionId:restored.session.id},url('/api/conversations')));
+        assert.equal(next.status,200);assert.equal(next.body.payload.session.agentId,entry.payload.session.agentId);
+        enrolled[0].browser=newDevice;
+      });
+      await t.test('roster CSV and per-agent ZIP exports isolate the selected group and record audits',async()=>{
+        asAdmin();
+        const exported=await call({action:'export',runId:plan.id});assert.equal(exported.status,200);
+        const csv=await exported.text();assert.match(csv,/班级/);assert.match(csv,/合成学生0/);assert.match(csv,/已进入/);
+        const selectedAgent=plan.students[0].agentId;
+        const group=await call({action:'export',runId:plan.id,agentId:selectedAgent});
+        const parsed=h.load('lib/roster-allocation.ts').parseRosterText(await group.text());
+        assert.ok(parsed.every(row=>row.agentId===selectedAgent));
+        const archive=await call({action:'interactions_export',runId:plan.id,agentId:selectedAgent});assert.equal(archive.status,200);
+        const contents=fflate.unzipSync(new Uint8Array(await archive.arrayBuffer()));
+        const manifest=JSON.parse(fflate.strFromU8(contents['manifest.json']));
+        assert.ok(!JSON.stringify(manifest).includes('合成学生'));
+        const jsonFiles=Object.entries(contents).filter(([name])=>name!=='manifest.json' && name.endsWith('.json'));
+        assert.ok(jsonFiles.length>0);
+        for(const [,bytes] of jsonFiles) assert.match(fflate.strFromU8(bytes),new RegExp(selectedAgent));
+        assert.equal((await call({action:'export',runId:plan.id,agentId:crypto.randomUUID()})).status,400);
+        assert.ok((await pool.query("SELECT 1 FROM admin_audit_log WHERE experiment_id=$1 AND action='experiment.roster.export'",[projectId])).rowCount);
+      });
+      await t.test('late additions require explicit assignments, preserve existing rows and reject duplicate/stale imports',async()=>{
+        const before=(await pool.query('SELECT * FROM roster_entries WHERE experiment_run_id=$1 ORDER BY id',[plan.id])).rows;
+        const student={className:'新班',fullName:'补录学生',score:77,stratum:'中',agentId:agents[1].id};
+        assert.equal((await call({action:'append',runId:plan.id,version:plan.version,students:[{className:'新班',fullName:'补录学生',score:77}]})).status,400);
+        assert.equal((await call({action:'append',runId:plan.id,version:plan.version,students:[student]})).status,200);
+        assert.deepEqual((await pool.query('SELECT * FROM roster_entries WHERE experiment_run_id=$1 AND class_name<>$2 ORDER BY id',[plan.id,'新班'])).rows,before);
+        assert.equal((await call({action:'append',runId:plan.id,version:plan.version,students:[student]})).status,409);
+        plan=(await rosterLib.getRosters(projectId))[0];
+        assert.equal((await call({action:'append',runId:plan.id,version:plan.version,students:[student]})).status,409);
+        assert.ok((await rosterLib.rosterClasses(plan.id)).includes('新班'));
+        const audits=(await pool.query("SELECT after_data FROM admin_audit_log WHERE experiment_id=$1 AND action='experiment.roster.append'",[projectId])).rows;
+        assert.equal(audits.length,1);assert.ok(!JSON.stringify(audits).includes('补录学生'));
+      });
+      await t.test('fixed/random links coexist; closing/reopening and deleting roster preserve old workflows and history',async()=>{
+        const legacy=await control.activateExperimentRun({experimentId:projectId,name:'原固定方式',assignmentMode:'fixed',fixedAgentId:agents[0].id,randomAgentIds:[],makeDefault:false},adminId);
+        const random=await control.activateExperimentRun({experimentId:projectId,name:'原随机方式',assignmentMode:'balanced_random',fixedAgentId:null,randomAgentIds:agents.map(agent=>agent.id),makeDefault:false},adminId);
+        for(const link of [legacy,random]) {
+          const browser=await harness(db,h.sources), result=await browser.load('app/api/sessions/route.ts').POST(browser.request({profile:{fullName:'原方式同名自由报名',studentNumber:''}},`http://localhost/api/sessions?entry=${link.entryToken}`));
+          assert.equal(result.status,201);
+        }
+        assert.equal((await call({action:'close',runId:plan.id})).status,200);
+        await assert.rejects(()=>control.saveAgentConfig({id:agents[2].id,experimentId:projectId,provider:'coze',internalName:'换条件',baseUrl:'https://api.coze.com',botId:agents[2].botId,enabled:true},adminId),/AGENT_RECORDS_LOCKED/);
+        const browser=await harness(db,h.sources);assert.equal((await enroll(browser,{className:'班0',fullName:'额外学生'})).status,409);
+        const old=enrolled[1];old.browser.jar.clear();
+        const restored=await old.browser.load('app/api/sessions/resume/route.ts').POST(old.browser.request({participantCode:old.payload.session.participantCode,identity:old.student.fullName},`http://localhost/api/sessions/resume?entry=${plan.entryToken}`));
+        assert.equal(restored.status,200);
+        assert.equal((await call({action:'reopen',runId:plan.id})).status,200);
+        assert.equal((await call({action:'close',runId:plan.id})).status,200);
+        assert.equal((await call({action:'delete',runId:plan.id,confirmationCode:'wrong'})).status,409);
+        assert.equal((await call({action:'delete',runId:plan.id,confirmationCode:plan.entryToken})).status,200);
+        await assert.rejects(()=>entries.getExperimentEntry(plan.entryToken),error=>error.status===404);
+        const archived=(await rosterLib.getRosters(projectId))[0];assert.equal(archived.students.filter(row=>row.participantCode).length,17);
+        assert.ok(archived.entryDeletedAt);
+        assert.equal((await call({action:'export',runId:plan.id})).status,200);
+        assert.equal((await entries.getExperimentEntry(legacy.entryToken)).assignmentMode,'fixed');
+        assert.equal((await entries.getExperimentEntry(random.entryToken)).assignmentMode,'balanced_random');
+      });
+    });
   } finally {
     if (pool) await pool.end();
     await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);

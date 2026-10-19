@@ -46,7 +46,7 @@ test('bare domain renders only teacher-link guidance and never loads the experim
 
 test('every direct group link requires access verification and preserves its exact return URL', async () => {
   const {proxy,config} = guard(code);
-  for (const path of ['/join/abcd','/join/qrst','/join/ABCD?participant=P001','/join/abcd-2345']) {
+  for (const path of ['/join/abcd','/join/qrst','/join/ABCD?participant=P001','/join/abcd-2345','/roster/abcd','/roster/ABCD']) {
     assert.equal(matches(config,path),true);
     const response = await proxy(request(path));
     assert.equal(response.status,307);
@@ -67,7 +67,7 @@ test('correct access verification admits group links; wrong, tampered or obsolet
   assert.equal(await access.verifySubmittedAccessCode('wrong',code),false);
   assert.equal(await access.verifySubmittedAccessCode(code,code),true);
   const cookie = await access.createAccessCookieValue(code);
-  for (const path of ['/join/abcd','/join/qrst']) {
+  for (const path of ['/join/abcd','/join/qrst','/roster/abcd']) {
     const admitted = await proxy(request(path,cookie));
     assert.equal(admitted.headers.get('x-middleware-next'),'1');
     for (const invalid of ['untrusted',`${cookie}tampered`,await access.createAccessCookieValue('previous-code')]) {

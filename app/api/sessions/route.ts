@@ -17,6 +17,7 @@ import { clearRuntimeCookie } from "@/lib/runtime-session";
 import { assertSameOrigin } from "@/lib/admin-auth";
 import { importLegacyRuntime } from "@/lib/legacy-runtime";
 import { captureSessionMemory } from "@/lib/session-memory";
+import { claimRosterEntry } from "@/lib/roster";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -31,6 +32,7 @@ const inputSchema = z.object({
   access: z.string().max(200).optional(),
   profile: profileSchema.optional(),
   registrationRequestId:z.uuid().optional(),
+  rosterClass:z.string().trim().min(1).max(100).optional(),
 }).superRefine((value, context) => {
   if (value.access && !value.participantCode) {
     context.addIssue({ code: "custom", message: "参与者链接信息无效。" });
@@ -94,6 +96,10 @@ export async function POST(request: Request) {
           [experimentId,input.data.registrationRequestId]);
         if (prior.rows[0]) {
           const participant = prior.rows[0];
+          if (entry?.assignmentMode === "roster") {
+            const match = await client.query("SELECT 1 FROM roster_entries WHERE experiment_run_id=$1 AND participant_id=$2 AND class_name=$3",[entry.runId,participant.id,input.data.rosterClass ?? ""]);
+            if(!match.rowCount) throw new ApiError(409,"REGISTRATION_ALREADY_USED","报名信息不一致，请使用原编号恢复。");
+          }
           const profileRows = await client.query("SELECT * FROM participant_identity_profiles WHERE participant_id=$1", [participant.id]);
           const profile = profileRows.rows[0] ? profileFromRow(profileRows.rows[0]) : null;
           if (!profile || !input.data.profile || profile.fullName.trim()!==input.data.profile.fullName
@@ -117,6 +123,12 @@ export async function POST(request: Request) {
       }
       let participantId: string;
       let participantCode: string;
+      let rosterEntryId: string | null = null;
+      if (entry?.assignmentMode === "roster") {
+        if(requestedParticipantCode || !input.data.profile || !input.data.rosterClass) throw new ApiError(400,"ROSTER_IDENTITY_REQUIRED","请选择班级并填写名单中的参与姓名。");
+        if(input.data.profile.studentNumber) throw new ApiError(400,"ROSTER_IDENTITY_REQUIRED","名单入口使用班级和参与姓名，不需要学号。");
+        rosterEntryId=await claimRosterEntry(client,entry.runId,input.data.rosterClass,input.data.profile.fullName);
+      }
       const registration = input.data.registrationRequestId ? {registration_request_id:input.data.registrationRequestId,registration_run_id:entry?.runId ?? null} : {};
       if (requestedParticipantCode) {
         const participant = await client.query<{ id: string }>(
@@ -144,6 +156,7 @@ export async function POST(request: Request) {
           input.data.profile.studentNumber,
         );
       }
+      if(rosterEntryId) await client.query("UPDATE roster_entries SET participant_id=$2 WHERE id=$1",[rosterEntryId,participantId]);
       const assignedAgent = await assignAgentWithClient(client, experimentId, participantId, entry?.runId);
       const snapshot = {
         ...baseSnapshot,

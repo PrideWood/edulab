@@ -5,6 +5,7 @@ import { buildEntryInvitation } from "@/lib/entry-links";
 import type { ExperimentSettings } from "@/lib/experiment-settings";
 import type { ParticipantProfile } from "@/lib/client-types";
 import { BrandLogo } from "../brand-logo";
+import { RosterPanel } from "./roster-panel";
 
 type Section = "participants" | "content" | "limits" | "storage" | "ai";
 type Admin = { id: string; username: string; displayName: string };
@@ -21,7 +22,7 @@ type AgentSummary = {
 };
 type RunSummary = {
   id: string; name: string; status: "draft" | "active" | "closed";
-  assignmentMode: "fixed" | "balanced_random"; fixedAgentId: string | null;
+  assignmentMode: "fixed" | "balanced_random" | "roster"; fixedAgentId: string | null;
   entryToken: string | null; entryDeletedAt: string | null; entryCodeReserved: boolean | null; isDefault: boolean;
   randomAgentIds: string[]; openedAt: string | null; closedAt: string | null; createdAt: string;
 };
@@ -542,7 +543,7 @@ function AgentRunSettings({ experimentId, onRunsChanged }: { experimentId: strin
 
   if (!control) return <div className="settings-stack"><section className="settings-card"><p>{error || "正在读取智能体和入口…"}</p></section></div>;
   const enabledAgents = control.agents.filter((agent) => agent.enabled && agent.hasToken);
-  const liveRuns = control.runs.filter((run) => !run.entryDeletedAt && run.entryToken);
+  const liveRuns = control.runs.filter((run) => !run.entryDeletedAt && run.entryToken && run.assignmentMode !== "roster");
   const activeAgentIds = new Set(control.runs.filter(run => run.status === "active").flatMap(run => run.assignmentMode === "fixed" ? (run.fixedAgentId ? [run.fixedAgentId] : []) : run.randomAgentIds));
 
   return <div className="settings-stack agent-run-settings">
@@ -563,6 +564,7 @@ function AgentRunSettings({ experimentId, onRunsChanged }: { experimentId: strin
         {run.status === "closed" && <><button type="button" className="admin-refresh" disabled={busy} onClick={() => void post({ action: "reopen_run", runId: run.id }, "已继续该组的报名，原链接和智能体配置保持有效。")}>继续报名</button><button type="button" className="admin-danger" disabled={busy} onClick={() => { setRunDeleteError(""); setPendingRunDelete(run); }}>删除链接</button></>}
       </div>)}</div>
     </section>
+    <RosterPanel key={experimentId} experimentId={experimentId} agents={control.agents} onChanged={() => { void fetch(endpoint, {cache:"no-store"}).then(response=>response.json()).then(data=>{if(data.control && mountedRef.current){setControl(data.control);onRunsChanged(data.control.runs);}}).catch(()=>setError("入口列表刷新失败，请重试。")); }} />
     <details className="settings-card agent-config-details">
       <summary>API 配置与连通测试<span>为不同智能体生成链接请使用上方“创建分组入口”</span></summary>
       <div className="settings-card-head"><div><h2>智能体 API 配置</h2><p>开放入口及已有学生报名的配置仅允许更新 API Key，其他配置保持锁定。无记录的配置需先停止报名再修改。更换智能体请新增配置与入口，API Key 加密保存且不会回显。Dify 无需 Bot ID，更新 Key 时请使用原 Dify 应用的新 Key。</p></div><button className="admin-refresh" onClick={() => setAdding(true)} disabled={busy || adding}>新增智能体</button></div>
