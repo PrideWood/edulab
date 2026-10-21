@@ -15,6 +15,7 @@ import { uploadTranscript } from "@/lib/transcript-upload";
 import { FullscreenController, useFullscreenState } from "./fullscreen-controller";
 import { BrandLogo } from "./brand-logo";
 import { recoverChatResponse } from "@/lib/chat-recovery";
+import { reconcileComposerDraft } from "@/lib/composer-draft";
 import { readChatStream } from "@/lib/chat-stream";
 import { interactionStartKey, readInteractionStart, startLoginInteraction, type InteractionStartAction } from "@/lib/interaction-start";
 
@@ -297,16 +298,17 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
       setDraftStatus(conflict ? "本机仍有未确认保存的草稿，已保留在输入框，请核对后选择要保留的内容。" : "");
     } else if (payload.draft && !draftSaveRef.current) {
       const draft = draftRef.current;
-      if (draft.text === draft.savedText || draft.text === payload.draft.text) {
-        draft.revision = payload.draft.revision;
-        draft.savedText = payload.draft.text;
-        draft.text = payload.draft.text;
-        setText(payload.draft.text);
-      } else if (payload.draft.revision !== draft.revision) {
-        draft.conflict = true;
-        setDraftConflict(true);
-        setDraftStatus("云端草稿已变化，当前输入尚未保存，请保留输入并刷新核对。");
-      }
+      const sent = pendingSendRef.current;
+      const confirmed = sent?.sessionId === payload.session.id
+        && payload.messages.some(message => message.role === "user" && message.clientRequestId === sent.clientRequestId);
+      const next = reconcileComposerDraft(draft, payload.draft, confirmed);
+      Object.assign(draft, next);
+      setText(next.text);
+      setDraftConflict(next.conflict);
+      setDraftStatus(next.conflict ? "云端草稿已变化，当前输入尚未保存，请核对后选择要保留的内容。"
+        : next.text === next.savedText ? "" : "草稿待保存");
+      try { localStorage.setItem(`edulab_draft:${draft.sessionId}`, JSON.stringify({ text: draft.text, savedText: draft.savedText, revision: draft.revision })); }
+      catch { setStorageError(true); }
     }
     setParticipantProfile(payload.participantProfile);
     if (!payload.participantProfile) setProfileOpen(true);
@@ -349,8 +351,11 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
           body: JSON.stringify({ sessionId: snapshot.sessionId, text: snapshot.text, revision: snapshot.revision }),
           signal: timeoutSignal(15000),
         });
-        const data = await response.json();
-        if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "DRAFT_FAILED", data?.error?.message ?? "草稿保存失败");
+        const data = await readApiJson<{ draft?: { text: string; revision: number } }>(response);
+        if (!data.draft || !Number.isSafeInteger(data.draft.revision) || data.draft.revision <= snapshot.revision
+          || data.draft.text !== snapshot.text) {
+          throw new ClientApiError(502, "INVALID_RESPONSE", "草稿保存结果未确认，本机输入已保留，系统将重试。");
+        }
         if (draftRef.current !== draft) return;
         draft.revision = data.draft.revision;
         draft.savedText = snapshot.text;
@@ -358,7 +363,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
         setDraftStatus(draft.text === draft.savedText ? "草稿已保存" : "草稿待保存");
       } catch (saveError) {
         if (draftRef.current !== draft) return;
-        draft.conflict = saveError instanceof ClientApiError && (saveError.status === 409 || saveError.status === 401);
+        draft.conflict = saveError instanceof ClientApiError && saveError.code !== "INVALID_RESPONSE"
+          && (saveError.status === 409 || saveError.status === 401);
         setDraftConflict(draft.conflict);
         setDraftStatus(saveError instanceof Error ? `${saveError.message}（当前输入未确认保存）` : "草稿保存失败，请保留输入并重试");
       }
@@ -409,9 +415,10 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
 
   const refreshConversations = useCallback(async () => {
     const response = await fetch(apiUrl("/api/conversations"), { cache: "no-store" });
-    const data = await response.json();
-    if (!response.ok) {
-      const responseError = new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "无法读取对话列表。");
+    let data: { conversations: ConversationSummary[] };
+    try {
+      data = await readApiJson<{ conversations: ConversationSummary[] }>(response);
+    } catch (responseError) {
       if (isInvalidSessionError(responseError)) {
         await releaseInvalidatedSession();
         return false;
@@ -454,9 +461,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
     const response = await fetch(apiUrl("/api/conversations"), {
       method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(action),
     });
-    const data = await response.json();
-    if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "暂时无法切换对话。");
-    return data as {payload:SessionPayload;conversations:ConversationSummary[]};
+    return readApiJson<{payload:SessionPayload;conversations:ConversationSummary[]}>(response);
   }, [apiUrl]);
 
   const finishLoginInteraction = useCallback(async (payload: SessionPayload, retryOnly = false) => {
@@ -1088,8 +1093,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
           ? JSON.stringify({ messages: [], storedMessageCount: messageLedgerRef.current.length })
           : transcriptUploadBody(messageLedgerRef.current),
       });
-      const data = await response.json();
-      if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "暂时无法切换参与者。");
+      await readApiJson(response);
 
       localStorage.removeItem(outboxKey(session.id));
       localStorage.removeItem(interactionStartKey(entryToken ?? experimentId,session.participantCode));

@@ -36,3 +36,20 @@ test('a temporary network failure retries safely with the same registration inte
   assert.equal((await api.registerParticipant('/api/sessions','{}',()=>{})).saved,true);
   assert.equal(calls,2);
 });
+
+test('HTML draft responses preserve HTTP status without leaking HTML or JSON syntax errors',async()=>{
+  const api=load(()=>{throw new Error('must not replay a mutation');});
+  for(const status of [200,401,403,429,502,504]) {
+    await assert.rejects(()=>api.readApiJson(new Response('<html>Security Checkpoint secret-marker</html>',{status})),
+      error=>error.code==='INVALID_RESPONSE'&&error.status===(status===200?502:status)
+        &&!error.message.includes('Unexpected token')&&!error.message.includes('secret-marker'));
+  }
+});
+
+test('genuine draft conflicts remain actionable and successful drafts retain exact text and revision',async()=>{
+  const api=load(()=>{throw new Error('must not replay a mutation');});
+  await assert.rejects(()=>api.readApiJson(Response.json({error:{code:'DRAFT_CONFLICT',message:'请核对草稿'}},{status:409})),
+    error=>error.code==='DRAFT_CONFLICT'&&error.message==='请核对草稿');
+  const saved=await api.readApiJson(Response.json({draft:{text:'下一句话',revision:3}}));
+  assert.equal(saved.draft.text,'下一句话');assert.equal(saved.draft.revision,3);
+});
