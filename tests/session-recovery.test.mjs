@@ -1969,3 +1969,77 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
     await admin.end();
   }
 });
+
+test('classroom burst registration isolates identity locks and replays lost responses without duplicate students', { skip: !process.env.DATABASE_URL }, async t => {
+  const schema = `edulab_burst_test_${crypto.randomBytes(8).toString('hex')}`;
+  const databaseUrl = new URL(process.env.DATABASE_URL);
+  databaseUrl.hostname = databaseUrl.hostname.replace('-pooler.', '.');
+  const options = { connectionString:databaseUrl.toString(),connectionTimeoutMillis:10000,
+    ssl:process.env.DATABASE_SSL==='disable'?false:process.env.DATABASE_SSL==='require'?{rejectUnauthorized:true}:undefined };
+  const admin=new pg.Client(options);
+  await admin.connect();
+  let pool;
+  try {
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    pool=new pg.Pool({...options,max:5,options:`-c search_path=${schema}`});
+    assert.equal((await pool.query('SELECT current_schema() AS name')).rows[0].name,schema);
+    for(const file of (await readdir('db/migrations')).filter(file=>file.endsWith('.sql')).sort()) {
+      await pool.query(await readFile(`db/migrations/${file}`,'utf8'));
+    }
+    const db={query:(sql,values)=>pool.query(sql,values),transaction:async work=>{
+      const client=await pool.connect();
+      try{await client.query('BEGIN');const result=await work(client);await client.query('COMMIT');return result;}
+      catch(error){await client.query('ROLLBACK');throw error;}
+      finally{client.release();}
+    }};
+    const base=await harness(db);
+    await t.test('one uncommitted identity does not block another number or a name-only student',async()=>{
+      const ids=[crypto.randomUUID(),crypto.randomUUID(),crypto.randomUUID()];
+      for(let i=0;i<ids.length;i++) await pool.query("INSERT INTO participants (id,experiment_id,external_code) VALUES ($1,'recovery-test',$2)",[ids[i],`lock-${i}`]);
+      const first=await pool.connect(),second=await pool.connect();
+      const save=base.load('lib/participant-profile.ts').saveParticipantProfileWithClient;
+      try{
+        await first.query('BEGIN');
+        await save(first,ids[0],'Synthetic A','same-number');
+        await second.query('BEGIN');
+        await second.query("SET LOCAL lock_timeout='1000ms'");
+        await save(second,ids[1],'Synthetic B','different-number');
+        await save(second,ids[2],'Synthetic C','');
+        await second.query('COMMIT');
+        await second.query('BEGIN');
+        await second.query("SET LOCAL lock_timeout='100ms'");
+        await assert.rejects(()=>save(second,ids[1],'Synthetic B','same-number'),error=>error.code==='55P03');
+        await second.query('ROLLBACK');
+        await first.query('COMMIT');
+        await assert.rejects(()=>db.transaction(client=>save(client,ids[1],'Synthetic B','same-number')),error=>error.code==='STUDENT_NUMBER_EXISTS');
+      }finally{await first.query('ROLLBACK');await second.query('ROLLBACK');first.release();second.release();}
+      await pool.query('DELETE FROM participants WHERE id=ANY($1::uuid[])',[ids]);
+    });
+    const agent=crypto.randomUUID(),run=crypto.randomUUID();
+    await pool.query("INSERT INTO ai_agent_configs (id,experiment_id,internal_name,coze_bot_id) VALUES ($1,'recovery-test','Burst','synthetic-bot')",[agent]);
+    await pool.query("INSERT INTO experiment_runs (id,experiment_id,name,status,assignment_mode,fixed_agent_id,is_default,entry_token) VALUES ($1,'recovery-test','Burst','active','fixed',$2,true,'brst')",[run,agent]);
+    const devices=await Promise.all(Array.from({length:40},()=>harness(db,base.sources)));
+    const bodies=devices.map((_,index)=>({profile:{fullName:`Synthetic ${index}`,studentNumber:String(index)},registrationRequestId:crypto.randomUUID()}));
+    const responses=await Promise.all(devices.map((device,index)=>device.load('app/api/sessions/route.ts').POST(device.request(bodies[index],'http://localhost/api/sessions?entry=brst'))));
+    assert.ok(responses.every(response=>response.status===201),JSON.stringify(responses.filter(response=>response.status!==201)));
+    assert.equal(new Set(responses.map(response=>response.body.session.participantCode)).size,40);
+    for(let index=0;index<devices.length;index++){
+      assert.equal(responses[index].body.participantProfile.studentNumber,String(index));
+      devices[index].jar.clear(); // Lost response AND cookie after the transaction committed.
+    }
+    const replay=await Promise.all(devices.map((device,index)=>device.load('app/api/sessions/route.ts').POST(device.request(bodies[index],'http://localhost/api/sessions?entry=brst'))));
+    assert.ok(replay.every(response=>response.status===200),JSON.stringify(replay.filter(response=>response.status!==200)));
+    replay.forEach((response,index)=>assert.equal(response.body.session.id,responses[index].body.session.id));
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM participants')).rows[0].n,40);
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM experiment_sessions')).rows[0].n,40);
+    const contenders=await Promise.all([harness(db,base.sources),harness(db,base.sources)]);
+    const duplicates=await Promise.all(contenders.map(device=>device.load('app/api/sessions/route.ts').POST(device.request({profile:{fullName:'Duplicate',studentNumber:'same-new-number'},registrationRequestId:crypto.randomUUID()},'http://localhost/api/sessions?entry=brst'))));
+    assert.deepEqual(duplicates.map(response=>response.status).sort(),[201,409]);
+    assert.equal(duplicates.find(response=>response.status===409).body.error.code,'STUDENT_NUMBER_EXISTS');
+    assert.equal((await pool.query('SELECT count(*)::int AS n FROM participants')).rows[0].n,41);
+  }finally{
+    if(pool)await pool.end();
+    await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    await admin.end();
+  }
+});

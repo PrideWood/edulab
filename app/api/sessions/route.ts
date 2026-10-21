@@ -1,3 +1,4 @@
+import type { ParticipantProfile } from "@/lib/client-types";
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { z } from "zod";
@@ -9,7 +10,7 @@ import { getAuthenticatedSession, type AuthenticatedSession } from "@/lib/sessio
 import { buildSessionPayload } from "@/lib/session-payload";
 import { hashSecret, newSessionSecret, normalizeParticipantCode, verifyParticipantAccess } from "@/lib/security";
 import { buildSessionSnapshot, getExperimentSettings } from "@/lib/experiment-settings";
-import { getParticipantProfile, profileFromRow, saveParticipantProfileWithClient } from "@/lib/participant-profile";
+import { profileFromRow, saveParticipantProfileWithClient } from "@/lib/participant-profile";
 import { isTestParticipantName } from "@/lib/participant-code";
 import { createParticipantWithAvailableCode } from "@/lib/participant-code-allocation";
 import { assignAgentWithClient } from "@/lib/agent-control";
@@ -148,8 +149,9 @@ export async function POST(request: Request) {
         await client.query(`INSERT INTO participants (id, experiment_id, external_code,metadata) VALUES ($1,$2,$3,$4::jsonb)`,
           [participantId, experimentId, participantCode,JSON.stringify(registration)]);
       }
+      let profile: ParticipantProfile | null = null;
       if (input.data.profile) {
-        await saveParticipantProfileWithClient(
+        profile = await saveParticipantProfileWithClient(
           client,
           participantId,
           input.data.profile.fullName,
@@ -185,7 +187,7 @@ export async function POST(request: Request) {
         const numbered = await createParticipantWithAvailableCode(client, experimentId, codePrefix, participantId);
         participantCode = numbered.participantCode;
       }
-      return { participantId, participantCode, assignedAgent, snapshot };
+      return { participantId, participantCode, assignedAgent, snapshot, profile };
     });
 
     if (created.resumed) {
@@ -200,7 +202,7 @@ export async function POST(request: Request) {
       ? new Date(startedAt.getTime() + created.snapshot.limits.sessionDurationMinutes * 60_000).toISOString()
       : null;
 
-    const profile = await getParticipantProfile(created.participantId);
+    const profile = created.profile;
 
     const response = NextResponse.json({
       session: { id: publicId, status: "active", startedAt: startedAt.toISOString(), lastActivityAt: startedAt.toISOString(), participantCode: created.participantCode, cozeConversationId: null, provider: created.assignedAgent.provider, difyConversationId: null, experimentRunId: created.assignedAgent.runId, agentId: created.assignedAgent.agentId },

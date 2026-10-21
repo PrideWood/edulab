@@ -1,5 +1,6 @@
 "use client";
 
+import { ClientApiError, readApiJson, registerParticipant } from "@/lib/client-api";
 import { newClientRequestId } from "@/lib/client-request-id";
 import { timeoutSignal } from "@/lib/timeout-signal";
 
@@ -110,16 +111,7 @@ function downloadFile(filename: string, content: string, type: string) {
 }
 
 async function readResponse(response: Response): Promise<SessionPayload> {
-  const data = await response.json().catch(() => null);
-  if (!data) throw new ClientApiError(response.status, "INVALID_RESPONSE", "服务响应中断，请稍后重试；本地记录仍保留。");
-  if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "请求失败，请稍后重试。");
-  return data;
-}
-
-class ClientApiError extends Error {
-  constructor(public status: number, public code: string, message: string) {
-    super(message);
-  }
+  return readApiJson<SessionPayload>(response);
 }
 
 function isInvalidSessionError(error: unknown) {
@@ -820,8 +812,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ participantCode: resumeCode, identity: resumeIdentity, preferLatest:true }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data?.error?.message ?? "实验恢复失败，请重试。");
+      await readApiJson(response);
       const payload = await readResponse(await fetch(apiUrl("/api/sessions"), { cache: "no-store" }));
       verified = true;
       applyPayload(payload);
@@ -880,18 +871,18 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
         registrationRequestRef.current = requestId && /^[0-9a-f-]{36}$/i.test(requestId) ? requestId : newClientRequestId();
         try { localStorage.setItem(registrationKey,registrationRequestRef.current); } catch { setStorageError(true); }
       }
-      const response = await fetch(apiUrl(session ? "/api/participant-profile" : "/api/sessions"), {
-        method: session ? "PUT" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(session
-          ? { fullName: profileFullName, studentNumber: profileStudentNumber,revision:participantProfile?.revision ?? 0 }
-          : { profile: { fullName: profileFullName, studentNumber: profileStudentNumber },registrationRequestId:registrationRequestRef.current,
-            ...(rosterClasses ? {rosterClass} : {}) }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "参与者信息保存失败。");
+      const body = JSON.stringify(session
+        ? { fullName: profileFullName, studentNumber: profileStudentNumber, revision: participantProfile?.revision ?? 0 }
+        : { profile: { fullName: profileFullName, studentNumber: profileStudentNumber }, registrationRequestId: registrationRequestRef.current,
+          ...(rosterClasses ? { rosterClass } : {}) });
+      const data = session
+        ? await readApiJson<{ profile: ParticipantProfile }>(await fetch(apiUrl("/api/participant-profile"), {
+          method: "PUT", headers: { "Content-Type": "application/json" }, body, signal: timeoutSignal(45_000),
+        }))
+        : await registerParticipant<SessionPayload>(apiUrl("/api/sessions"), body,
+          () => setProfileError("多人同时进入，正在自动重试，请勿刷新或重复报名。"));
       if (session) {
-        setParticipantProfile(data.profile as ParticipantProfile);
+        setParticipantProfile((data as { profile: ParticipantProfile }).profile);
       } else {
         applyPayload(data as SessionPayload);
         registrationRequestRef.current = null;

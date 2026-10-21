@@ -1,7 +1,7 @@
 import "server-only";
 
 import type { PoolClient } from "pg";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { query, transaction } from "@/db";
 import { ApiError } from "@/lib/http";
 import type { ParticipantProfile } from "@/lib/client-types";
@@ -52,13 +52,16 @@ function encryptedValues(value: string): [string | null, string | null, string |
 export async function saveParticipantProfileWithClient(client: PoolClient, participantId: string, fullName: string, studentNumber: string) {
   fullName = fullName.trim();
   studentNumber = studentNumber.trim();
-  // Names are never identity keys. Serialize number checks per project so the
-  // existing encrypted profiles (including pre-migration records) are covered.
+  // Names are never identity keys. Only competing claims for the same number
+  // must serialize; unrelated students must not hold up the entire classroom.
   const participant = await client.query<{ experiment_id: string }>("SELECT experiment_id FROM participants WHERE id=$1", [participantId]);
   if (!participant.rows[0]) throw new ApiError(404, "PARTICIPANT_NOT_FOUND", "找不到这条参与者记录。");
   const experimentId = participant.rows[0].experiment_id;
-  await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`edulab:identity:${experimentId}`]);
   if (studentNumber) {
+    const key = process.env.SETTINGS_ENCRYPTION_KEY;
+    if (!key || key.length < 32) throw new Error("SETTINGS_ENCRYPTION_KEY is not configured");
+    const identityKey = createHmac("sha256", key).update(JSON.stringify([experimentId, studentNumber])).digest("hex");
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`edulab:identity-number:${identityKey}`]);
     const others = await client.query<ProfileRow>(`SELECT profile.* FROM participant_identity_profiles profile
       JOIN participants p ON p.id=profile.participant_id
       WHERE p.experiment_id=$1 AND p.id<>$2 AND profile.student_number_ciphertext IS NOT NULL`, [experimentId, participantId]);
