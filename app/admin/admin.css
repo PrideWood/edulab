@@ -82,10 +82,12 @@
 .participant-identity-export { border: 1px solid #c9d6ce; color: #476253; background: white; }
 .participant-export-button:disabled, .participant-identity-export:disabled { cursor: default; opacity: .5; }
 .directory-table-wrap { max-width: 100%; overflow-x: auto; border: 1px solid #e0e7e2; border-radius: 12px; }
-.directory-table { width: 100%; min-width: 850px; border-collapse: collapse; font-size: 12px; }
+.directory-table { width: 100%; min-width: 960px; border-collapse: collapse; font-size: 12px; }
 .directory-table th { padding: 10px 12px; color: #758179; background: #f6f8f6; font-size: 10px; font-weight: 700; text-align: left; white-space: nowrap; }
 .directory-table td { padding: 12px; border-top: 1px solid #e5ebe7; color: #46534c; vertical-align: middle; }
 .directory-table .directory-select-cell { width: 38px; padding-left: 13px; padding-right: 5px; text-align: center; }
+.directory-agent-cell { min-width: 130px; max-width: 200px; }
+.directory-agent-list { display: grid; gap: 6px; overflow-wrap: anywhere; }
 .directory-checkbox { width: 15px; height: 15px; margin: 0; accent-color: #2f7353; cursor: pointer; vertical-align: middle; }
 .directory-checkbox:disabled { cursor: default; opacity: .55; }
 .directory-table tbody tr:hover { background: #fafcfb; }

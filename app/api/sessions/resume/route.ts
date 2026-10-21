@@ -7,7 +7,10 @@ import { clearRuntimeCookie } from "@/lib/runtime-session";
 import { getStudentEntry, sessionCookieName } from "@/lib/experiment-entry";
 
 export const runtime = "nodejs";
-const inputSchema = z.object({ participantCode: z.string().trim().min(1).max(80), identity: z.string().trim().min(1).max(100) });
+const inputSchema = z.object({
+  participantCode: z.string().trim().min(1).max(80), identity: z.string().trim().min(1).max(100),
+  preferLatest: z.boolean().default(false),
+});
 
 export async function POST(request: Request) {
   try {
@@ -15,7 +18,7 @@ export async function POST(request: Request) {
     const input = inputSchema.safeParse(await request.json());
     if (!input.success) throw new ApiError(400, "INVALID_RECOVERY", "请输入实验编号及身份校验信息。");
     const entry = await getStudentEntry(request);
-    const recovered = await recoverParticipant(input.data.participantCode, input.data.identity, entry);
+    const recovered = await recoverParticipant(input.data.participantCode, input.data.identity, entry, input.data.preferLatest);
     // Issue the credential even if provider recovery temporarily fails. The
     // browser can retry GET without another rotation or participant creation.
     const response = NextResponse.json({ resumed: true }, { headers: { "Cache-Control": "private, no-store" } });

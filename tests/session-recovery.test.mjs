@@ -17,7 +17,7 @@ async function harness(db, sharedSources) {
     'lib/participant-profile.ts', 'lib/participant-code-allocation.ts', 'lib/agent-control.ts', 'lib/roster.ts', 'lib/roster-allocation.ts', 'app/api/admin/rosters/route.ts',
     'lib/experiment-settings.ts', 'lib/experiment-limits.ts', 'lib/messages.ts', 'lib/coze.ts',
     'lib/dify.ts', 'lib/dify-chat.ts', 'lib/sse.ts', 'lib/transcript.ts', 'lib/session-payload.ts', 'lib/runtime-session.ts', 'lib/session-draft.ts',
-    'lib/participant-recovery.ts', 'lib/experiment-entry.ts', 'lib/entry-links.ts', 'lib/entry-token.ts', 'lib/experiments.ts',
+    'lib/participant-recovery.ts', 'lib/interaction-start.ts', 'lib/experiment-entry.ts', 'lib/entry-links.ts', 'lib/entry-token.ts', 'lib/experiments.ts',
     'lib/admin-export.ts', 'lib/transcript-export.ts', 'lib/admin-records.ts', 'app/api/admin/agent-control/route.ts', 'app/api/admin/experiments/route.ts', 'app/api/admin/participants/route.ts',
     'app/api/participant-profile/route.ts', 'app/api/sessions/reset/route.ts', 'lib/legacy-runtime.ts', 'app/api/sessions/route.ts',
     'app/api/sessions/resume/route.ts', 'app/api/sessions/draft/route.ts',
@@ -614,6 +614,10 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       assert.equal(a.body.participants.length,1);
       assert.equal(a.body.participants[0].id,participantA);
       assert.equal(a.body.participants[0].sessionCount,2);
+      const actual=(await pool.query('SELECT allocation.agent_id, agent.internal_name FROM participant_agent_assignments allocation JOIN ai_agent_configs agent ON agent.id=allocation.agent_id WHERE participant_id=$1 AND experiment_run_id=$2',[participantA,groups[0].id])).rows[0];
+      assert.deepEqual(a.body.participants[0].assignedAgents,[{id:actual.agent_id,internalName:actual.internal_name,runId:groups[0].id}]);
+      const b=await directory.GET(req(study.id,groups[1].id));
+      assert.equal(b.body.participants[0].assignedAgents[0].id,(await pool.query('SELECT agent_id FROM participant_agent_assignments WHERE participant_id=$1',[participantB])).rows[0].agent_id);
       assert.equal((await directory.GET(req(study.id,otherGroup.id))).status,404);
       const exp = h.load('lib/admin-export.ts');
       const archive = await exp.buildInteractionArchive({ experimentId:study.id,runId:groups[0].id,participantIds:[participantA],adminUserId:adminId });
@@ -668,6 +672,17 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       const counts = (await pool.query('SELECT count(*)::int AS n FROM participant_agent_assignments WHERE experiment_run_id=$1 GROUP BY agent_id',[groups[2].id])).rows;
       assert.deepEqual(counts.map(row => row.n).sort(),[2,2]);
       await assert.rejects(() => pool.query('INSERT INTO participants (id,experiment_id,external_code) VALUES ($1,$2,$3)',[crypto.randomUUID(),study.id,'P001']),error => error.code === '23505');
+    });
+    await t.test('random group directory lists each actual assigned agent rather than all candidates',async()=>{
+      asAdmin();
+      const response=await h.load('app/api/admin/participants/route.ts').GET(h.request({},`http://localhost/api/admin/participants?experimentId=${study.id}&runId=${groups[2].id}`));
+      assert.equal(response.status,200);assert.equal(response.body.participants.length,4);
+      const allocations=(await pool.query('SELECT allocation.participant_id,agent.id,agent.internal_name FROM participant_agent_assignments allocation JOIN ai_agent_configs agent ON agent.id=allocation.agent_id WHERE experiment_run_id=$1',[groups[2].id])).rows;
+      for(const person of response.body.participants) {
+        const agent=allocations.find(row=>row.participant_id===person.id);
+        assert.deepEqual(person.assignedAgents,[{id:agent.id,internalName:agent.internal_name,runId:groups[2].id}]);
+      }
+      assert.equal(new Set(response.body.participants.map(person=>person.assignedAgents[0].id)).size,2);
     });
     let staleB;
     await t.test('link deletion rejects active enrollment, wrong confirmation and in-flight AI without changing records', async () => {
@@ -1576,6 +1591,94 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
         assert.equal(results.find(result=>result.status===409).body.error.code,'NEWER_INTERACTION_EXISTS');
         assert.equal((await pool.query('SELECT count(*)::int AS n FROM experiment_sessions WHERE participant_id=$1',[otherInternal.participantId])).rows[0].n,before+1);
       });
+      const autoBrowser=await harness(db,h.sources);
+      const startClient=autoBrowser.load('lib/interaction-start.ts');
+      const savedStarts=new Map();
+      const startStorage={getItem:key=>savedStarts.get(key)??null,setItem:(key,value)=>savedStarts.set(key,value),removeItem:key=>savedStarts.delete(key)};
+      let autoFirst, autoSecond, autoParticipant;
+      const autoPayload=()=>getPayload(autoBrowser,links[1]);
+      const autoCount=async()=>(await pool.query('SELECT count(*)::int AS n FROM experiment_sessions WHERE participant_id=$1',[autoParticipant])).rows[0].n;
+      const autoLogin=async(preferLatest=true)=>{
+        autoBrowser.jar.clear();
+        return autoBrowser.load('app/api/sessions/resume/route.ts').POST(req(autoBrowser,{
+          participantCode:autoFirst.session.participantCode,identity:'自动登录学生',preferLatest,
+        },'/api/sessions/resume',links[1]));
+      };
+      const autoStart=async({retryOnly=false,loseResponse=false}={})=>{
+        const payload=await autoPayload();
+        return startClient.startLoginInteraction({storage:startStorage,key:startClient.interactionStartKey(links[1].entryToken,payload.session.participantCode),
+          sessionId:payload.session.id,retryOnly,newRequestId:crypto.randomUUID,
+          prepare:async()=>{assert.equal((await autoPayload()).pending,false);},
+          start:async action=>{
+            const response=await autoBrowser.load('app/api/conversations/route.ts').POST(req(autoBrowser,action,'/api/conversations',links[1]));
+            if(response.status!==200) throw Object.assign(new Error(response.body.error.message),{code:response.body.error.code});
+            if(loseResponse) throw new Error('lost response after database commit');
+            return response.body;
+          }});
+      };
+      await t.test(provider + ': explicit verified login automatically creates one new interaction; refresh and credential restore do not',async()=>{
+        const enrolled=await autoBrowser.load('app/api/sessions/route.ts').POST(req(autoBrowser,{profile:{fullName:'自动登录学生'}},'/api/sessions',links[1]));
+        assert.equal(enrolled.status,201);autoFirst=enrolled.body;
+        autoParticipant=(await autoBrowser.load('lib/session.ts').getAuthenticatedSession(await entries.getExperimentEntry(links[1].entryToken))).participantId;
+        assert.equal((await send(autoBrowser,'第一节课原始问题',links[1])).status,200);
+        assert.equal((await autoBrowser.load('app/api/sessions/draft/route.ts').PUT(req(autoBrowser,{sessionId:autoFirst.session.id,text:'第一节课草稿',revision:(await autoPayload()).draft.revision},'/api/sessions/draft',links[1]))).status,200);
+        assert.equal((await autoLogin()).status,200);
+        autoSecond=(await autoStart()).payload;
+        assert.notEqual(autoSecond.session.id,autoFirst.session.id);assert.equal(await autoCount(),2);
+        assert.equal(autoSecond.session.participantCode,autoFirst.session.participantCode);
+        assert.equal(autoSecond.session.agentId,agents[1].id);assert.equal(autoSecond.session.experimentRunId,links[1].id);
+        assert.equal(autoSecond.messages.length,0);assert.equal((await autoPayload()).session.id,autoSecond.session.id);
+        assert.equal(await autoStart({retryOnly:true}),null);assert.equal(await autoCount(),2);
+        const firstRow=(await pool.query('SELECT status,draft_text FROM experiment_sessions WHERE public_id=$1',[autoFirst.session.id])).rows[0];
+        assert.equal(firstRow.status,'completed');assert.equal(firstRow.draft_text,'第一节课草稿');
+        assert.equal((await send(autoBrowser,'第二节课问题',links[1])).status,200);
+        assert.equal(parseBackground(latestProviderInput(autoBrowser)).history[0].content,'第一节课原始问题');
+        assert.equal((await autoPayload()).messages.length,2);
+        assert.equal((await pool.query('SELECT count(*)::int AS n FROM participants WHERE id=$1',[autoParticipant])).rows[0].n,1);
+      });
+      await t.test(provider + ': auto login selects the newest interaction after browsing old history while legacy recovery retains its selection',async()=>{
+        const switched=await autoBrowser.load('app/api/conversations/route.ts').POST(req(autoBrowser,{action:'switch',sessionId:autoFirst.session.id},'/api/conversations',links[1]));
+        assert.equal(switched.status,200);
+        assert.equal((await autoLogin(false)).status,200);assert.equal((await autoPayload()).session.id,autoFirst.session.id);
+        assert.equal((await autoLogin()).status,200);assert.equal((await autoPayload()).session.id,autoSecond.session.id);
+        assert.equal(await autoCount(),2);
+      });
+      await t.test(provider + ': committed automatic start with a lost response replays after reload without creating a third copy',async()=>{
+        await assert.rejects(()=>autoStart({loseResponse:true}),/lost response after database commit/);
+        assert.equal(await autoCount(),3);assert.equal(savedStarts.size,1);
+        const committed=(await autoPayload()).session.id;
+        const replay=await autoStart({retryOnly:true});
+        assert.equal(replay.payload.session.id,committed);assert.equal(await autoCount(),3);assert.equal(savedStarts.size,0);
+        assert.equal(await autoStart({retryOnly:true}),null);
+      });
+      await t.test(provider + ': failed automatic start rolls back old completion and preserves its request for a safe retry',async()=>{
+        assert.equal((await autoLogin()).status,200);
+        const original=(await autoPayload()).session.id;
+        const before=(await pool.query('SELECT status,completed_at,metadata FROM experiment_sessions WHERE public_id=$1',[original])).rows;
+        failInteractionMemoryWrite=true;
+        try {await assert.rejects(()=>autoStart());} finally {failInteractionMemoryWrite=false;}
+        assert.equal(await autoCount(),3);assert.equal(savedStarts.size,1);
+        assert.deepEqual((await pool.query('SELECT status,completed_at,metadata FROM experiment_sessions WHERE public_id=$1',[original])).rows,before);
+        assert.equal((await autoStart({retryOnly:true})).payload.session.participantCode,autoFirst.session.participantCode);
+        assert.equal(await autoCount(),4);
+      });
+      await t.test(provider + ': admin directory shows the actual agent once per group and falls back to historical snapshots',async()=>{
+        asAdmin();
+        const listing=()=>directory.GET(adminReq({},'&runId='+links[1].id));
+        let person=(await listing()).body.participants.find(row=>row.id===autoParticipant);
+        assert.deepEqual(person.assignedAgents,[{id:agents[1].id,internalName:agents[1].internalName,runId:links[1].id}]);
+        assert.equal(person.sessionCount,4);assert.equal(person.turnCount,2);
+        const allocation=(await pool.query('DELETE FROM participant_agent_assignments WHERE participant_id=$1 RETURNING *',[autoParticipant])).rows[0];
+        try {
+          person=(await listing()).body.participants.find(row=>row.id===autoParticipant);
+          assert.deepEqual(person.assignedAgents,[{id:agents[1].id,internalName:agents[1].internalName,runId:links[1].id}]);
+          assert.equal(person.sessionCount,4);assert.equal(person.turnCount,2);
+          assert.equal(JSON.stringify(person).includes('synthetic'),false);
+        } finally {
+          await pool.query('INSERT INTO participant_agent_assignments (id,experiment_run_id,participant_id,agent_id,assignment_mode,assigned_at,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+            [allocation.id,allocation.experiment_run_id,allocation.participant_id,allocation.agent_id,allocation.assignment_mode,allocation.assigned_at,allocation.metadata]);
+        }
+      });
       if (provider==='dify') await t.test('Dify project copies retain provider and memory settings without copying student identities',async()=>{
         asAdmin();
         const copied=await studyApi.POST(h.request({name:'重复交互模板副本',sourceId:projectId},'http://localhost/api/admin/experiments'));
@@ -1701,6 +1804,16 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
         }
         assert.equal((await pool.query('SELECT count(*)::int AS n FROM participants WHERE experiment_id=$1',[projectId])).rows[0].n,17);
         assert.equal((await pool.query("SELECT count(*)::int AS n FROM participant_agent_assignments WHERE experiment_run_id=$1 AND assignment_mode='roster'",[plan.id])).rows[0].n,17);
+      });
+      await t.test('admin identity mapping shows each actual roster allocation instead of the candidate agent list',async()=>{
+        asAdmin();
+        const result=await h.load('app/api/admin/participants/route.ts').GET(h.request({},`http://localhost/api/admin/participants?experimentId=${projectId}&runId=${plan.id}`));
+        assert.equal(result.status,200);assert.equal(result.body.participants.length,17);
+        for(const person of result.body.participants) {
+          const enrolledPerson=enrolled.find(entry=>entry.payload.session.participantCode===person.participantCode);
+          const agent=agents.find(agent=>agent.id===enrolledPerson.payload.session.agentId);
+          assert.deepEqual(person.assignedAgents,[{id:agent.id,internalName:agent.internalName,runId:plan.id}]);
+        }
       });
       await t.test('chat, recovery and next interactions retain the planned agent without sending roster data to AI',async()=>{
         const entry=enrolled[0], browser=entry.browser, url=path=>`http://localhost${path}?entry=${plan.entryToken}`;

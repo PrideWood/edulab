@@ -82,6 +82,43 @@ export async function GET(request?: Request) {
        LIMIT 500`,
       [experimentId,runId],
     );
+    // Read actual allocations, rather than the entry's candidate/fixed agent.
+    // Older records may predate allocations, so retain their recorded binding.
+    const bindings = result.rows.length ? await query<{
+      participant_id: string; agent_id: string | null; internal_name: string; run_id: string | null;
+    }>(
+      `WITH bindings AS (
+         SELECT allocation.participant_id, allocation.experiment_run_id AS run_id,
+           agent.id::text AS agent_id, agent.internal_name
+         FROM participant_agent_assignments allocation
+         JOIN ai_agent_configs agent ON agent.id=allocation.agent_id AND agent.experiment_id=$1
+         JOIN participants p ON p.id=allocation.participant_id AND p.experiment_id=$1
+         WHERE allocation.participant_id=ANY($2::uuid[]) AND ($3::uuid IS NULL OR allocation.experiment_run_id=$3)
+         UNION ALL
+         SELECT session.participant_id, session.experiment_run_id,
+           COALESCE(session.agent_id::text, NULLIF(session.config_snapshot->'ai'->>'agentId','')),
+           COALESCE(NULLIF(session.config_snapshot->'ai'->>'internalName',''), agent.internal_name, '历史智能体')
+         FROM experiment_sessions session
+         LEFT JOIN ai_agent_configs agent ON agent.id::text=COALESCE(session.agent_id::text, session.config_snapshot->'ai'->>'agentId')
+           AND agent.experiment_id=$1
+         WHERE session.experiment_id=$1 AND session.participant_id=ANY($2::uuid[])
+           AND ($3::uuid IS NULL OR session.experiment_run_id=$3)
+           AND (session.agent_id IS NOT NULL OR NULLIF(session.config_snapshot->'ai'->>'agentId','') IS NOT NULL
+             OR NULLIF(session.config_snapshot->'ai'->>'internalName','') IS NOT NULL)
+           AND NOT EXISTS (SELECT 1 FROM participant_agent_assignments allocation
+             WHERE allocation.participant_id=session.participant_id
+               AND allocation.experiment_run_id IS NOT DISTINCT FROM session.experiment_run_id)
+       )
+       SELECT DISTINCT participant_id, run_id, agent_id, internal_name FROM bindings
+       ORDER BY participant_id, internal_name, run_id, agent_id`,
+      [experimentId,result.rows.map(row => row.id),runId],
+    ) : {rows:[]};
+    const assignedAgents = new Map<string, Array<{id:string | null; internalName:string; runId:string | null}>>();
+    for (const row of bindings.rows) {
+      const agents = assignedAgents.get(row.participant_id) ?? [];
+      agents.push({id:row.agent_id,internalName:row.internal_name,runId:row.run_id});
+      assignedAgents.set(row.participant_id,agents);
+    }
     const participants = result.rows.map((row) => {
       const profile = row.updated_at ? profileFromRow({ ...row, updated_at: row.updated_at }) : null;
       return {
@@ -89,6 +126,7 @@ export async function GET(request?: Request) {
         participantCode: row.external_code,
         fullName: profile?.fullName ?? "",
         studentNumber: profile?.studentNumber ?? "",
+        assignedAgents: assignedAgents.get(row.id) ?? [],
         profileUpdatedAt: profile?.updatedAt ?? null,
         profileRevision: profile?.revision ?? 0,
         sessionCount: Number(row.session_count),

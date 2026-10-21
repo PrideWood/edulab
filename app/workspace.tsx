@@ -11,6 +11,7 @@ import { uploadTranscript } from "@/lib/transcript-upload";
 import { FullscreenController, useFullscreenState } from "./fullscreen-controller";
 import { BrandLogo } from "./brand-logo";
 import { readChatStream } from "@/lib/chat-stream";
+import { interactionStartKey, readInteractionStart, startLoginInteraction, type InteractionStartAction } from "@/lib/interaction-start";
 
 const OUTBOX_PREFIX = "edulab_pending_message:";
 const TRANSCRIPT_PREFIX = "edulab_transcript:";
@@ -186,6 +187,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [conversationBusy, setConversationBusy] = useState(false);
+  const [loginStartPending, setLoginStartPending] = useState(false);
+  const loginRequestRef = useRef(false);
   const [taskOpen, setTaskOpen] = useState(false);
   const [participantProfile, setParticipantProfile] = useState<ParticipantProfile | null>(null);
   const [profileOpen, setProfileOpen] = useState(false);
@@ -233,6 +236,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
     setParticipantProfile(null);
     setCodeNoticeOpen(false);
     setNewInteractionOpen(false);
+    setLoginStartPending(false);
     setProfileFullName("");
     setProfileStudentNumber("");
     setText("");
@@ -441,6 +445,56 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
     setError("AI 仍在处理这条消息。你可以稍后刷新页面，系统会继续恢复结果。");
   }, [applyPayload, releaseInvalidatedSession, apiUrl]);
 
+  const requestConversationChange = useCallback(async (action: {action:"create"} | {action:"switch";sessionId:string} | InteractionStartAction) => {
+    const response = await fetch(apiUrl("/api/conversations"), {
+      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(action),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "暂时无法切换对话。");
+    return data as {payload:SessionPayload;conversations:ConversationSummary[]};
+  }, [apiUrl]);
+
+  const finishLoginInteraction = useCallback(async (payload: SessionPayload, retryOnly = false) => {
+    const key = interactionStartKey(entryToken ?? experimentId,payload.session.participantCode);
+    if (retryOnly && !readInteractionStart(localStorage,key)?.automaticLogin) return;
+    setLoginStartPending(true);
+    setConversationBusy(true);
+    setError(null);
+    try {
+      const result = await startLoginInteraction({
+        storage:localStorage, key, sessionId:payload.session.id, retryOnly,
+        newRequestId:()=>crypto.randomUUID(),
+        prepare:async () => {
+          if (payload.pending) await pollUntilSettled();
+          const restored = await readResponse(await fetch(apiUrl("/api/sessions"),{cache:"no-store"}));
+          if (restored.session.id !== payload.session.id) throw new ClientApiError(409,"SESSION_CHANGED","当前会话已改变，请刷新后核对，系统未重复创建交互。");
+          applyPayload(restored);
+          if (restored.pending) throw new Error("上次 AI 回复仍在恢复，请稍后重试开启新交互。");
+          if (restored.controls.databaseMessagesEnabled && restored.session.status === "active") {
+            await saveDraft();
+            if (draftRef.current.text !== draftRef.current.savedText) throw new Error("当前草稿尚未保存，请核对草稿提示后重试开启新交互。");
+          }
+        },
+        start:requestConversationChange,
+      });
+      if (result) {
+        applyPayload(result.payload);
+        if (!result.payload.failedRequest) { setError(null); setRetryContent(null); }
+        setConversations(result.conversations);
+        setTaskOpen(false);
+        setLoginStartPending(false);
+      }
+    } catch (startError) {
+      if (isInvalidSessionError(startError)) await releaseInvalidatedSession();
+      if (startError instanceof ClientApiError && ["SESSION_CHANGED","NEWER_INTERACTION_EXISTS"].includes(startError.code)) {
+        try { localStorage.removeItem(key); } catch { /* No additional start will be attempted with a new request ID. */ }
+        setLoginStartPending(false);
+        await refreshConversations().catch(() => undefined);
+      }
+      throw startError;
+    } finally { setConversationBusy(false); }
+  }, [entryToken,experimentId,pollUntilSettled,apiUrl,applyPayload,saveDraft,requestConversationChange,releaseInvalidatedSession,refreshConversations]);
+
   const sendWithId = useCallback(async (content: string, clientRequestId: string) => {
     if (sendingRef.current || uploadRef.current) return;
     const activeSessionId = sessionIdRef.current;
@@ -537,6 +591,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
           const payload = await readResponse(response);
           if (!cancelled) {
             applyPayload(payload);
+            await finishLoginInteraction(payload,true);
             const valid = await refreshConversations().catch(() => undefined);
             if (valid === false) return;
             if (payload.pending) await pollUntilSettled();
@@ -579,7 +634,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
     }
     void initialize();
     return () => { cancelled = true; };
-  }, [applyPayload, pollUntilSettled, refreshConversations, apiUrl]);
+  }, [applyPayload, pollUntilSettled, refreshConversations, finishLoginInteraction, apiUrl]);
 
   useEffect(() => {
     let checking = false;
@@ -627,7 +682,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
   const remainingSeconds = controls?.endsAt && clock > 0 ? Math.max(0, Math.ceil((new Date(controls.endsAt).getTime() - clock) / 1000)) : null;
   const timeExpired = remainingSeconds === 0;
   const messageLimitReached = controls?.remainingMessages === 0;
-  const canChat = Boolean(participantProfile && session?.status === "active" && controls?.chatEnabled && !timeExpired && !messageLimitReached);
+  const canChat = Boolean(participantProfile && session?.status === "active" && controls?.chatEnabled && !timeExpired && !messageLimitReached && !conversationBusy && !loginStartPending);
   const fullscreenReady = fullscreenState === "fullscreen" || fullscreenState === "unsupported";
   const composerAvailable = Boolean(canChat && !loading && !pending && !profileOpen && fullscreenReady);
   const limitText = [
@@ -748,25 +803,38 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
 
   async function resumeExperiment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (loginRequestRef.current) return;
+    loginRequestRef.current = true;
     setProfileSaving(true);
     setProfileError("");
+    let verified = false;
     try {
       const response = await fetch(apiUrl("/api/sessions/resume"), {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ participantCode: resumeCode, identity: resumeIdentity }),
+        body: JSON.stringify({ participantCode: resumeCode, identity: resumeIdentity, preferLatest:true }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error?.message ?? "实验恢复失败，请重试。");
       const payload = await readResponse(await fetch(apiUrl("/api/sessions"), { cache: "no-store" }));
+      verified = true;
       applyPayload(payload);
       setProfileOpen(false);
       setResumeIdentity("");
       setError(null);
-      await refreshConversations();
-      if (payload.pending) await pollUntilSettled();
+      await finishLoginInteraction(payload);
     } catch (resumeError) {
-      setProfileError(resumeError instanceof Error ? resumeError.message : "暂时无法恢复，请稍后重试。");
-    } finally { setProfileSaving(false); }
+      const notice = resumeError instanceof Error ? resumeError.message : "暂时无法恢复，请稍后重试。";
+      if (verified) setError(notice); else setProfileError(notice);
+    } finally { setProfileSaving(false); loginRequestRef.current = false; }
+  }
+
+  async function retryLoginInteraction() {
+    if (conversationBusy) return;
+    try {
+      const payload = await readResponse(await fetch(apiUrl("/api/sessions"),{cache:"no-store"}));
+      applyPayload(payload);
+      await finishLoginInteraction(payload);
+    } catch (startError) { setError(startError instanceof Error ? startError.message : "暂时无法开启新交互，请重试。"); }
   }
 
   async function copyParticipantCode() {
@@ -835,14 +903,9 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
   }
 
   async function startNewInteraction(confirmed = false) {
-    if (!session || pending || conversationBusy) return;
-    const key = `edulab_new_interaction:${entryToken ?? experimentId}:${session.participantCode}`;
-    let action: {action:"start_interaction";clientRequestId:string;expectedSessionId:string} | null = null;
-    try {
-      const saved = JSON.parse(localStorage.getItem(key) ?? "null");
-      if (saved?.action==="start_interaction" && /^[0-9a-f-]{36}$/i.test(saved.clientRequestId)
-        && /^[0-9a-f-]{36}$/i.test(saved.expectedSessionId)) action=saved;
-    } catch { /* Create a retry ID if browser storage is unavailable. */ }
+    if (!session || pending || conversationBusy || loginStartPending) return;
+    const key = interactionStartKey(entryToken ?? experimentId,session.participantCode);
+    let action: InteractionStartAction | null = readInteractionStart(localStorage,key);
     if (!action) {
       if (!confirmed) { setNewInteractionOpen(true); return; }
       action={action:"start_interaction",clientRequestId:crypto.randomUUID(),expectedSessionId:session.id};
@@ -854,7 +917,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
 
   async function changeConversation(action: { action: "create" } | { action: "switch"; sessionId: string }
     | {action:"start_interaction";clientRequestId:string;expectedSessionId:string}) {
-    if (pending || conversationBusy || uploadRef.current || (action.action === "switch" && action.sessionId === session?.id)) return;
+    if (pending || conversationBusy || (loginStartPending && action.action !== "switch") || uploadRef.current || (action.action === "switch" && action.sessionId === session?.id)) return;
     setUploadStatus("");
     setConversationBusy(true);
     setError(null);
@@ -863,14 +926,10 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
         await saveDraft();
         if (draftRef.current.text !== draftRef.current.savedText) throw new Error("当前草稿尚未保存，请核对草稿提示后再切换对话。");
       }
-      const response = await fetch(apiUrl("/api/conversations"), {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "暂时无法切换对话。");
-      applyPayload(data.payload as SessionPayload);
+      const data = await requestConversationChange(action);
+      applyPayload(data.payload);
       if (action.action==="start_interaction" && session) {
-        try { localStorage.removeItem(`edulab_new_interaction:${entryToken ?? experimentId}:${session.participantCode}`); } catch { /* The committed request remains idempotent. */ }
+        try { localStorage.removeItem(interactionStartKey(entryToken ?? experimentId,session.participantCode)); } catch { /* The committed request remains idempotent. */ }
       }
       setConversations(data.conversations as ConversationSummary[]);
       setTaskOpen(false);
@@ -881,7 +940,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
       }
       if (action.action === "start_interaction" && session && conversationError instanceof ClientApiError
         && ["SESSION_CHANGED", "NEWER_INTERACTION_EXISTS"].includes(conversationError.code)) {
-        try { localStorage.removeItem(`edulab_new_interaction:${entryToken ?? experimentId}:${session.participantCode}`); } catch { /* Retry after selecting the latest interaction. */ }
+        try { localStorage.removeItem(interactionStartKey(entryToken ?? experimentId,session.participantCode)); } catch { /* Retry after selecting the latest interaction. */ }
         await refreshConversations().catch(() => undefined);
       }
       setError(conversationError instanceof Error ? conversationError.message : "暂时无法切换对话。");
@@ -971,7 +1030,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
   }
 
   async function startNextParticipant() {
-    if (!session || pending || participantSwitching || uploadRef.current) return;
+    if (!session || pending || conversationBusy || participantSwitching || uploadRef.current) return;
     const confirmed = window.confirm("仅在实验人员要求时使用。系统将保存当前参与者的交互记录并退出，然后由下一位参与者填写信息。确认继续吗？");
     if (!confirmed) return;
     uploadRef.current = true;
@@ -992,6 +1051,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
       if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "REQUEST_FAILED", data?.error?.message ?? "暂时无法切换参与者。");
 
       localStorage.removeItem(outboxKey(session.id));
+      localStorage.removeItem(interactionStartKey(entryToken ?? experimentId,session.participantCode));
+      setLoginStartPending(false);
       draftRef.current = { sessionId: "", text: "", savedText: "", revision: 0, conflict: false };
       setEntryMode("new");
       setDraftStatus("");
@@ -1043,7 +1104,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
           <div className="conversation-sidebar-head">
             <div className="brand sidebar-brand"><button className="brand-mark brand-toggle" onClick={() => setSidebarCollapsed((value) => !value)} aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}><BrandLogo size={32} /></button>{!sidebarCollapsed && <div className="brand-name">EduLab</div>}</div>
           </div>
-          <button className="new-conversation" onClick={() => void startNewInteraction()} disabled={loading || pending || conversationBusy || !session || !participantProfile}><span>＋</span>{!sidebarCollapsed && <em>开始新一次交互</em>}</button>
+          <button className="new-conversation" onClick={() => void startNewInteraction()} disabled={loading || pending || conversationBusy || loginStartPending || !session || !participantProfile}><span>＋</span>{!sidebarCollapsed && <em>开始新一次交互</em>}</button>
           <nav className="conversation-list">
             {conversations.map((conversation) => <button key={conversation.id} className={conversation.id === session?.id ? "conversation-item active" : "conversation-item"} onClick={() => changeConversation({ action: "switch", sessionId: conversation.id })} disabled={pending || conversationBusy} title={`${conversation.title} · ${new Date(conversation.startedAt).toLocaleString("zh-CN")} · ${conversation.id}`}><span className="conversation-icon">{conversation.title.slice(0, 1)}</span>{!sidebarCollapsed && <span className="conversation-copy"><strong>{conversation.title}</strong><small>{conversation.status === "completed" ? "已结束 · " + new Date(conversation.startedAt).toLocaleDateString("zh-CN") : "继续 · " + new Date(conversation.startedAt).toLocaleDateString("zh-CN") + " " + timeLabel(conversation.startedAt)}</small></span>}</button>)}
           </nav>
@@ -1066,7 +1127,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
               ? <div className="message-row assistant"><div className="message-stack"><div className="bubble"><MessageBody message={{ role: "assistant", content: streamingReply }} /></div></div></div>
               : <div className="message-row assistant"><div className="bubble typing" aria-label="AI 正在回复"><span /><span /><span /></div></div>)}
             {storageError && <div className="error-card" role="alert">本机保存空间不可用，请先下载交互记录并联系实验人员，暂勿刷新或关闭页面。</div>}
-            {error && <div className="error-card" role="alert"><span>{error}</span>{retryContent && <button onClick={() => retryMessage(retryContent)} disabled={pending}>重新发送</button>}</div>}
+            {error && <div className="error-card" role="alert"><span>{error}</span>{loginStartPending ? <button onClick={() => void retryLoginInteraction()} disabled={conversationBusy}>重试开启新交互</button> : retryContent && <button onClick={() => retryMessage(retryContent)} disabled={pending}>重新发送</button>}</div>}
+            {conversationBusy && loginStartPending && <div className="loading-note" role="status">正在保存上次记录并开启新交互…</div>}
             {loading && <div className="loading-note">正在准备实验会话…</div>}
             {session?.status === "completed" && <div className="completed-card">这个对话已经结束。你可以在左侧查看其他对话。</div>}
           </div>
@@ -1098,9 +1160,9 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
           {!session && entryMode === "resume" ? <form className="profile-form" onSubmit={resumeExperiment}>
             <label><span>实验编号</span><input value={resumeCode} onChange={(event) => setResumeCode(event.target.value)} maxLength={80} autoComplete="off" placeholder="例如 P001" required /></label>
             <label><span>身份校验</span><input value={resumeIdentity} onChange={(event) => setResumeIdentity(event.target.value)} type="password" maxLength={100} autoComplete="off" placeholder="当前姓名或学号" required /></label>
-            <p className="profile-hint">使用本项目的原编号及当前姓名或学号核验身份，恢复原分组的未完成会话。需要新的学习任务时，进入后点击“开始新一次交互”。</p>
+            <p className="profile-hint">使用原编号及当前姓名或学号登录后，将自动开启新一次交互，保留原分组和历史记录。刷新页面或断线重连会继续当前会话。</p>
             {profileError && <p className="profile-error" role="alert">{profileError}</p>}
-            <button className="profile-save" type="submit" disabled={profileSaving}>{profileSaving ? "恢复中…" : "恢复实验"}</button>
+            <button className="profile-save" type="submit" disabled={profileSaving}>{profileSaving ? "正在进入…" : "登录并开始"}</button>
           </form> : <form className="profile-form" onSubmit={saveProfile}>
             {rosterClasses && !session && <label><span>班级</span><select value={rosterClass} onChange={event=>setRosterClass(event.target.value)} required><option value="">请选择班级</option>{rosterClasses.map(name=><option key={name} value={name}>{name}</option>)}</select></label>}
             <label><span>姓名</span><input value={profileFullName} onChange={(event) => setProfileFullName(event.target.value)} maxLength={100} autoComplete="name" placeholder="请输入姓名" required /></label>

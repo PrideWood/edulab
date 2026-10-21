@@ -9,7 +9,7 @@ import { hashSecret, newSessionSecret, normalizeParticipantCode } from "@/lib/se
 import type { ExperimentSessionSnapshot } from "@/lib/experiment-settings";
 import type { AuthenticatedSession } from "@/lib/session";
 
-export async function recoverParticipant(code: string, identity: string, entry?: ExperimentEntry | null) {
+export async function recoverParticipant(code: string, identity: string, entry?: ExperimentEntry | null, preferLatest = false) {
   const experimentId = entry?.experimentId ?? experiment.id;
   const participantCode = normalizeParticipantCode(code);
   // Database-backed throttling also works across serverless instances. Never
@@ -45,9 +45,11 @@ export async function recoverParticipant(code: string, identity: string, entry?:
       started_at: string; last_activity_at: string; config_version: number | null;
       config_snapshot: ExperimentSessionSnapshot | null; session_secret_hash: string;
     }>(`SELECT s.* FROM experiment_sessions s WHERE participant_id=$1 AND experiment_id=$2 AND ($3::uuid IS NULL OR experiment_run_id=$3)
-        ORDER BY COALESCE(s.public_id::text = (SELECT metadata->>'resume_session_id' FROM participants WHERE id=$1), false) DESC,
+        ORDER BY CASE WHEN $4 THEN s.started_at END DESC,
+          CASE WHEN $4 THEN s.id END DESC,
+          COALESCE(s.public_id::text = (SELECT metadata->>'resume_session_id' FROM participants WHERE id=$1), false) DESC,
           (s.status='active') DESC,
-          last_activity_at DESC, started_at DESC, id DESC LIMIT 1 FOR UPDATE`, [participantId, experimentId, entry?.runId ?? null]);
+          last_activity_at DESC, started_at DESC, id DESC LIMIT 1 FOR UPDATE`, [participantId, experimentId, entry?.runId ?? null,preferLatest]);
     const row = sessions.rows[0];
     if (!row) throw invalid();
     if (!row.config_snapshot) throw new ApiError(409, "RECOVERY_CONFIG_MISSING", "此历史实验缺少配置快照，请联系教师处理，系统不会重新分组。");
