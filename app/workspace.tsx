@@ -190,6 +190,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
   const [retryContent, setRetryContent] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [chatFontSize, setChatFontSize] = useState(14);
   const [conversationBusy, setConversationBusy] = useState(false);
   const [loginStartPending, setLoginStartPending] = useState(false);
   const loginRequestRef = useRef(false);
@@ -1117,7 +1118,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
   </div>;
 
   return (
-    <main className="app-shell" onPointerDownCapture={handleWorkspacePointerDown}>
+    <main className={`app-shell chat-font-${chatFontSize}`} onPointerDownCapture={handleWorkspacePointerDown}>
       <FullscreenController fullscreenState={fullscreenState} onEntered={handleFullscreenEntered} />
       <section className={`workspace conversation-workspace ${sidebarCollapsed ? "sidebar-collapsed" : ""}`} aria-label="AI 对话工作区">
         <aside className="conversation-sidebar" aria-label="对话列表">
@@ -1134,6 +1135,11 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
           <header className="chat-header">
             <div className="assistant-title"><div className="assistant-avatar" aria-hidden="true">AI</div><div><p className="assistant-name">{experiment.assistantName}</p><p className="assistant-status">{!participantProfile && session ? "请先填写参与者信息" : session?.status === "completed" || timeExpired || messageLimitReached ? "本次对话已结束" : pending ? "正在思考…" : limitText || "在线"}</p></div></div>
             <div className="session-actions">
+              <div className="font-size-controls" role="group" aria-label="文字大小">
+                <button type="button" onClick={() => setChatFontSize(size => Math.max(14, size - 2))} disabled={chatFontSize === 14} aria-label="缩小文字">A−</button>
+                <button type="button" onClick={() => setChatFontSize(14)} title="恢复默认文字大小" aria-label={`当前文字大小 ${chatFontSize} 像素，点击恢复默认`}>{chatFontSize}px</button>
+                <button type="button" onClick={() => setChatFontSize(size => Math.min(24, size + 2))} disabled={chatFontSize === 24} aria-label="放大文字">A+</button>
+              </div>
               {experiment.taskVisible && <button className="task-toggle-button" onClick={() => setTaskOpen((value) => !value)}>{taskOpen ? "关闭说明" : "任务说明"}</button>}
               <div className="export-actions"><button onClick={() => void exportTranscript()} disabled={!session || loading || conversationBusy || downloading}>{downloading ? "正在整理…" : "下载全部交互记录"}</button>{controls?.databaseMessagesEnabled && <button onClick={() => void submitRecords()} disabled={!session || pending || uploading || messages.length === 0}>{uploading ? "提交中…" : "提交交互记录"}</button>}<span role="status">{downloadStatus || uploadStatus}</span></div>
             </div>
