@@ -9,15 +9,27 @@ import { query } from "@/db";
 import { randomUUID } from "node:crypto";
 import { ApiError, errorResponse } from "@/lib/http";
 import { buildInteractionArchive } from "@/lib/admin-export";
+import { experimentRosterEnabled } from "@/lib/experiments";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 async function assertRosterSchema() {
-  const result = await query<{ ready: boolean }>("SELECT to_regclass('roster_entries') IS NOT NULL AS ready");
+  const result = await query<{ ready: boolean }>(`SELECT to_regclass('roster_entries') IS NOT NULL AND EXISTS (
+    SELECT 1 FROM pg_attribute WHERE attrelid='experiments'::regclass
+      AND attname='roster_enabled' AND NOT attisdropped) AS ready`);
   if (!result.rows[0].ready) {
-    throw new ApiError(503, "ROSTER_MIGRATION_REQUIRED", "名单功能尚未初始化，请先执行 0016 数据库迁移；原有实验入口可继续使用。");
+    throw new ApiError(503, "ROSTER_MIGRATION_REQUIRED", "名单功能尚未初始化，请先执行数据库迁移至 0017；原有实验入口可继续使用。");
   }
+}
+
+async function rosterExperiment(request: Request) {
+  const experimentId = await getAdminExperimentId(request);
+  await assertRosterSchema();
+  if (!await experimentRosterEnabled(experimentId)) {
+    throw new ApiError(403, "ROSTER_NOT_ENABLED", "此实验沿用原有入口设置；名单分层功能仅对新增实验开放。");
+  }
+  return experimentId;
 }
 const row=z.object({className:z.string().trim().min(1).max(100),fullName:z.string().trim().min(1).max(100),
   score:z.number().finite().min(-1e9).max(1e9),stratum:z.enum(["高","中","低"]).optional(),agentId:z.uuid().optional()});
@@ -34,8 +46,8 @@ const noStore={"Cache-Control":"private, no-store"};
 export async function GET(request:Request) {
   try {
     if(!await getAuthenticatedAdmin()) throw new ApiError(401,"ADMIN_REQUIRED","请先登录管理后台。");
-    await assertRosterSchema();
-    return NextResponse.json({rosters:await getRosters(await getAdminExperimentId(request))},{headers:noStore});
+    const experimentId = await rosterExperiment(request);
+    return NextResponse.json({rosters:await getRosters(experimentId)},{headers:noStore});
   } catch(error) {return errorResponse(error);}
 }
 export async function POST(request:Request) {
@@ -43,8 +55,7 @@ export async function POST(request:Request) {
     assertSameOrigin(request);
     const admin=await getAuthenticatedAdmin();
     if(!admin) throw new ApiError(401,"ADMIN_REQUIRED","请先登录管理后台。");
-    await assertRosterSchema();
-    const experimentId=await getAdminExperimentId(request);
+    const experimentId=await rosterExperiment(request);
     const text=await request.text();
     if(Buffer.byteLength(text)>3_000_000) throw new ApiError(413,"ROSTER_TOO_LARGE","名单文件过大，最多支持 5000 人。");
     let body;try {body=JSON.parse(text);}catch {throw new ApiError(400,"INVALID_ROSTER","请求格式无效。");}

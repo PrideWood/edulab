@@ -5,9 +5,25 @@ import { query, transaction } from "@/db";
 import { experiment } from "@/config/experiment";
 import { ApiError } from "@/lib/http";
 
+export interface ExperimentSummary {
+  id: string;
+  name: string;
+  rosterEnabled: boolean;
+}
+
+export async function experimentRosterEnabled(experimentId: string) {
+  // Whole-row JSON keeps the old experiment API usable before migration 0017.
+  const result = await query<{ enabled: boolean }>(`SELECT
+    COALESCE((to_jsonb(e)->>'roster_enabled')::boolean, false) AS enabled
+    FROM experiments e WHERE id=$1`, [experimentId]);
+  return result.rows[0]?.enabled === true;
+}
+
 export async function listExperiments() {
   await query("INSERT INTO experiments (id,name) VALUES ($1,$2) ON CONFLICT DO NOTHING", [experiment.id, experiment.title]);
-  const result = await query<{ id: string; name: string }>("SELECT id,name FROM experiments ORDER BY created_at,id");
+  const result = await query<ExperimentSummary>(`SELECT id,name,
+    COALESCE((to_jsonb(e)->>'roster_enabled')::boolean, false) AS "rosterEnabled"
+    FROM experiments e ORDER BY created_at,id`);
   return result.rows;
 }
 
@@ -16,7 +32,8 @@ export async function createExperiment(name: string, sourceId: string, adminId: 
     const source = await client.query("SELECT id FROM experiments WHERE id=$1 FOR SHARE", [sourceId]);
     if (!source.rows[0]) throw new ApiError(404, "EXPERIMENT_NOT_FOUND", "复制来源实验不存在。");
     const id = `study-${randomUUID()}`;
-    await client.query("INSERT INTO experiments (id,name,created_by) VALUES ($1,$2,$3)", [id,name,adminId]);
+    const created = await client.query<ExperimentSummary>(`INSERT INTO experiments (id,name,created_by) VALUES ($1,$2,$3)
+      RETURNING id,name,COALESCE((to_jsonb(experiments)->>'roster_enabled')::boolean, false) AS "rosterEnabled"`, [id,name,adminId]);
     // Copy configuration and encrypted credentials server-side; later edits
     // belong to the new experiment and cannot alter the source experiment.
     const copied = await client.query(`INSERT INTO experiment_settings (
@@ -37,6 +54,6 @@ export async function createExperiment(name: string, sourceId: string, adminId: 
       FROM ai_agent_configs WHERE id=$4`, [randomUUID(),id,adminId,agent.id]);
     await client.query(`INSERT INTO admin_audit_log (id,admin_user_id,action,experiment_id,after_data)
       VALUES ($1,$2,'experiment.create',$3,$4::jsonb)`, [randomUUID(),adminId,id,JSON.stringify({ name,sourceId })]);
-    return { id,name };
+    return created.rows[0];
   });
 }

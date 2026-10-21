@@ -24,18 +24,19 @@ export function RosterPanel({experimentId,agents,onChanged}:{experimentId:string
   const [appendText,setAppendText]=useState("");
   const [confirmation,setConfirmation]=useState<"lock"|"append"|"export"|"delete"|null>(null);
   const [appendPreview,setAppendPreview]=useState<RosterStudent[]>([]),[deleteCode,setDeleteCode]=useState("");
+  const [ready,setReady]=useState(false),[importedFile,setImportedFile]=useState("");
   useEffect(()=>{
     let live=true;
     fetch(endpoint,{cache:"no-store"}).then(async response=>{
       const data=await response.json();if(!response.ok)throw new Error(data.error?.message ?? "名单读取失败。");
-      if(live)setPlans(data.rosters);
+      if(live){setPlans(data.rosters);setReady(true);}
     }).catch(error=>{if(live)setError(error.message);});
     return ()=>{live=false;};
   },[endpoint]);
   function choose(plan:Plan) {
     setSelected(plan);setName(plan.name);setAgentIds(plan.agentIds);setManual(plan.manual);
     setText(rosterCsv([["班级","参与姓名","前测成绩","层级","agentId"],...plan.students.map(row=>[row.className,row.fullName,row.score,row.stratum,row.agentId])]));
-    setAdjusted(null);setDirty(false);setPage(0);setAgentFilter("");setError("");setStatus("");
+    setAdjusted(null);setDirty(false);setPage(0);setAgentFilter("");setError("");setStatus("");setImportedFile("");
   }
   async function perform(body:Record<string,unknown>) {
     if(busy)return;
@@ -63,19 +64,21 @@ export function RosterPanel({experimentId,agents,onChanged}:{experimentId:string
   const label=(id:string)=>agents.find(agent=>agent.id===id)?.internalName ?? id;
   const filteredStudents=students.filter(row=>!agentFilter || row.agentId===agentFilter);
   const active=plans.find(plan=>!plan.entryDeletedAt);
+  if (!ready) return <section className="settings-card roster-panel"><h2>名单分层预分配</h2>
+    <p className={`roster-status${error ? " error" : ""}`} role={error ? "alert" : "status"}>{error || "正在读取名单设置…"}</p></section>;
   return <section className="settings-card roster-panel" aria-labelledby="roster-heading">
-    <div className="settings-card-head"><div><h2 id="roster-heading">名单分层预分配（新增）</h2><p>各班按前测划三层，层内均衡分配。全实验共用 /roster/xxxx，按班级与参与姓名匹配，分配不受进入顺序影响。</p></div></div>
-    {error && <p className="directory-error" role="alert">{error}</p>}{status && <p className="agent-success" role="status">{status}</p>}
+    <div className="settings-card-head"><div><h2 id="roster-heading">名单分层预分配</h2><p>导入各班前测名单，预览智能体分配，核对后锁定并开放统一入口。</p></div></div>
+    {error && <p className="roster-status error" role="alert">{error}</p>}{status && <p className="roster-status success" role="status">{status}</p>}
     {plans.length>0 && <label className="roster-choice"><span>名单方案</span><select value={selected?.id ?? ""} disabled={busy} onChange={event=>{const plan=plans.find(plan=>plan.id===event.target.value);if(plan)choose(plan);}}><option value="">请选择已有方案</option>{plans.map(plan=><option key={plan.id} value={plan.id}>{plan.name} · v{plan.version} · {plan.entryDeletedAt?"链接已删除":plan.locked?plan.status==="active"?"已锁定，开放中":"已锁定，停止报名":"草案"}</option>)}</select></label>}
     {!selected && active ? <p className="profile-hint">此实验已有名单方案，请选择后查看或编辑；同一实验只保留一个有效的统一名单入口。</p> : <>
-      <div className="form-grid"><label><span>方案名称</span><input value={name} maxLength={120} disabled={readonly || busy} onChange={event=>{setName(event.target.value);setDirty(true);}} /></label>
-        <fieldset className="wide agent-choice-field" disabled={readonly || busy}><legend>参与分配的智能体（至少两个）</legend>{agents.filter(agent=>agent.enabled && agent.hasToken || agentIds.includes(agent.id)).map(agent=><label key={agent.id}><input type="checkbox" checked={agentIds.includes(agent.id)} onChange={event=>{setAgentIds(event.target.checked?[...agentIds,agent.id]:agentIds.filter(id=>id!==agent.id));setDirty(true);}}/><span>{agent.internalName}</span></label>)}</fieldset></div>
+      <div className="form-grid roster-setup"><label className="roster-name-field"><span>方案名称</span><input value={name} maxLength={120} disabled={readonly || busy} onChange={event=>{setName(event.target.value);setDirty(true);}} /></label>
+        <fieldset className="agent-choice-field roster-agent-field" disabled={readonly || busy}><legend>参与分配的智能体（至少两个）</legend>{agents.filter(agent=>agent.enabled && agent.hasToken || agentIds.includes(agent.id)).map(agent=><label key={agent.id}><input type="checkbox" checked={agentIds.includes(agent.id)} onChange={event=>{setAgentIds(event.target.checked?[...agentIds,agent.id]:agentIds.filter(id=>id!==agent.id));setDirty(true);}}/><span>{agent.internalName}</span></label>)}</fieldset></div>
       {!readonly && <>
         <p className="profile-hint">默认班内按成绩降序三等分，同分按参与姓名排序，人数不能整除时各层尽量接近。也可整班导入高/中/低层级。同班重名请先改为张三1、张三2。最多 5000 人。</p>
         <div className="roster-actions"><button type="button" className="admin-refresh" onClick={()=>download(new Blob(["\uFEFF"+template],{type:"text/csv;charset=utf-8"}),"名单导入模板.csv")}>下载 CSV 模板</button>
-          <label>导入 CSV / TSV<input type="file" accept=".csv,.tsv,.txt" disabled={busy} onChange={async event=>{const file=event.target.files?.[0];if(!file)return;if(file.size>3_000_000){setError("文件过大。");return;}try{setText(await file.text());setAdjusted(null);setDirty(true);setError("");}catch{setError("文件读取失败。");}}}/></label></div>
+          <label className="admin-refresh roster-import">导入 CSV / TSV<input type="file" accept=".csv,.tsv,.txt" disabled={busy} onChange={async event=>{const file=event.target.files?.[0];if(!file)return;if(file.size>3_000_000){setError("文件过大。");return;}try{setText(await file.text());setImportedFile(file.name);setAdjusted(null);setDirty(true);setError("");}catch{setError("文件读取失败。");}}}/></label>{importedFile && <span className="roster-file-name" title={importedFile}>{importedFile}</span>}</div>
         <label className="roster-source"><span>名单内容（也可粘贴表格，首行需为表头）</span><textarea value={text} placeholder={template} rows={7} disabled={busy} onChange={event=>{setText(event.target.value);setAdjusted(null);setDirty(true);}} /></label>
-        <label className="roster-manual"><input type="checkbox" checked={manual} disabled={busy} onChange={event=>{setManual(event.target.checked);setAdjusted(null);setDirty(true);}}/>按导入的“智能体”名称或 agentId 使用人工分配；留空则系统生成</label>
+        <label className="roster-manual"><input type="checkbox" checked={manual} disabled={busy} onChange={event=>{setManual(event.target.checked);setAdjusted(null);setDirty(true);}}/><span>使用导入名单中的人工分配；未勾选时由系统生成</span></label>
         <div className="roster-actions"><button type="button" className="admin-save" disabled={busy || !name.trim() || agentIds.length<2 || !text.trim()} onClick={save}>{busy?"处理中…":adjusted?"保存人工调整并更新预览":"保存草案并预览分配"}</button>
           {selected && <button type="button" className="admin-save" disabled={busy || dirty} onClick={()=>setConfirmation("lock")}>锁定方案并开放入口</button>}</div>
         {dirty && selected && <p className="profile-hint">存在未保存修改，请先保存并核对新的预览，再锁定。</p>}

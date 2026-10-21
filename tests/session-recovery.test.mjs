@@ -99,7 +99,7 @@ async function harness(db, sharedSources) {
     forceToken:value => forcedDraws.push(...[...value].map(char => 'abcdefghjkmnpqrstuvwxyz23456789'.indexOf(char))) };
 }
 
-test('roster rollout preserves old Coze/Dify experiments before migration and existing data after migration', { skip: !process.env.DATABASE_URL }, async () => {
+test('roster rollout preserves old experiments and enables allocation only for newly created experiments', { skip: !process.env.DATABASE_URL }, async () => {
   const schema = `edulab_roster_rollout_${crypto.randomBytes(8).toString('hex')}`;
   const databaseUrl = new URL(process.env.DATABASE_URL);
   databaseUrl.hostname = databaseUrl.hostname.replace('-pooler.', '.');
@@ -167,12 +167,34 @@ test('roster rollout preserves old Coze/Dify experiments before migration and ex
     const snapshot = async () => Promise.all(['participants', 'participant_identity_profiles', 'experiment_sessions', 'messages', 'chat_requests', 'experiment_runs']
       .map(async table => (await pool.query(`SELECT * FROM ${table} ORDER BY ${table === 'participant_identity_profiles' ? 'participant_id' : 'id'}`)).rows));
     const before = await snapshot();
+    const experiments = h.load('lib/experiments.ts');
+    const oldStudies = await experiments.listExperiments();
+    assert.ok(oldStudies.every(study => study.rosterEnabled === false));
     const migration = await readFile('db/migrations/0016_roster_allocation.sql', 'utf8');
     await db.transaction(client => client.query(migration));
     assert.deepEqual(await snapshot(), before);
-    const available = await api.GET(h.request({}, endpoint));
+    assert.equal((await api.GET(h.request({}, endpoint))).status, 503);
+    const visibilityMigration = await readFile('db/migrations/0017_experiment_roster_visibility.sql', 'utf8');
+    await db.transaction(client => client.query(visibilityMigration));
+    assert.deepEqual(await snapshot(), before);
+    assert.equal(await experiments.experimentRosterEnabled('recovery-test'), false);
+    const blocked = await api.GET(h.request({}, endpoint));
+    assert.equal(blocked.status, 403);
+    assert.equal(blocked.body.error.code, 'ROSTER_NOT_ENABLED');
+    const oldSave = await api.POST(h.request({ action: 'save' }, endpoint));
+    assert.equal(oldSave.status, 403);
+    const added = await h.load('app/api/admin/experiments/route.ts').POST(h.request({ name: 'New experiment', sourceId: 'recovery-test' },
+      'http://localhost/api/admin/experiments'));
+    assert.equal(added.status, 201);
+    assert.equal(added.body.created.rosterEnabled, true);
+    assert.equal(added.body.experiments.find(study => study.id === 'recovery-test').rosterEnabled, false);
+    const available = await api.GET(h.request({}, `${endpoint.replace('recovery-test', added.body.created.id)}`));
     assert.equal(available.status, 200);
     assert.deepEqual(available.body.rosters, []);
+    // Reapplying the additive migration must not switch old or new flags.
+    await db.transaction(client => client.query(visibilityMigration));
+    assert.equal(await experiments.experimentRosterEnabled('recovery-test'), false);
+    assert.equal(await experiments.experimentRosterEnabled(added.body.created.id), true);
     assert.equal(before[0].length, 2);
     assert.equal(before[3].length, 4);
   } finally {

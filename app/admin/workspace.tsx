@@ -6,6 +6,7 @@ import type { ExperimentSettings } from "@/lib/experiment-settings";
 import type { ParticipantProfile } from "@/lib/client-types";
 import { BrandLogo } from "../brand-logo";
 import { RosterPanel } from "./roster-panel";
+import type { ExperimentSummary } from "@/lib/experiments";
 
 type Section = "participants" | "content" | "limits" | "storage" | "ai";
 type Admin = { id: string; username: string; displayName: string };
@@ -53,7 +54,7 @@ export function AdminWorkspace() {
   const [participants, setParticipants] = useState<ParticipantDirectoryRow[]>([]);
   const [participantsLoading, setParticipantsLoading] = useState(false);
   const [participantsError, setParticipantsError] = useState("");
-  const [experiments, setExperiments] = useState<Array<{ id: string; name: string }>>([]);
+  const [experiments, setExperiments] = useState<ExperimentSummary[]>([]);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [runFilter, setRunFilter] = useState("");
   const [creatingExperiment, setCreatingExperiment] = useState(false);
@@ -200,7 +201,8 @@ export function AdminWorkspace() {
           {section === "content" && <ContentSettings settings={settings} update={updateExperiment} />}
           {section === "limits" && <LimitSettings settings={settings} updateExperiment={updateExperiment} updateLimits={updateLimits} />}
           {section === "storage" && <StorageSettings settings={settings} update={updateStorage} updateMemory={updateMemory} />}
-          {section === "ai" && <AgentRunSettings key={settings.experiment.id} experimentId={settings.experiment.id} onRunsChanged={setRuns} />}
+          {section === "ai" && <AgentRunSettings key={settings.experiment.id} experimentId={settings.experiment.id}
+            rosterEnabled={experiments.find(study => study.id === settings.experiment.id)?.rosterEnabled === true} onRunsChanged={setRuns} />}
         </div>
       </section>
     </main>
@@ -427,7 +429,7 @@ function StorageSettings({ settings, update, updateMemory }: { settings: Experim
   return <div className="settings-stack"><section className={`settings-card ${enabled ? "" : "storage-disabled"}`}><div className="settings-card-head"><div><h2>实验结束时备份完整对话到数据库</h2><p>开启后，学生消息在调用 AI 前保存，AI 回复完成后保存，支持跨设备恢复。</p></div><label className="switch" aria-label="实验结束时备份完整对话到数据库"><input type="checkbox" checked={enabled} onChange={(event) => update({ databaseMessagesEnabled: event.target.checked })} /><span /></label></div><div className="storage-mode"><strong>{enabled ? "数据库自动保存 + 浏览器副本 + 人工导出" : "仅使用浏览器本地记录与人工导出"}</strong><p>{enabled ? "每轮及时保存，生成中断后使用原请求继续恢复；结束时再次核对完整性。" : "数据库不保存学生和 AI 的消息正文。请确保参与者完成前下载并提交交互记录。"}</p></div></section><section className="settings-card"><div className="settings-card-head"><div><h2>跨会话历史记忆</h2><p>开始新一次交互时继承同一被试、同一项目及原分组的完整历史。各组使用一致规则，新交互生效。</p></div><label className="switch" aria-label="跨会话历史记忆"><input type="checkbox" checked={settings.memory?.enabled ?? true} onChange={event=>updateMemory({enabled:event.target.checked})}/><span/></label></div><div className="form-grid"><label><span>历史与首条问题的输入预算（估算 Token）</span><input type="number" min={512} max={100000} value={settings.memory?.maxInputTokens ?? 6000} onChange={event=>updateMemory({maxInputTokens:Math.max(512,Math.min(100000,Number(event.target.value)||6000))})}/><small>按实际模型窗口设置，并为智能体提示词和回复预留空间。超出预算时明确阻止发送，不自动删减历史。</small></label></div><p className="profile-hint">完整历史依赖数据库保存。关闭历史记忆会明确记录为“不继承”，原始历史仍保留。</p></section><div className="security-note"><strong>刷新不会清除当前会话记录</strong><p>每条已显示的消息都会同步到当前浏览器的本地存储，页面刷新后会自动恢复。但更换设备、清除浏览器数据或使用隐私模式仍可能丢失本地副本。</p></div><div className="security-note"><strong>进入实验仍需要数据库</strong><p>编号、身份和分组保存在数据库中。数据库中断时会明确提示保存失败，并保留本机未确认的输入，不会宣称消息已成功保存。</p></div></div>;
 }
 
-function AgentRunSettings({ experimentId, onRunsChanged }: { experimentId: string; onRunsChanged: (runs: RunSummary[]) => void }) {
+function AgentRunSettings({ experimentId, rosterEnabled, onRunsChanged }: { experimentId: string; rosterEnabled: boolean; onRunsChanged: (runs: RunSummary[]) => void }) {
   const endpoint = `/api/admin/agent-control?experimentId=${encodeURIComponent(experimentId)}`;
   const [control, setControl] = useState<AgentControl | null>(null);
   const [error, setError] = useState("");
@@ -564,7 +566,7 @@ function AgentRunSettings({ experimentId, onRunsChanged }: { experimentId: strin
         {run.status === "closed" && <><button type="button" className="admin-refresh" disabled={busy} onClick={() => void post({ action: "reopen_run", runId: run.id }, "已继续该组的报名，原链接和智能体配置保持有效。")}>继续报名</button><button type="button" className="admin-danger" disabled={busy} onClick={() => { setRunDeleteError(""); setPendingRunDelete(run); }}>删除链接</button></>}
       </div>)}</div>
     </section>
-    <RosterPanel key={experimentId} experimentId={experimentId} agents={control.agents} onChanged={() => { void fetch(endpoint, {cache:"no-store"}).then(response=>response.json()).then(data=>{if(data.control && mountedRef.current){setControl(data.control);onRunsChanged(data.control.runs);}}).catch(()=>setError("入口列表刷新失败，请重试。")); }} />
+    {rosterEnabled && <RosterPanel key={experimentId} experimentId={experimentId} agents={control.agents} onChanged={() => { void fetch(endpoint, {cache:"no-store"}).then(response=>response.json()).then(data=>{if(data.control && mountedRef.current){setControl(data.control);onRunsChanged(data.control.runs);}}).catch(()=>setError("入口列表刷新失败，请重试。")); }} />}
     <details className="settings-card agent-config-details">
       <summary>API 配置与连通测试<span>为不同智能体生成链接请使用上方“创建分组入口”</span></summary>
       <div className="settings-card-head"><div><h2>智能体 API 配置</h2><p>开放入口及已有学生报名的配置仅允许更新 API Key，其他配置保持锁定。无记录的配置需先停止报名再修改。更换智能体请新增配置与入口，API Key 加密保存且不会回显。Dify 无需 Bot ID，更新 Key 时请使用原 Dify 应用的新 Key。</p></div><button className="admin-refresh" onClick={() => setAdding(true)} disabled={busy || adding}>新增智能体</button></div>
