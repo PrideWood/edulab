@@ -1,5 +1,6 @@
 "use client";
 
+import { newClientRequestId } from "@/lib/client-request-id";
 import { timeoutSignal } from "@/lib/timeout-signal";
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
@@ -469,7 +470,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
     try {
       const result = await startLoginInteraction({
         storage:localStorage, key, sessionId:payload.session.id, retryOnly,
-        newRequestId:()=>crypto.randomUUID(),
+        newRequestId:()=>newClientRequestId(),
         prepare:async () => {
           if (payload.pending) await pollUntilSettled();
           const restored = await readResponse(await fetch(apiUrl("/api/sessions"),{cache:"no-store"}));
@@ -795,11 +796,11 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
     if (!content || pending || !canChat || uploadRef.current || participantSwitching) return;
     if (draftSaveRef.current) await draftSaveRef.current;
     updateComposer("");
-    await sendWithId(content, crypto.randomUUID());
+    await sendWithId(content, newClientRequestId());
   }
 
   async function retryMessage(content: string) {
-    let requestId = crypto.randomUUID();
+    let requestId = newClientRequestId();
     try {
       const saved = JSON.parse(localStorage.getItem(outboxKey(sessionIdRef.current ?? "")) ?? "null");
       if (saved?.content === content && saved.clientRequestId) requestId = saved.clientRequestId;
@@ -876,7 +877,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
       if (!session && !registrationRequestRef.current) {
         let requestId: string | null = null;
         try { requestId = localStorage.getItem(registrationKey); } catch { /* The in-memory retry ID still prevents double clicks. */ }
-        registrationRequestRef.current = requestId && /^[0-9a-f-]{36}$/i.test(requestId) ? requestId : crypto.randomUUID();
+        registrationRequestRef.current = requestId && /^[0-9a-f-]{36}$/i.test(requestId) ? requestId : newClientRequestId();
         try { localStorage.setItem(registrationKey,registrationRequestRef.current); } catch { setStorageError(true); }
       }
       const response = await fetch(apiUrl(session ? "/api/participant-profile" : "/api/sessions"), {
@@ -914,7 +915,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
     let action: InteractionStartAction | null = readInteractionStart(localStorage,key);
     if (!action) {
       if (!confirmed) { setNewInteractionOpen(true); return; }
-      action={action:"start_interaction",clientRequestId:crypto.randomUUID(),expectedSessionId:session.id};
+      action={action:"start_interaction",clientRequestId:newClientRequestId(),expectedSessionId:session.id};
       try { localStorage.setItem(key,JSON.stringify(action)); } catch { setStorageError(true); }
     }
     setNewInteractionOpen(false);
