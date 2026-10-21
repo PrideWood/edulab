@@ -27,6 +27,6 @@ export interface SessionPayload {
   messages: StoredMessage[];
   participantProfile: ParticipantProfile | null;
   pending: boolean;
-  failedRequest?: { content: string; message: string; retryable?: boolean } | null;
+  failedRequest?: { clientRequestId?: string; content: string; message: string; retryable?: boolean } | null;
   controls: SessionControls;
 }

@@ -145,7 +145,7 @@ export async function recoverDifyPendingRequest(session: AuthenticatedSession): 
     const heartbeat = Date.parse(String(request.metadata.dify_last_event_at ?? request.requestedAt));
     // Never finalize a still-live stream using a potentially partial history row.
     if (!completedReply(request) && request.metadata.dify_stream_completed !== true
-      && request.metadata.dify_stream_closed !== true && Date.now() - heartbeat < 65_000) { pending = true; continue; }
+      && request.metadata.dify_stream_closed !== true && Date.now() - heartbeat < 105_000) { pending = true; continue; }
     try {
       const result = await historyReply(session, request);
       if (result) {
@@ -170,6 +170,7 @@ export function createDifyChatResponse(session: AuthenticatedSession, request: R
   payload: (messages: StoredMessage[]) => Promise<SessionPayload>, providerContent = content) {
   const encoder = new TextEncoder();
   let disconnected = false;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
   let completion: Promise<void> = Promise.resolve();
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -178,6 +179,13 @@ export function createDifyChatResponse(session: AuthenticatedSession, request: R
         try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(value)}\n\n`)); }
         catch { disconnected = true; }
       }
+      // Proxy connections can otherwise time out while Dify is thinking.
+      // SSE comments keep the connection alive without becoming chat events.
+      heartbeat = setInterval(() => {
+        if (disconnected) return;
+        try { controller.enqueue(encoder.encode(": keep-alive\n\n")); }
+        catch { disconnected = true; }
+      }, 10_000);
       completion = (async () => {
         let secret = "";
         let providerFinished = false;
@@ -187,7 +195,7 @@ export function createDifyChatResponse(session: AuthenticatedSession, request: R
           emit({ event: "start", sessionId: session.publicId, clientRequestId: request.clientRequestId });
           let lastIds = "", lastCheckpoint = 0;
           const result = await runDifyChat({ ...config, user: difyUser(session), conversationId: session.difyConversationId ?? null,
-            content:providerContent, signal: AbortSignal.timeout(50_000), onProgress: async reply => {
+            content:providerContent, signal: AbortSignal.timeout(90_000), onProgress: async reply => {
               const ids = JSON.stringify([reply.conversationId, reply.messageId, reply.taskId]);
               if (ids !== lastIds || reply.completedAt || Date.now() - lastCheckpoint >= 1000) {
                 await checkpoint(session, request, reply);
@@ -213,11 +221,12 @@ export function createDifyChatResponse(session: AuthenticatedSession, request: R
           } catch { /* The durable request remains discoverable on refresh. */ }
           emit({ event: "error", code: error instanceof DifyChatError ? error.code : "DIFY_INTERRUPTED", message: safe });
         } finally {
+          clearInterval(heartbeat);
           if (!disconnected) { try { controller.close(); } catch { /* Browser disconnected. */ } }
         }
       })();
     },
-    cancel() { disconnected = true; },
+    cancel() { disconnected = true; clearInterval(heartbeat); },
   });
   // Keep the same bounded operation alive on serverless hosts when the student
   // refreshes or disconnects. IDs and final results still go to the database.

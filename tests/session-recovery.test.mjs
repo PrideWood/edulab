@@ -82,7 +82,7 @@ async function harness(db, sharedSources) {
     if (cache.has(file)) return cache.get(file);
     const exports = {};
     cache.set(file, exports);
-    vm.runInNewContext(sources.get(file), { exports, Buffer, URL, Request, Response, ReadableStream, TextEncoder, TextDecoder, Date, Error, console, AbortSignal, AbortController, setTimeout, clearTimeout, fetch:difyFetch,
+    vm.runInNewContext(sources.get(file), { exports, Buffer, URL, Request, Response, ReadableStream, TextEncoder, TextDecoder, Date, Error, console, AbortSignal, AbortController, setTimeout, clearTimeout, setInterval, clearInterval, fetch:difyFetch,
       process: { env: { EXPERIMENT_ID:'recovery-test', COZE_API_TOKEN:'synthetic-token', COZE_BOT_ID:'synthetic-bot',
         SETTINGS_ENCRYPTION_KEY:'synthetic-test-encryption-key-at-least-32', ADMIN_SESSION_SECRET:'synthetic-admin-secret-at-least-32-characters', NODE_ENV:'test' } },
       require: name => {

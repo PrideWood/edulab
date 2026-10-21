@@ -14,6 +14,7 @@ import { includeBrowserTranscriptBackups, safeExportSegment, type ParticipantTra
 import { uploadTranscript } from "@/lib/transcript-upload";
 import { FullscreenController, useFullscreenState } from "./fullscreen-controller";
 import { BrandLogo } from "./brand-logo";
+import { recoverChatResponse } from "@/lib/chat-recovery";
 import { readChatStream } from "@/lib/chat-stream";
 import { interactionStartKey, readInteractionStart, startLoginInteraction, type InteractionStartAction } from "@/lib/interaction-start";
 
@@ -180,6 +181,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
   const [downloadStatus, setDownloadStatus] = useState("");
   const uploadRef = useRef(false);
   const sendingRef = useRef(false);
+  const [retryIsRecovery, setRetryIsRecovery] = useState(false);
+  const pendingSendRef = useRef<{sessionId:string;content:string;clientRequestId:string} | null>(null);
   const [retryContent, setRetryContent] = useState<string | null>(null);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -225,6 +228,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
     if (previousSession && notice.includes("后台删除")) clearLocalParticipantData(previousSession.participantCode, previousSession.id, experimentId, !entryToken);
     sessionIdRef.current = null;
     activeSessionRef.current = null;
+    pendingSendRef.current = null;
     messageLedgerRef.current = [];
     automaticCompletionRef.current = null;
     setSession(null);
@@ -315,6 +319,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
     setStreamingReply("");
     setControls(payload.controls);
     if (payload.failedRequest) {
+      setRetryIsRecovery(false);
+      if (payload.failedRequest.clientRequestId === pendingSendRef.current?.clientRequestId) pendingSendRef.current = null;
       setError(payload.failedRequest.message);
       setRetryContent(payload.failedRequest.retryable === false ? null : payload.failedRequest.content);
       localStorage.removeItem(outboxKey(payload.session.id));
@@ -499,6 +505,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
     const activeSessionId = sessionIdRef.current;
     if (!activeSessionId) return;
     sendingRef.current = true;
+    pendingSendRef.current = { sessionId: activeSessionId, content, clientRequestId };
+    setRetryIsRecovery(false);
     try {
     restoreComposerFocusRef.current = true;
     setError(null);
@@ -529,7 +537,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
       const response = await fetch(apiUrl("/api/messages"), {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content, clientRequestId, turnIndex, userSequence }),
-        signal: timeoutSignal(65000),
+        signal: timeoutSignal(125000),
       });
       const payload = response.ok && response.headers.get("content-type")?.includes("text/event-stream")
         ? await readChatStream(response, { sessionId: activeSessionId, clientRequestId,
@@ -541,6 +549,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
       }
       applyPayload(payload);
       if (!payload.pending) {
+        pendingSendRef.current = null;
         localStorage.removeItem(outboxKey(payload.session.id));
       }
       if (payload.pending) await pollUntilSettled();
@@ -549,26 +558,44 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
         await releaseInvalidatedSession();
         return;
       }
-      setPending(false);
-      setRetryContent(content);
-      setError(sendError instanceof Error ? sendError.message : "发送失败，请重试。");
+      if (sendError instanceof ClientApiError && sendError.status < 500
+        && ![408, 409, 429].includes(sendError.status)) {
+        setPending(false); setError(sendError.message); return;
+      }
+      setPending(true);
+      setRetryContent(null);
+      setError("连接暂时中断，正在核对原回复，请勿重复发送。");
       try {
-        const recovered = await readResponse(await fetch(apiUrl("/api/sessions"), { cache: "no-store" }));
-        applyPayload(recovered);
-        if (recovered.pending) await pollUntilSettled();
-        const recoveredUser = messageLedgerRef.current.find(message => message.clientRequestId === clientRequestId);
-        if (recoveredUser && messageLedgerRef.current.some(message => message.role === "assistant" && message.turnIndex === recoveredUser.turnIndex)) {
-          setRetryContent(null);
-          setError(null);
+        const recovery = await recoverChatResponse({
+          sessionId: activeSessionId, clientRequestId,
+          isCurrent: () => sessionIdRef.current === activeSessionId,
+          read: async () => readResponse(await fetch(apiUrl("/api/sessions"), {
+            cache: "no-store", signal: timeoutSignal(35_000),
+          })),
+          onPayload: payload => { applyPayload(payload); setPending(true); setRetryContent(null); },
+        });
+        if (recovery.state === "cancelled") return;
+        if (recovery.state === "completed") {
+          pendingSendRef.current = null;
+          setPending(false); setRetryContent(null); setError(null);
+          try { localStorage.removeItem(outboxKey(activeSessionId)); } catch { /* In-memory recovery already confirmed the result. */ }
+        } else if (recovery.state === "failed" && recovery.payload) {
+          applyPayload(recovery.payload);
+        } else if (sendError instanceof ClientApiError && sendError.status === 409
+          && !["SESSION_BUSY", "REQUEST_FAILED"].includes(sendError.code)) {
+          setPending(false); setError(sendError.message);
+        } else {
+          setPending(true);
+          setRetryIsRecovery(true);
+          setRetryContent(content);
+          setError("原请求仍未确认，消息已在本机保留。请点击“恢复连接”继续核对，系统会沿用原请求，避免重复发送。");
         }
-        if (!recovered.messages.some(message => message.clientRequestId === clientRequestId)) {
-          draftRef.current.text = content;
-          setText(content);
-        }
-      } catch {
-        draftRef.current.text = content;
-        setText(content);
-        // Keep the outbox and input for a later retry; do not claim cloud persistence.
+      } catch (recoveryError) {
+        if (isInvalidSessionError(recoveryError)) { await releaseInvalidatedSession(); return; }
+        setPending(true);
+        setRetryIsRecovery(true);
+        setRetryContent(content);
+        setError(recoveryError instanceof Error ? recoveryError.message : "连接尚未恢复，请稍后点击恢复连接。");
       }
     }
     } finally { sendingRef.current = false; setStreamingReply(""); }
@@ -792,8 +819,10 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
   }
 
   async function retryMessage(content: string) {
-    let requestId = newClientRequestId();
-    try {
+    const pendingSend = pendingSendRef.current;
+    const remembered = pendingSend?.sessionId === sessionIdRef.current && pendingSend.content === content;
+    let requestId = remembered ? pendingSend.clientRequestId : newClientRequestId();
+    if (!remembered) try {
       const saved = JSON.parse(localStorage.getItem(outboxKey(sessionIdRef.current ?? "")) ?? "null");
       if (saved?.content === content && saved.clientRequestId) requestId = saved.clientRequestId;
     } catch { /* A confirmed failed request can be retried with a new identifier. */ }
@@ -1146,7 +1175,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
               ? <div className="message-row assistant"><div className="message-stack"><div className="bubble"><MessageBody message={{ role: "assistant", content: streamingReply }} /></div></div></div>
               : <div className="message-row assistant"><div className="bubble typing" aria-label="AI 正在回复"><span /><span /><span /></div></div>)}
             {storageError && <div className="error-card" role="alert">本机保存空间不可用，请先下载交互记录并联系实验人员，暂勿刷新或关闭页面。</div>}
-            {error && <div className="error-card" role="alert"><span>{error}</span>{loginStartPending ? <button onClick={() => void retryLoginInteraction()} disabled={conversationBusy}>重试开启新交互</button> : retryContent && <button onClick={() => retryMessage(retryContent)} disabled={pending}>重新发送</button>}</div>}
+            {error && <div className="error-card" role="alert"><span>{error}</span>{loginStartPending ? <button onClick={() => void retryLoginInteraction()} disabled={conversationBusy}>重试开启新交互</button> : retryContent && <button onClick={() => retryMessage(retryContent)} disabled={pending && !retryIsRecovery}>{retryIsRecovery ? "恢复连接" : "重新发送"}</button>}</div>}
             {conversationBusy && loginStartPending && <div className="loading-note" role="status">正在保存上次记录并开启新交互…</div>}
             {loading && <div className="loading-note">正在准备实验会话…</div>}
             {session?.status === "completed" && <div className="completed-card">这个对话已经结束。你可以在左侧查看其他对话。</div>}

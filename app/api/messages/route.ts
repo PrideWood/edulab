@@ -14,7 +14,7 @@ import { getSessionDraft } from "@/lib/session-draft";
 import { createDifyChatResponse } from "@/lib/dify-chat";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 const inputSchema = z.object({
   clientRequestId: z.uuid(),
@@ -91,7 +91,7 @@ export async function POST(request: Request) {
     }
 
     let result;
-    try { result = await waitForCozeChat(session, chat, 1000); }
+    try { result = await waitForCozeChat(session, chat, 0); }
     catch (error) {
       console.error("Coze polling was interrupted; the request remains recoverable", error);
       return NextResponse.json(await responsePayload(session, true, [], chat.conversation_id), { status: 202 });
