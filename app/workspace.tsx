@@ -1142,7 +1142,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
                 <button type="button" onClick={() => setChatFontSize(size => Math.min(24, size + 2))} disabled={chatFontSize === 24} aria-label="放大文字">A+</button>
               </div>
               {experiment.taskVisible && <button className="task-toggle-button" onClick={() => setTaskOpen((value) => !value)}>{taskOpen ? "关闭说明" : "任务说明"}</button>}
-              <div className="export-actions"><button onClick={() => void exportTranscript()} disabled={!session || loading || conversationBusy || downloading}>{downloading ? "正在整理…" : "下载全部交互记录"}</button>{controls?.databaseMessagesEnabled && <button onClick={() => void submitRecords()} disabled={!session || pending || uploading || messages.length === 0}>{uploading ? "提交中…" : "提交交互记录"}</button>}<span role="status">{downloadStatus || uploadStatus}</span></div>
+              <div className="export-actions"><button onClick={() => void exportTranscript()} disabled={!session || loading || conversationBusy || downloading}>{downloading ? "正在整理…" : "下载全部交互记录"}</button>{controls?.databaseMessagesEnabled && <button onClick={() => void submitRecords()} disabled={!session || pending || uploading || messages.length === 0}>{uploading ? "提交中…" : "提交交互记录"}</button>}</div>
+              <span className="session-action-status" role="status">{downloadStatus || uploadStatus}</span>
             </div>
           </header>
           <div className="messages" ref={messagesViewRef} aria-live="polite">
