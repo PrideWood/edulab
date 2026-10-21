@@ -84,7 +84,7 @@ test("conversation export and optional database message storage are implemented"
   assert.match(migration, /user_message_id DROP NOT NULL/);
   assert.match(workspace, /participantCode/);
   assert.match(workspace, /function exportTranscript/);
-  assert.match(workspace, /下载交互记录/);
+  assert.match(workspace, /下载全部交互记录/);
   assert.match(workspace, /replyStartedAt/);
   assert.match(workspace, /localStorage\.setItem\(transcriptKey/);
   assert.match(workspace, /turnIndex: message\.turnIndex/);
@@ -302,7 +302,7 @@ test("admin can batch export selected interactions separately from identity data
   assert.match(exportSource, /turn_index/);
   assert.match(sharedFormat, /participantMessageCount/);
   assert.match(sharedFormat, /assistantMessageCount/);
-  assert.match(studentWorkspace, /buildTranscriptExport/);
+  assert.match(studentWorkspace, /includeBrowserTranscriptBackups/);
   assert.match(exportSource, /buildTranscriptExport/);
   assert.match(adminWorkspace, /全选当前列表中的参与者/);
   assert.match(adminWorkspace, /导出交互记录 \(\.zip\)/);

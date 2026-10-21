@@ -32,7 +32,7 @@ const request = (path,cookie) => new NextRequest(`https://school.example${path}`
 });
 const matches = (config,url) => nextTesting.unstable_doesMiddlewareMatch({config,nextConfig:{},url});
 const studentPaths = ['/api/sessions','/api/sessions/resume','/api/sessions/draft','/api/sessions/checkpoint',
-  '/api/sessions/complete','/api/sessions/reset','/api/messages','/api/conversations','/api/participant-profile'];
+  '/api/sessions/complete','/api/sessions/reset','/api/messages','/api/conversations','/api/conversations/export','/api/participant-profile'];
 
 test('bare domain renders only teacher-link guidance and never loads the experiment or database', () => {
   const logo = evaluate(logoSource,{'react/jsx-runtime':jsxRuntime,'next/image':{default:props => jsxRuntime.jsx('img',{src:props.src,alt:props.alt,width:props.width,height:props.height,className:props.className}),__esModule:true}});

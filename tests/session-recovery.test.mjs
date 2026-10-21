@@ -18,7 +18,7 @@ async function harness(db, sharedSources) {
     'lib/experiment-settings.ts', 'lib/experiment-limits.ts', 'lib/messages.ts', 'lib/coze.ts',
     'lib/dify.ts', 'lib/dify-chat.ts', 'lib/sse.ts', 'lib/transcript.ts', 'lib/session-payload.ts', 'lib/runtime-session.ts', 'lib/session-draft.ts',
     'lib/participant-recovery.ts', 'lib/interaction-start.ts', 'lib/experiment-entry.ts', 'lib/entry-links.ts', 'lib/entry-token.ts', 'lib/experiments.ts',
-    'lib/admin-export.ts', 'lib/transcript-export.ts', 'lib/admin-records.ts', 'app/api/admin/agent-control/route.ts', 'app/api/admin/experiments/route.ts', 'app/api/admin/participants/route.ts',
+    'lib/admin-export.ts', 'lib/transcript-export.ts', 'lib/participant-export.ts', 'app/api/conversations/export/route.ts', 'lib/admin-records.ts', 'app/api/admin/agent-control/route.ts', 'app/api/admin/experiments/route.ts', 'app/api/admin/participants/route.ts',
     'app/api/participant-profile/route.ts', 'app/api/sessions/reset/route.ts', 'lib/legacy-runtime.ts', 'app/api/sessions/route.ts',
     'app/api/sessions/resume/route.ts', 'app/api/sessions/draft/route.ts',
     'app/api/sessions/complete/route.ts', 'app/api/sessions/checkpoint/route.ts', 'app/api/messages/route.ts', 'app/api/conversations/route.ts'];
@@ -222,7 +222,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
     const migrations = (await readdir('db/migrations')).filter(file => file.endsWith('.sql')).sort();
     for (const file of migrations) await pool.query(await readFile(`db/migrations/${file}`, 'utf8'));
     let failMessageWrite = false, failLinkDeleteAudit = false, failKeyRotateAudit = false, failKeyWrite = false;
-    let failIdentityAudit = false, failInteractionMemoryWrite = false, failRosterAudit = false;
+    let failIdentityAudit = false, failInteractionMemoryWrite = false, failRosterAudit = false, failParticipantExportRead = false;
     const query = async (sql, values) => {
       if (failMessageWrite && /INSERT INTO messages/.test(sql)) throw new Error('synthetic database write failure');
       return pool.query(sql, values);
@@ -230,6 +230,7 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
     const db = { query, transaction:async work => {
       const client = await pool.connect();
       const facade = { query:async (sql, values) => {
+        if (failParticipantExportRead && /FROM messages WHERE session_id=ANY/.test(sql)) throw new Error('synthetic export read failure');
         if (failMessageWrite && /INSERT INTO messages/.test(sql)) throw new Error('synthetic database write failure');
         if (failLinkDeleteAudit && /INSERT INTO admin_audit_log/.test(sql) && sql.includes('experiment.run.link.delete')) throw new Error('synthetic audit write failure');
         if (failKeyRotateAudit && /INSERT INTO admin_audit_log/.test(sql) && sql.includes('ai.agent.key.rotate')) throw new Error('synthetic key audit failure');
@@ -1678,6 +1679,82 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
           await pool.query('INSERT INTO participant_agent_assignments (id,experiment_run_id,participant_id,agent_id,assignment_mode,assigned_at,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7)',
             [allocation.id,allocation.experiment_run_id,allocation.participant_id,allocation.agent_id,allocation.assignment_mode,allocation.assigned_at,allocation.metadata]);
         }
+      });
+      const studentExport=autoBrowser.load('app/api/conversations/export/route.ts');
+      const download=extra=>studentExport.GET(req(autoBrowser,{},'/api/conversations/export'+(extra??''),links[1]));
+      await t.test(provider + ': student download includes every original session from the database even when the current session is empty',async()=>{
+        const before=(await pool.query('SELECT * FROM experiment_sessions WHERE participant_id=$1 ORDER BY id',[autoParticipant])).rows;
+        const response=await download();assert.equal(response.status,200);
+        const archive=response.body;
+        assert.equal(archive.type,'participant-interaction-archive');assert.equal(archive.source,'database');
+        assert.equal(archive.experimentId,projectId);assert.equal(archive.experimentRunId,links[1].id);
+        assert.equal(archive.participant.code,autoFirst.session.participantCode);
+        assert.equal(archive.integrity.sessionCount,4);assert.equal(archive.integrity.messageCount,4);
+        assert.equal(archive.integrity.possiblyIncompleteSessionCount,0);
+        assert.equal(archive.conversations.length,4);
+        assert.equal(archive.conversations[0].session.id,autoFirst.session.id);
+        assert.equal(archive.conversations[0].messages[0].content,'第一节课原始问题');
+        assert.equal(archive.conversations[1].messages[0].content,'第二节课问题');
+        assert.equal(archive.conversations.at(-1).messages.length,0);
+        assert.ok(archive.conversations.every(record=>record.session.agentId===agents[1].id&&record.session.experimentRunId===links[1].id));
+        assert.ok(archive.conversations.every((record,index,all)=>!index||record.session.startedAt>=all[index-1].session.startedAt));
+        for(const record of archive.conversations.filter(record=>record.messages.length)) {
+          assert.deepEqual(record.messages.map(message=>message.role),['user','assistant']);
+          assert.deepEqual(record.messages.map(message=>message.order),[1,2]);
+          assert.deepEqual(record.messages.map(message=>message.sequenceNo),[1,2]);
+          assert.ok(record.messages.every(message=>message.sentAt));assert.ok(record.messages[0].clientRequestId);
+          if(provider==='dify') {assert.ok(record.session.difyConversationId);assert.ok(record.messages[1].providerMessageId);}
+          else assert.ok(record.session.cozeConversationId);
+        }
+        const serialized=JSON.stringify(archive);
+        for(const value of ['自动登录学生','其他组的秘密背景','synthetic','session_secret_hash','fullName','coze_token_ciphertext','EduLab 历史背景 v1：']) assert.equal(serialized.includes(value),false,value);
+        assert.deepEqual((await pool.query('SELECT * FROM experiment_sessions WHERE participant_id=$1 ORDER BY id',[autoParticipant])).rows,before);
+      });
+      await t.test(provider + ': downloading from old history still includes all later sessions and cannot select another identity or project',async()=>{
+        const current=(await autoPayload()).session.id;
+        const switched=await autoBrowser.load('app/api/conversations/route.ts').POST(req(autoBrowser,{action:'switch',sessionId:autoFirst.session.id},'/api/conversations',links[1]));
+        assert.equal(switched.status,200);
+        const request=autoBrowser.request({},`http://localhost/api/conversations/export?entry=${links[1].entryToken}&participantId=${participant}&experimentId=${study.id}&sessionId=${first.body.session.id}`);
+        const result=await studentExport.GET(request);
+        assert.equal(result.status,200);assert.equal(result.body.currentSessionId,autoFirst.session.id);
+        assert.equal(result.body.integrity.sessionCount,4);assert.equal(result.body.participant.code,autoFirst.session.participantCode);
+        assert.equal(result.body.conversations[0].completedAt!==null,true);
+        assert.equal((await studentExport.GET(autoBrowser.request({},'http://localhost/api/conversations/export'))).status,400);
+        assert.equal((await studentExport.GET(req(autoBrowser,{},'/api/conversations/export',links[0]))).status,401);
+        assert.equal((await autoBrowser.load('app/api/conversations/route.ts').POST(req(autoBrowser,{action:'switch',sessionId:current},'/api/conversations',links[1]))).status,200);
+      });
+      await t.test(provider + ': incomplete, unconfirmed and browser-only history is flagged instead of invented or silently omitted',async()=>{
+        const firstId=(await pool.query('SELECT id FROM experiment_sessions WHERE public_id=$1',[autoFirst.session.id])).rows[0].id;
+        const missing=(await pool.query("DELETE FROM messages WHERE session_id=$1 AND role='assistant' RETURNING *",[firstId])).rows[0];
+        try {
+          const archive=(await download()).body;
+          assert.equal(archive.integrity.messageCount,3);assert.equal(archive.integrity.possiblyIncompleteSessionCount,1);
+          assert.equal(archive.conversations[0].integrity.possiblyIncomplete,true);
+          assert.equal(archive.conversations[0].messages.length,1);
+        } finally {await pool.query('INSERT INTO messages SELECT * FROM json_populate_record(NULL::messages,$1::json)',[JSON.stringify(missing)]);}
+        await pool.query("UPDATE chat_requests SET status='uncertain' WHERE session_id=$1",[firstId]);
+        try {assert.equal((await download()).body.conversations[0].integrity.pending,true);}
+        finally {await pool.query("UPDATE chat_requests SET status='completed' WHERE session_id=$1",[firstId]);}
+        await pool.query("UPDATE experiment_sessions SET config_snapshot=jsonb_set(config_snapshot,'{storage,databaseMessagesEnabled}','false') WHERE id=$1",[firstId]);
+        try {assert.equal((await download()).body.conversations[0].integrity.possiblyIncomplete,true);}
+        finally {await pool.query("UPDATE experiment_sessions SET config_snapshot=jsonb_set(config_snapshot,'{storage,databaseMessagesEnabled}','true') WHERE id=$1",[firstId]);}
+      });
+      await t.test(provider + ': a failed database export returns an error without a partial success payload',async()=>{
+        failParticipantExportRead=true;
+        try {const response=await download();assert.equal(response.status,500);assert.ok(response.body.error);assert.equal(response.body.conversations,undefined);}
+        finally {failParticipantExportRead=false;}
+        assert.equal((await download()).body.integrity.messageCount,4);
+      });
+      await t.test(provider + ': expired credentials cannot export records, including when replaced between authentication and the export transaction',async()=>{
+        const authenticated=await autoBrowser.load('lib/session.ts').getAuthenticatedSession(await entries.getExperimentEntry(links[1].entryToken));
+        const cookieName=entries.sessionCookieName(await entries.getExperimentEntry(links[1].entryToken));
+        const originalCookie=autoBrowser.jar.get(cookieName);
+        autoBrowser.jar.delete(cookieName);assert.equal((await download()).status,401);autoBrowser.jar.set(cookieName,originalCookie);
+        const fresh=await harness(db,h.sources);
+        const restored=await fresh.load('app/api/sessions/resume/route.ts').POST(req(fresh,{participantCode:autoFirst.session.participantCode,identity:'自动登录学生'},'/api/sessions/resume',links[1]));
+        assert.equal(restored.status,200);
+        assert.equal((await download()).status,401);
+        await assert.rejects(()=>autoBrowser.load('lib/participant-export.ts').buildParticipantTranscriptArchive(authenticated),error=>error.code==='SESSION_REPLACED');
       });
       if (provider==='dify') await t.test('Dify project copies retain provider and memory settings without copying student identities',async()=>{
         asAdmin();

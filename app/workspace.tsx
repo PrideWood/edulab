@@ -6,7 +6,7 @@ import remarkGfm from "remark-gfm";
 import type { StoredMessage } from "@/db/schema";
 import type { ExperimentConfig } from "@/config/experiment";
 import type { ParticipantProfile, SessionPayload } from "@/lib/client-types";
-import { buildTranscriptExport, safeExportSegment } from "@/lib/transcript-export";
+import { includeBrowserTranscriptBackups, safeExportSegment, type ParticipantTranscriptArchive } from "@/lib/transcript-export";
 import { uploadTranscript } from "@/lib/transcript-upload";
 import { FullscreenController, useFullscreenState } from "./fullscreen-controller";
 import { BrandLogo } from "./brand-logo";
@@ -181,6 +181,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
   const [storageError, setStorageError] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState("");
+  const [downloading, setDownloading] = useState(false);
+  const [downloadStatus, setDownloadStatus] = useState("");
   const uploadRef = useRef(false);
   const sendingRef = useRef(false);
   const [retryContent, setRetryContent] = useState<string | null>(null);
@@ -249,6 +251,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
     setRetryContent(null);
     setError(null);
     setTaskOpen(false);
+    setDownloadStatus("");
     setProfileError(notice);
     setProfileOpen(true);
     setLoading(false);
@@ -950,7 +953,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
   async function submitRecords() {
     if (!session || pending || conversationBusy || participantSwitching || uploadRef.current) return;
     uploadRef.current = true;
-    setUploading(true); setUploadStatus("正在提交…");
+    setUploading(true); setUploadStatus("正在提交…"); setDownloadStatus("");
     try {
       await uploadAllRecords();
       setUploadStatus("交互记录已提交");
@@ -965,21 +968,33 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
     for (const id of ids) await uploadTranscript(id, id === session.id ? messageLedgerRef.current : readLocalTranscript(id), entryToken);
   }
 
-  function exportTranscript() {
-    if (!session) return;
-    const transcript = messageLedgerRef.current;
-    const exportedAt = new Date().toISOString();
-    const record = buildTranscriptExport({
-      exportedAt,
-      session,
-      experiment,
-      databaseMessagesEnabled: controls?.databaseMessagesEnabled ?? true,
-      browserBackupIncluded: true,
-      messages: transcript,
-    });
-    const safeParticipant = safeExportSegment(session.participantCode, "participant");
-    const stamp = exportedAt.replaceAll(":", "-").replace(".", "-");
-    downloadFile(`EduLab_${safeParticipant}_${stamp}.json`, JSON.stringify(record, null, 2), "application/json;charset=utf-8");
+  async function exportTranscript() {
+    if (!session || downloading) return;
+    const source = session;
+    setDownloading(true); setDownloadStatus("");
+    try {
+      const response = await fetch(apiUrl("/api/conversations/export"),{cache:"no-store",signal:AbortSignal.timeout(60000)});
+      const data = await response.json().catch(()=>null);
+      if (!response.ok || !data) throw new ClientApiError(response.ok ? 502 : response.status,data?.error?.code ?? "EXPORT_FAILED",data?.error?.message ?? "全部记录读取失败。");
+      const archive = data as ParticipantTranscriptArchive;
+      if (archive.participant.code !== source.participantCode || archive.experimentId !== experimentId
+        || archive.experimentRunId !== source.experimentRunId || activeSessionRef.current?.participantCode !== source.participantCode) {
+        throw new ClientApiError(409,"SESSION_CHANGED","参与者或分组已改变，请在当前窗口重新下载。");
+      }
+      const record = includeBrowserTranscriptBackups(archive,experiment,id=>id===sessionIdRef.current ? messageLedgerRef.current : readLocalTranscript(id));
+      const stamp = record.exportedAt.replaceAll(":","-").replace(".","-");
+      downloadFile(`EduLab_${safeExportSegment(source.participantCode,"participant")}_全部交互_${stamp}.json`,JSON.stringify(record,null,2),"application/json;charset=utf-8");
+      setDownloadStatus(`已下载 ${record.integrity.sessionCount} 个会话、${record.integrity.messageCount} 条消息。${record.integrity.possiblyIncompleteSessionCount ? "部分会话仍有未确认结果或仅保存在本机，文件中已标注。" : ""}`);
+    } catch (downloadError) {
+      if (isInvalidSessionError(downloadError)) { await releaseInvalidatedSession(); return; }
+      if (activeSessionRef.current?.participantCode !== source.participantCode) return;
+      if (downloadError instanceof ClientApiError && downloadError.status < 500) {
+        setDownloadStatus(downloadError.message);
+      } else {
+        exportParticipantArchive();
+        setDownloadStatus("未能读取数据库，已下载本机备份，可能缺少其他设备的历史会话。联网后请重新下载全部记录。");
+      }
+    } finally { setDownloading(false); }
   }
 
   function exportParticipantArchive() {
@@ -995,6 +1010,8 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
     const record = {
       schemaVersion: 1,
       type: "participant-browser-archive",
+      source: "browser",
+      allConversationsVerified: false,
       exportedAt,
       participant: { code: session.participantCode },
       experiment: { id: experiment.id, label: experiment.label, title: experiment.title },
@@ -1026,7 +1043,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
     };
     const safeParticipant = session.participantCode.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 50) || "participant";
     const stamp = exportedAt.replaceAll(":", "-").replace(".", "-");
-    downloadFile(`EduLab_${safeParticipant}_全部对话_${stamp}.json`, JSON.stringify(record, null, 2), "application/json;charset=utf-8");
+    downloadFile(`EduLab_${safeParticipant}_本机备份_${stamp}.json`, JSON.stringify(record, null, 2), "application/json;charset=utf-8");
   }
 
   async function startNextParticipant() {
@@ -1053,6 +1070,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
       localStorage.removeItem(outboxKey(session.id));
       localStorage.removeItem(interactionStartKey(entryToken ?? experimentId,session.participantCode));
       setLoginStartPending(false);
+      setDownloadStatus("");
       draftRef.current = { sessionId: "", text: "", savedText: "", revision: 0, conflict: false };
       setEntryMode("new");
       setDraftStatus("");
@@ -1115,7 +1133,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
             <div className="assistant-title"><div className="assistant-avatar" aria-hidden="true">AI</div><div><p className="assistant-name">{experiment.assistantName}</p><p className="assistant-status">{!participantProfile && session ? "请先填写参与者信息" : session?.status === "completed" || timeExpired || messageLimitReached ? "本次对话已结束" : pending ? "正在思考…" : limitText || "在线"}</p></div></div>
             <div className="session-actions">
               {experiment.taskVisible && <button className="task-toggle-button" onClick={() => setTaskOpen((value) => !value)}>{taskOpen ? "关闭说明" : "任务说明"}</button>}
-              <div className="export-actions"><button onClick={exportTranscript} disabled={!session || messages.length === 0}>下载交互记录</button>{controls?.databaseMessagesEnabled && <button onClick={() => void submitRecords()} disabled={!session || pending || uploading || messages.length === 0}>{uploading ? "提交中…" : "提交交互记录"}</button>}<span role="status">{uploadStatus}</span></div>
+              <div className="export-actions"><button onClick={() => void exportTranscript()} disabled={!session || loading || conversationBusy || downloading}>{downloading ? "正在整理…" : "下载全部交互记录"}</button>{controls?.databaseMessagesEnabled && <button onClick={() => void submitRecords()} disabled={!session || pending || uploading || messages.length === 0}>{uploading ? "提交中…" : "提交交互记录"}</button>}<span role="status">{downloadStatus || uploadStatus}</span></div>
             </div>
           </header>
           <div className="messages" ref={messagesViewRef} aria-live="polite">
