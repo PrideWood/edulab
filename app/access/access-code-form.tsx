@@ -1,34 +1,34 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
+import { verifyAccessCode } from "@/lib/access-verification";
 import { requestExperimentFullscreen } from "../fullscreen-controller";
 import { BrandLogo } from "../brand-logo";
 
 export function AccessCodeForm({ configured, nextPath }: { configured: boolean; nextPath: string }) {
   const [accessCode, setAccessCode] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [attempt, setAttempt] = useState(1);
+  const inFlight = useRef(false);
   const [error, setError] = useState(configured ? "" : "网站尚未配置访问码，请联系管理员。");
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!accessCode || submitting || !configured) return;
+    if (!accessCode || inFlight.current || !configured) return;
+    inFlight.current = true;
     setSubmitting(true);
+    setAttempt(1);
     setError("");
     try {
       // Fullscreen must be requested while the submit click still counts as a user gesture.
       // The experiment workspace will offer a fallback if navigation exits fullscreen.
-      await requestExperimentFullscreen();
-      const response = await fetch("/api/access/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accessCode }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data?.error?.message ?? "验证失败，请稍后重试。");
+      void requestExperimentFullscreen();
+      await verifyAccessCode(accessCode,setAttempt);
       window.location.replace(nextPath);
     } catch (verificationError) {
       setError(verificationError instanceof Error ? verificationError.message : "验证失败，请稍后重试。");
       setSubmitting(false);
+      inFlight.current = false;
     }
   }
 
@@ -54,7 +54,7 @@ export function AccessCodeForm({ configured, nextPath }: { configured: boolean; 
           />
           {error && <p className="access-error" role="alert">{error}</p>}
           <button type="submit" disabled={!configured || !accessCode || submitting}>
-            {submitting ? "正在验证…" : "进入实验"}
+            {submitting ? attempt > 1 ? `正在重试验证（${attempt}/3）…` : "正在验证…" : "进入实验"}
           </button>
         </form>
       </section>
