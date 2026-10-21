@@ -1,5 +1,7 @@
 "use client";
 
+import { timeoutSignal } from "@/lib/timeout-signal";
+
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -345,7 +347,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
         const response = await fetch(apiUrl("/api/sessions/draft"), {
           method: "PUT", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sessionId: snapshot.sessionId, text: snapshot.text, revision: snapshot.revision }),
-          signal: AbortSignal.timeout(15000),
+          signal: timeoutSignal(15000),
         });
         const data = await response.json();
         if (!response.ok) throw new ClientApiError(response.status, data?.error?.code ?? "DRAFT_FAILED", data?.error?.message ?? "草稿保存失败");
@@ -429,7 +431,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
       if (sessionIdRef.current !== expectedSessionId) return;
       let payload: SessionPayload;
       try {
-        const response = await fetch(apiUrl("/api/sessions"), { cache: "no-store", signal: AbortSignal.timeout(35000) });
+        const response = await fetch(apiUrl("/api/sessions"), { cache: "no-store", signal: timeoutSignal(35000) });
         payload = await readResponse(response);
       } catch (pollError) {
         if (pollError instanceof ClientApiError && pollError.status < 500 && pollError.status !== 429) throw pollError;
@@ -533,7 +535,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
       const response = await fetch(apiUrl("/api/messages"), {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content, clientRequestId, turnIndex, userSequence }),
-        signal: AbortSignal.timeout(65000),
+        signal: timeoutSignal(65000),
       });
       const payload = response.ok && response.headers.get("content-type")?.includes("text/event-stream")
         ? await readChatStream(response, { sessionId: activeSessionId, clientRequestId,
@@ -771,7 +773,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
           body: controls?.databaseMessagesEnabled
             ? JSON.stringify({ messages: [], storedMessageCount: messageLedgerRef.current.length })
             : transcriptUploadBody(messageLedgerRef.current),
-          signal: AbortSignal.timeout(90000),
+          signal: timeoutSignal(90000),
         }));
         applyPayload(payload);
         await refreshConversations().catch(() => undefined);
@@ -973,7 +975,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
     const source = session;
     setDownloading(true); setDownloadStatus("");
     try {
-      const response = await fetch(apiUrl("/api/conversations/export"),{cache:"no-store",signal:AbortSignal.timeout(60000)});
+      const response = await fetch(apiUrl("/api/conversations/export"),{cache:"no-store",signal:timeoutSignal(60000)});
       const data = await response.json().catch(()=>null);
       if (!response.ok || !data) throw new ClientApiError(response.ok ? 502 : response.status,data?.error?.code ?? "EXPORT_FAILED",data?.error?.message ?? "全部记录读取失败。");
       const archive = data as ParticipantTranscriptArchive;

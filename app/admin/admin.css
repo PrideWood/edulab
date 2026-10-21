@@ -1,4 +1,4 @@
-.admin-shell { height: 100dvh; min-height: 0; display: grid; grid-template-columns: 272px minmax(0, 1fr); overflow: hidden; color: #1b2520; background: #f5f7f5; }
+.admin-shell { height: 100vh; height: 100dvh; min-height: 0; display: grid; grid-template-columns: 272px minmax(0, 1fr); overflow: hidden; color: #1b2520; background: #f5f7f5; }
 .admin-sidebar { min-height: 0; padding: 28px 20px 22px; display: flex; flex-direction: column; overflow-y: auto; color: #eaf1ed; background: #17241e; }
 .admin-brand { padding: 0 8px 26px; display: flex; align-items: center; gap: 11px; font-weight: 730; letter-spacing: -.02em; }
 .admin-brand-mark { width: 34px; height: 34px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 10px; background: transparent; }
@@ -125,7 +125,7 @@
 .agent-table tbody tr:hover td { background: #fafcfb; }
 .agent-table tbody tr.agent-row-locked td { background: #f2f5f3; }
 .participant-row-actions { display:flex; gap:6px; flex-wrap:wrap; min-width:120px; }
-.participant-record-dialog { width:min(800px,calc(100vw - 32px)); max-width:800px; max-height:88dvh; overflow:auto; }
+.participant-record-dialog { width:min(800px,calc(100vw - 32px)); max-width:800px; max-height: 88vh; max-height: 88dvh; overflow:auto; }
 .participant-record-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
 .participant-record-head h2 { margin-top:0; }
 .identity-change-list { margin-top:20px; }
@@ -172,7 +172,7 @@
 .danger-dialog-actions { display: flex; justify-content: flex-end; gap: 9px; }
 .admin-loading { min-height: 100vh; display: grid; place-content: center; justify-items: center; gap: 11px; color: #748078; background: #f5f7f5; }
 .admin-loading p { margin: 0; font-size: 13px; }
-.admin-login-page { height: 100dvh; min-height: 0; display: grid; place-items: center; padding: 28px; overflow-y: auto; background: radial-gradient(circle at 20% 0%, #dcece2, transparent 30rem), #f3f6f3; }
+.admin-login-page { height: 100vh; height: 100dvh; min-height: 0; display: grid; place-items: center; padding: 28px; overflow-y: auto; background: radial-gradient(circle at 20% 0%, #dcece2, transparent 30rem), #f3f6f3; }
 .admin-login-card { width: min(450px, 100%); padding: 34px; border: 1px solid #d8e2dc; border-radius: 22px; background: rgba(255,255,255,.94); box-shadow: 0 22px 70px rgba(36,60,47,.12); }
 .admin-login-brand { display: flex; align-items: center; gap: 11px; }
 .admin-login-brand > div { display: grid; gap: 2px; }
@@ -215,7 +215,7 @@
 @media (max-width: 850px) {
   html:has(.admin-shell), html:has(.admin-login-page), html:has(.admin-loading) { height: auto; overflow: auto; }
   body:has(.admin-shell), body:has(.admin-login-page), body:has(.admin-loading) { height: auto; overflow: visible; background: #f5f7f5; }
-  .admin-shell { display: block; width: 100%; max-width: 100%; height: auto; min-height: 100dvh; overflow: visible; }
+  .admin-shell { display: block; width: 100%; max-width: 100%; height: auto; min-height: 100vh; min-height: 100dvh; overflow: visible; }
   .admin-main { width: 100%; overflow: visible; scrollbar-gutter: auto; }
   .admin-sidebar, .admin-nav, .admin-header, .admin-content, .settings-stack,
   .agent-table-wrap, .agent-table tbody, .settings-card-head > div, .form-grid label,
@@ -224,7 +224,7 @@
   .admin-shell strong, .admin-shell p { overflow-wrap: anywhere; }
   .agent-row-actions { min-width: 0; }
   .agent-row-actions button { min-width: 0; white-space: normal; }
-  .admin-login-page { height: auto; min-height: 100dvh; overflow: visible; }
+  .admin-login-page { height: auto; min-height: 100vh; min-height: 100dvh; overflow: visible; }
   .admin-sidebar { padding: 12px; overflow: visible; }
   .admin-brand { padding: 0 4px 10px; }
   .admin-nav { display: flex; overflow-x: auto; gap: 6px; padding-bottom: 4px; }

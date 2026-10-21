@@ -97,7 +97,7 @@ test('student chat returns provider IDs immediately and recovers without creatin
 test('uploads preserve both sides of each turn, split by UTF-8 bytes, and require ACK with bounded retries', async () => {
   let calls=0;
   const bodies=[];
-  const uploads=await load('lib/transcript-upload.ts',{}, {
+  const uploads=await load('lib/transcript-upload.ts',{'@/lib/timeout-signal':await load('lib/timeout-signal.ts')}, {
     fetch:async(_url,options)=>{
       calls++;bodies.push(JSON.parse(options.body));
       assert.equal(options.keepalive,undefined);
@@ -120,7 +120,7 @@ test('uploads preserve both sides of each turn, split by UTF-8 bytes, and requir
   assert.deepEqual(bodies[0],bodies[1]);
   assert.throws(()=>uploads.transcriptChunks(records,20));
   let rejectedCalls=0;
-  const rejected=await load('lib/transcript-upload.ts',{}, {fetch:async()=>{
+  const rejected=await load('lib/transcript-upload.ts',{'@/lib/timeout-signal':await load('lib/timeout-signal.ts')}, {fetch:async()=>{
     rejectedCalls++;return {ok:false,status:403,json:async()=>({error:{message:'Forbidden'}})};
   }});
   await assert.rejects(()=>rejected.uploadTranscript('test-session',records),/Forbidden/);

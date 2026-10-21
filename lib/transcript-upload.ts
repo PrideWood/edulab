@@ -1,3 +1,4 @@
+import { timeoutSignal } from "@/lib/timeout-signal";
 import type { StoredMessage } from "@/db/schema";
 
 // Keep an entire turn in each chunk; every assistant needs its user request.
@@ -31,7 +32,7 @@ export async function uploadTranscript(sessionId: string, messages: StoredMessag
         const response = await fetch(entryToken ? `/api/sessions/checkpoint?entry=${encodeURIComponent(entryToken)}` : "/api/sessions/checkpoint", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sessionId, messages: chunk }),
-          signal: AbortSignal.timeout(90000),
+          signal: timeoutSignal(90000),
         });
         const data = await response.json().catch(() => null);
         if (!response.ok || !data?.saved) {
