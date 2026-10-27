@@ -271,6 +271,26 @@
 .entry-copy-button.entry-copy-success { color: #286046; border-color: #a8c7b7; background: #edf5ef; }
 
 /* Roster allocation is additive; existing agent tables keep their own layout. */
+.local-backups-panel { min-width: 0; }
+.local-backup-filters { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; margin: 20px 0; }
+.local-backup-filters label { display: grid; gap: 6px; min-width: 130px; flex: 1; }
+.local-backup-filters input, .local-backup-filters select { width: 100%; min-width: 0; padding: 10px; border: 1px solid #d6dfd9; border-radius: 9px; background: white; font: inherit; }
+.local-backup-table-wrap { min-width: 0; max-width: 100%; overflow-x: auto; }
+.local-backup-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.local-backup-table th, .local-backup-table td { text-align: left; padding: 12px 10px; border-bottom: 1px solid #e1e8e3; white-space: nowrap; }
+.local-backup-table small { display: block; font-size: 11px; color: #718177; margin-top: 5px; }
+.local-backup-tag { display: inline-block; margin-left: 7px; border-radius: 5px; padding: 2px 5px; color: #725928; background: #faf2dd; font-size: 11px; }
+.local-backup-pagination { display: flex; justify-content: end; align-items: center; gap: 14px; margin-top: 20px; font-size: 13px; }
+.local-backup-detail { width: min(900px, calc(100vw - 32px)); overflow: auto; }
+.local-backup-download { display: inline-block; text-decoration: none; margin: 12px 0; }
+.local-backup-conversation { padding: 12px 0; border-top: 1px solid #dfe8e2; }
+.local-backup-conversation > p { color: #748178; font-size: 12px; }
+.local-backup-message { margin: 12px 0; border: 1px solid #e2e9e4; border-radius: 10px; padding: 12px; }
+.local-backup-message header { display: flex; gap: 12px; flex-wrap: wrap; color: #64766b; font-size: 12px; margin-bottom: 8px; }
+.local-backup-message > div { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }
+.local-backup-error { color: #985347; }
+.local-backup-detail .participant-record-head { position: sticky; top: 0; background: white; padding-bottom: 12px; }
+.local-backups-panel .settings-card-head { flex-wrap: wrap; gap: 12px; }
 .roster-panel h3 { margin: 24px 0 12px; font-size: 15px; }
 .roster-choice, .roster-source { display: grid; gap: 8px; margin: 16px 0; }
 .roster-source textarea { width: 100%; padding: 12px; border: 1px solid var(--border, #d8dce2); border-radius: 8px; resize: vertical; font: inherit; }

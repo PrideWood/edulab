@@ -6,9 +6,10 @@ import type { ExperimentSettings } from "@/lib/experiment-settings";
 import type { ParticipantProfile } from "@/lib/client-types";
 import { BrandLogo } from "../brand-logo";
 import { RosterPanel } from "./roster-panel";
+import { LocalBackupsPanel } from "./local-backups-panel";
 import type { ExperimentSummary } from "@/lib/experiments";
 
-type Section = "participants" | "content" | "limits" | "storage" | "ai";
+type Section = "participants" | "content" | "limits" | "storage" | "ai" | "local-backups";
 type Admin = { id: string; username: string; displayName: string };
 type ParticipantDirectoryRow = {
   id: string; participantCode: string; fullName: string; studentNumber: string;
@@ -32,6 +33,7 @@ type AgentControl = { agents: AgentSummary[]; runs: RunSummary[]; activeRun: Run
 
 const sections: Array<{ id: Section; number: string; label: string; description: string }> = [
   { id: "participants", number: "01", label: "参与者", description: "身份与编号对应表" },
+  { id: "local-backups", number: "备份", label: "本地版备份", description: "学生机与教师机上传记录" },
   { id: "limits", number: "02", label: "交互规则", description: "次数、字数与时长" },
   { id: "ai", number: "03", label: "智能体与入口", description: "分组链接与智能体配置" },
   { id: "storage", number: "04", label: "数据保存", description: "数据库与人工备份" },
@@ -194,8 +196,9 @@ export function AdminWorkspace() {
       </aside>
 
       <section className="admin-main">
-        <header className="admin-header"><div><p className="admin-kicker">{section === "participants" ? "研究数据" : "实验配置"}</p><h1>{sections.find((item) => item.id === section)?.label}</h1></div><div className="admin-header-actions">{section === "participants" ? <><span className="save-state">身份信息与对话记录分开保存</span><button className="admin-refresh" onClick={() => void loadParticipants()} disabled={participantsLoading}>{participantsLoading ? "读取中…" : "刷新"}</button></> : section === "ai" ? <span className="save-state">各组链接固定对应智能体</span> : <><span className={error ? "save-state error" : "save-state"}>{error || status || "设置只影响新创建的会话"}</span><button className="admin-save" onClick={save} disabled={saving}>{saving ? "保存中…" : "保存设置"}</button></>}</div></header>
+        <header className="admin-header"><div><p className="admin-kicker">{section === "participants" || section === "local-backups" ? "研究数据" : "实验配置"}</p><h1>{sections.find((item) => item.id === section)?.label}</h1></div><div className="admin-header-actions">{section === "local-backups" ? <span className="save-state">汇总全部本地版的云端备份</span> : section === "participants" ? <><span className="save-state">身份信息与对话记录分开保存</span><button className="admin-refresh" onClick={() => void loadParticipants()} disabled={participantsLoading}>{participantsLoading ? "读取中…" : "刷新"}</button></> : section === "ai" ? <span className="save-state">各组链接固定对应智能体</span> : <><span className={error ? "save-state error" : "save-state"}>{error || status || "设置只影响新创建的会话"}</span><button className="admin-save" onClick={save} disabled={saving}>{saving ? "保存中…" : "保存设置"}</button></>}</div></header>
         <div className="admin-content">
+          {section === "local-backups" && <LocalBackupsPanel />}
           {creatingExperiment && <section className="settings-card"><h2>新增实验</h2><p>复制当前实验的任务、规则与智能体配置；新实验的修改和数据独立保存，不复制被试记录或场次。</p><form className="new-experiment-form" onSubmit={addExperiment}><label>实验名称<input value={newExperimentName} maxLength={120} required onChange={(event) => setNewExperimentName(event.target.value)} /></label><button className="admin-save" disabled={saving || !newExperimentName.trim()}>创建实验</button></form>{error && <p role="alert">{error}</p>}</section>}
           {section === "participants" && <label className="run-filter">查看分组入口<select value={runFilter} onChange={(event) => { setRunFilter(event.target.value); runFilterRef.current=event.target.value; setParticipants([]); void loadParticipants(); }}><option value="">全部分组</option>{runs.map((run) => <option key={run.id} value={run.id}>{run.name}{run.entryDeletedAt ? "（链接已删除）" : ""}</option>)}</select></label>}
           {section === "participants" && <ParticipantDirectory key={`${settings.experiment.id}:${runFilter}`} experimentId={settings.experiment.id} runId={runFilter} participants={participants} loading={participantsLoading} error={participantsError} onDeleted={(participantId) => setParticipants((current) => current.filter((participant) => participant.id !== participantId))} onUpdated={(id,profile)=>setParticipants(rows=>rows.map(row=>row.id===id?{...row,fullName:profile.fullName,studentNumber:profile.studentNumber,profileUpdatedAt:profile.updatedAt,profileRevision:profile.revision ?? 0}:row))} />}
