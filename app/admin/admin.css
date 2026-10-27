@@ -289,6 +289,8 @@
 .local-backup-message header { display: flex; gap: 12px; flex-wrap: wrap; color: #64766b; font-size: 12px; margin-bottom: 8px; }
 .local-backup-message > div { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }
 .local-backup-error { color: #985347; }
+.local-backup-row-actions { display: flex; gap: 8px; }
+.local-backup-checkbox { width: 17px; height: 17px; padding: 0; margin: 0; accent-color: #2f7353; cursor: pointer; }
 .local-backup-detail .participant-record-head { position: sticky; top: 0; background: white; padding-bottom: 12px; }
 .local-backups-panel .settings-card-head { flex-wrap: wrap; gap: 12px; }
 .roster-panel h3 { margin: 24px 0 12px; font-size: 15px; }

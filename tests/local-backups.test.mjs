@@ -20,7 +20,7 @@ function setup({authenticated=true,initialized=true,archive={participant:{name:'
   const http={ApiError,errorResponse:error=>Response.json({error:{code:error.code,message:error.message}},{status:error.status||500})};
   function load(path,deps){const exports={};vm.runInNewContext(files[path],{exports,require:name=>{if(name==='server-only')return {};if(name in deps)return deps[name];throw new Error('Unexpected dependency '+name);},Response,URL});return exports;}
   const library=load('lib/local-backups.ts',{'@/db':{query},'@/lib/http':http});
-  const route=load('app/api/admin/local-backups/route.ts',{'zod':{z},'@/lib/http':http,'@/lib/admin-auth':{getAuthenticatedAdmin:async()=>authenticated?{id:'admin'}:null},'@/lib/local-backups':library});
+  const route=load('app/api/admin/local-backups/route.ts',{'zod':{z},'@/lib/http':http,'@/lib/admin-auth':{getAuthenticatedAdmin:async()=>authenticated?{id:'admin'}:null},'@/lib/local-backups':library,'@/lib/local-backup-export':{}});
   return {get:query=>route.GET(new Request('http://localhost/api/admin/local-backups'+query)),queries};
 }
 

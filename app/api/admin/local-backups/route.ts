@@ -1,9 +1,11 @@
 import { z } from "zod";
-import { getAuthenticatedAdmin } from "@/lib/admin-auth";
+import { assertSameOrigin, getAuthenticatedAdmin } from "@/lib/admin-auth";
 import { getLocalBackup, listLocalBackups } from "@/lib/local-backups";
+import { buildLocalBackupZip } from "@/lib/local-backup-export";
 import { ApiError, errorResponse } from "@/lib/http";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 const filterSchema = z.object({
   source: z.enum(["student-light", "teacher-lan"]).optional(),
   classCode: z.string().max(30).optional(), search: z.string().max(100).optional(),
@@ -11,6 +13,25 @@ const filterSchema = z.object({
   deviceId: z.uuid().optional(), participantId: z.uuid().optional(),
   download: z.enum(["1"]).optional(),
 }).refine(value => Boolean(value.deviceId) === Boolean(value.participantId), "需要完整记录标识");
+
+const exportSchema = z.object({
+  records: z.array(z.object({ deviceId: z.uuid(), participantId: z.uuid() })).min(1).max(500),
+});
+
+export async function POST(request: Request) {
+  try {
+    assertSameOrigin(request);
+    if (!await getAuthenticatedAdmin()) throw new ApiError(401, "ADMIN_REQUIRED", "请先登录管理后台。");
+    const input = exportSchema.safeParse(await request.json().catch(() => null));
+    if (!input.success) throw new ApiError(400, "INVALID_LOCAL_BACKUP_EXPORT", "请选择 1–500 条有效备份记录。");
+    const file = await buildLocalBackupZip(input.data.records);
+    return new Response(Uint8Array.from(file.bytes).buffer, { headers: {
+      "Content-Type": "application/zip", "Content-Disposition": `attachment; filename="${file.filename}"`,
+      "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+      "X-EduLab-Export-Count": String(file.count),
+    } });
+  } catch (error) { return errorResponse(error); }
+}
 
 export async function GET(request: Request) {
   try {
