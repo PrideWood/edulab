@@ -15,11 +15,11 @@ const archive={schema_version:'edulab-light/1',participant:{id:p,name:'测试'},
 function setup({admin=true,initialized=true,rows,zip=fflate.zipSync}={}){
   const queries=[];
   const defaultRow={device_id:d,participant_id:p,participant_name:'测试',class_code:'3',source_app:'student-light',archive,selected_count:'1',total_bytes:'1000'};
-  const query=async(sql,params=[])=>{queries.push({sql,params});return sql.includes('to_regclass')?{rows:[{relation:initialized?'exists':null}]}:{rows:rows??[defaultRow]};};
+  const query=async(sql,params=[])=>{queries.push({sql,params});return sql.includes('to_regclass')?{rows:[{relation:initialized?'exists':null,recycle_bin:'public.local_backup_dispositions'}]}:{rows:rows??[defaultRow]};};
   const http={ApiError,errorResponse:e=>Response.json({error:{code:e.code,message:e.message}},{status:e.status||500})};
   const load=(path,deps)=>{const exports={};vm.runInNewContext(modules[path],{exports,require:name=>{if(name==='server-only')return {};if(name in deps)return deps[name];throw new Error('Unexpected dependency '+name);},Response,URL,Uint8Array});return exports;};
   const library=load('lib/local-backup-export.ts',{'fflate':{...fflate,zipSync:zip},'@/db':{query},'@/lib/http':http});
-  const route=load('app/api/admin/local-backups/route.ts',{'zod':{z},'@/lib/admin-auth':{getAuthenticatedAdmin:async()=>admin?{id:'admin'}:null,assertSameOrigin:r=>{if(r.headers.get('Origin')!=='http://localhost')throw new ApiError(403,'INVALID_ORIGIN','origin');}},'@/lib/http':http,'@/lib/local-backup-export':library,'@/lib/local-backups':{}});
+  const route=load('app/api/admin/local-backups/route.ts',{'zod':{z},'@/lib/admin-auth':{getAuthenticatedAdmin:async()=>admin?{id:'admin'}:null,assertSameOrigin:r=>{if(r.headers.get('Origin')!=='http://localhost')throw new ApiError(403,'INVALID_ORIGIN','origin');}},'@/lib/http':http,'@/lib/local-backup-export':library,'@/lib/local-backups':{},'@/lib/local-backup-recycle':{}});
   return {queries,build:library.buildLocalBackupZip,post:(body,origin='http://localhost')=>route.POST(new Request('http://localhost/api/admin/local-backups',{method:'POST',headers:{'Content-Type':'application/json',Origin:origin},body:typeof body==='string'?body:JSON.stringify(body)}))};
 }
 test('local ZIP export requires admin and same origin before querying data',async()=>{

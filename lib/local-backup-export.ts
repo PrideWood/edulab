@@ -16,8 +16,9 @@ function segment(value: string, fallback: string) {
 export async function buildLocalBackupZip(references: LocalBackupReference[]) {
   const normalized = references.map(row => ({ deviceId: row.deviceId.toLowerCase(), participantId: row.participantId.toLowerCase() }));
   const selected = [...new Map(normalized.map(row => [`${row.deviceId}:${row.participantId}`, row])).values()];
-  const ready = await query<{ relation: string | null }>("SELECT to_regclass('edulab_local_backup.latest_participants')::text AS relation");
+  const ready = await query<{ relation: string | null; recycle_bin: string | null }>("SELECT to_regclass('edulab_local_backup.latest_participants')::text AS relation,to_regclass('public.local_backup_dispositions')::text AS recycle_bin");
   if (!ready.rows[0]?.relation) throw new ApiError(404, "LOCAL_BACKUPS_NOT_INITIALIZED", "当前数据库尚未接入本地版备份。");
+  if (!ready.rows[0]?.recycle_bin) throw new ApiError(503, "LOCAL_RECYCLE_BIN_NOT_INITIALIZED", "回收站尚未初始化，请先执行 0018 数据库迁移。");
   // Resolve exact composite identities and one latest snapshot per participant in
   // a single database statement. Check total size before transferring archives.
   const result = await query<{ device_id: string | null; participant_id: string | null;
@@ -28,6 +29,8 @@ export async function buildLocalBackupZip(references: LocalBackupReference[]) {
       FROM edulab_local_backup.latest_participants p
       JOIN unnest($1::uuid[],$2::uuid[]) AS requested(device_id,participant_id)
         ON p.device_id=requested.device_id AND p.participant_id=requested.participant_id
+      WHERE NOT EXISTS (SELECT 1 FROM public.local_backup_dispositions d
+        WHERE d.device_id=p.device_id AND d.participant_id=p.participant_id AND d.is_trashed)
     ), budget AS (
       SELECT count(*)::text AS selected_count,coalesce(sum(octet_length(archive::text)),0)::text AS total_bytes FROM selected
     )
@@ -36,7 +39,7 @@ export async function buildLocalBackupZip(references: LocalBackupReference[]) {
     ORDER BY selected.source_app,selected.class_code,selected.device_id,selected.participant_id`,
     [selected.map(row => row.deviceId), selected.map(row => row.participantId), MAX_BYTES]);
   const count = Number(result.rows[0]?.selected_count ?? 0);
-  if (count !== selected.length) throw new ApiError(404, "LOCAL_BACKUP_NOT_FOUND", "部分备份已不存在，请刷新列表后重新选择；本次未导出不完整压缩包。");
+  if (count !== selected.length) throw new ApiError(404, "LOCAL_BACKUP_NOT_FOUND", "部分备份已移入回收站或不存在，请刷新列表后重新选择；本次未导出不完整压缩包。");
   if (Number(result.rows[0]?.total_bytes ?? 0) > MAX_BYTES) throw new ApiError(413, "LOCAL_BACKUP_EXPORT_TOO_LARGE", "所选记录较大，请减少勾选人数后分批导出。");
   const files: Record<string, Uint8Array> = {};
   let bytes = 0;

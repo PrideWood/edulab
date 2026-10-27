@@ -15,6 +15,10 @@ const date = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12
 const recordKey = (row: LocalBackupReference) => `${row.deviceId}:${row.participantId}`;
 
 export function LocalBackupsPanel() {
+  const [view, setView] = useState<"active" | "trash">("active");
+  const [mutating, setMutating] = useState(false);
+  const [actionError, setActionError] = useState("");
+  const [actionStatus, setActionStatus] = useState("");
   const [source, setSource] = useState("");
   const [classCode, setClassCode] = useState("");
   const [search, setSearch] = useState("");
@@ -32,7 +36,7 @@ export function LocalBackupsPanel() {
   const selectedRecords = Object.values(checked);
   const allOnPage = Boolean(data?.records.length) && Boolean(data?.records.every(row => checked[recordKey(row)]));
 
-  function resetSelection() { setChecked({}); setExportError(""); setExportStatus(""); }
+  function resetSelection() { setChecked({}); setExportError(""); setExportStatus(""); setActionError(""); setActionStatus(""); }
   function toggle(row: LocalBackupRow) {
     setChecked(current => {
       const next = { ...current }, key = recordKey(row);
@@ -51,8 +55,25 @@ export function LocalBackupsPanel() {
       return next;
     });
   }
+  async function recycleRecords(records: LocalBackupReference[], action: "trash" | "restore") {
+    if (!records.length || exporting || mutating) return;
+    const message = action === "trash"
+      ? `确认将选中的 ${records.length} 位被试记录移入回收站？完整数据保留，正常列表和导出将排除这些记录；之后新上传的备份也留在回收站，直到手动恢复。`
+      : `确认恢复选中的 ${records.length} 位被试记录？恢复后会重新显示在正常列表并参与导出。`;
+    if (!window.confirm(message)) return;
+    setMutating(true); setActionError(""); setActionStatus("");
+    try {
+      const response = await fetch("/api/admin/local-backups", { method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ records, action, confirmation: action === "trash" ? "移入回收站" : "恢复记录" }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result?.error?.message ?? "操作失败，请重试。");
+      resetSelection(); setSelected(null); setPage(1); setRefresh(value => value + 1);
+      setActionStatus(action === "trash" ? `已将 ${result.selectedCount} 位被试记录移入回收站，完整数据保留。` : `已恢复 ${result.selectedCount} 位被试记录，可在正常列表导出。`);
+    } catch (failure) { setActionError(failure instanceof Error ? failure.message : "操作失败。"); }
+    finally { setMutating(false); }
+  }
   async function exportRecords(records: LocalBackupReference[]) {
-    if (!records.length || exporting) return;
+    if (!records.length || exporting || mutating || view === "trash") return;
     setExporting(true); setExportError(""); setExportStatus("");
     try {
       const response = await fetch("/api/admin/local-backups", { method: "POST",
@@ -73,7 +94,7 @@ export function LocalBackupsPanel() {
 
   useEffect(() => {
     const controller = new AbortController();
-    const params = new URLSearchParams({ page: String(page) });
+    const params = new URLSearchParams({ page: String(page), view });
     if (source) params.set("source", source);
     if (classCode) params.set("classCode", classCode);
     if (appliedSearch) params.set("search", appliedSearch);
@@ -90,10 +111,12 @@ export function LocalBackupsPanel() {
     }
     void load();
     return () => controller.abort();
-  }, [source, classCode, appliedSearch, page, refresh]);
+  }, [source, classCode, appliedSearch, page, refresh, view]);
 
   return <section className="settings-card local-backups-panel">
-    <div className="settings-card-head"><div><h2>本地版云端备份</h2><p>汇总学生机与教师机已上传的记录，独立于左侧当前实验及原有 P/T 编号。</p></div><button className="admin-refresh" disabled={busy} onClick={() => setRefresh(value => value + 1)}>{busy ? "读取中…" : "刷新备份"}</button></div>
+    <div className="settings-card-head"><div><h2>本地版云端备份</h2><p>汇总学生机与教师机已上传的记录，独立于左侧当前实验及原有 P/T 编号。</p></div><button className="admin-refresh" disabled={busy || mutating} onClick={() => setRefresh(value => value + 1)}>{busy ? "读取中…" : "刷新备份"}</button></div>
+    <div className="local-backup-views" role="group" aria-label="记录范围">{(["active", "trash"] as const).map(value => <button key={value} className="admin-refresh" aria-pressed={view === value} disabled={mutating || exporting} onClick={() => { resetSelection(); setView(value); setPage(1); }}>{value === "active" ? "正常记录" : "回收站"}</button>)}</div>
+    {view === "trash" && <p className="profile-hint">回收站保留完整数据，不参与正常导出。可以批量恢复，不提供彻底删除。</p>}
     <form className="local-backup-filters" onSubmit={event => { event.preventDefault(); resetSelection(); setPage(1); setAppliedSearch(search.trim()); setRefresh(value => value + 1); }}>
       <label>来源<select value={source} onChange={event => { resetSelection(); setSource(event.target.value); setPage(1); }}><option value="">全部来源</option><option value="student-light">学生机轻量版</option><option value="teacher-lan">教师机局域网</option></select></label>
       <label>班级<select value={classCode} onChange={event => { resetSelection(); setClassCode(event.target.value); setPage(1); }}><option value="">全部班级</option><option value="3">三班</option><option value="8">八班</option><option value="9">九班</option></select></label>
@@ -104,16 +127,18 @@ export function LocalBackupsPanel() {
     {!error && data?.initialized === false && <p role="status">当前数据库尚未初始化本地版备份，请确认连接的是已接入备份的 Neon 数据库。</p>}
     {!error && data?.initialized && <>
       <p role="status">共 {data.total} 位参与者的备份{busy ? " · 正在刷新…" : ""}</p>
-      <div className="participant-export-toolbar"><div><strong>已选择 {selectedRecords.length} 位</strong><span>全选当前页；翻页保留选择，切换筛选条件清空。一次最多导出 500 位，每人一个完整 JSON。</span></div><div><button className="admin-refresh" disabled={!selectedRecords.length || exporting} onClick={resetSelection}>清空选择</button><button className="participant-export-button" disabled={!selectedRecords.length || selectedRecords.length > 500 || exporting || busy} onClick={() => void exportRecords(selectedRecords)}>{exporting ? "正在整理…" : "导出交互记录 (.zip)"}</button></div></div>
+      <div className="participant-export-toolbar"><div><strong>已选择 {selectedRecords.length} 位</strong><span>全选当前页；翻页保留选择，切换范围或筛选清空。每批最多 500 位。</span></div><div><button className="admin-refresh" disabled={!selectedRecords.length || exporting || mutating} onClick={resetSelection}>清空选择</button>{view === "active" && <button className="participant-export-button" disabled={!selectedRecords.length || selectedRecords.length > 500 || exporting || busy || mutating} onClick={() => void exportRecords(selectedRecords)}>{exporting ? "正在整理…" : "导出交互记录 (.zip)"}</button>}<button className={view === "trash" ? "admin-refresh" : "admin-danger"} disabled={!selectedRecords.length || selectedRecords.length > 500 || exporting || busy || mutating} onClick={() => void recycleRecords(selectedRecords, view === "trash" ? "restore" : "trash")}>{mutating ? "正在处理…" : view === "trash" ? "恢复所选记录" : "移入回收站"}</button></div></div>
+      {actionError && <p className="local-backup-error" role="alert">{actionError}</p>}
+      {actionStatus && <p className="agent-success" role="status">{actionStatus}</p>}
       {exportError && <p className="local-backup-error" role="alert">{exportError}</p>}
       {exportStatus && <p className="agent-success" role="status">{exportStatus}</p>}
-      <div className="local-backup-table-wrap"><table className="local-backup-table"><thead><tr><th><BackupCheckbox checked={allOnPage} mixed={!allOnPage && data.records.some(row => checked[recordKey(row)])} disabled={busy || exporting || !data.records.length} label="全选当前页备份" onChange={togglePage} /></th><th>姓名 / 标识</th><th>班级</th><th>来源</th><th>会话 / 轮次 / 消息</th><th>云端接收时间</th><th>操作</th></tr></thead><tbody>
-        {data.records.map(row => <tr key={recordKey(row)}><td><BackupCheckbox checked={Boolean(checked[recordKey(row)])} disabled={busy || exporting} label={`选择 ${row.participantName} ${row.deviceId} ${row.participantId}`} onChange={() => toggle(row)} /></td><td><strong>{row.participantName}</strong>{row.isTest && <span className="local-backup-tag">测试</span>}<small title={`设备 ${row.deviceId}\n参与者 ${row.participantId}`}>{row.deviceId.slice(0,8)} / {row.participantId.slice(0,8)}</small></td><td>{className(row.classCode)}</td><td>{sourceName(row.sourceApp)}</td><td>{row.conversationCount} / {row.turnCount} / {row.messageCount}</td><td>{date(row.receivedAt)}<small>快照生成：{date(row.exportedAt)}</small></td><td><div className="local-backup-row-actions"><button className="admin-refresh" onClick={() => setSelected(row)}>查看记录</button><button className="admin-refresh" disabled={exporting || busy} onClick={() => void exportRecords([row])}>导出交互记录</button></div></td></tr>)}
+      <div className="local-backup-table-wrap"><table className="local-backup-table"><thead><tr><th><BackupCheckbox checked={allOnPage} mixed={!allOnPage && data.records.some(row => checked[recordKey(row)])} disabled={busy || exporting || mutating || !data.records.length} label="全选当前页备份" onChange={togglePage} /></th><th>姓名 / 标识</th><th>班级</th><th>来源</th><th>会话 / 轮次 / 消息</th><th>云端接收时间</th><th>操作</th></tr></thead><tbody>
+        {data.records.map(row => <tr key={recordKey(row)}><td><BackupCheckbox checked={Boolean(checked[recordKey(row)])} disabled={busy || exporting || mutating} label={`选择 ${row.participantName} ${row.deviceId} ${row.participantId}`} onChange={() => toggle(row)} /></td><td><strong>{row.participantName}</strong>{row.isTest && <span className="local-backup-tag">测试</span>}<small title={`设备 ${row.deviceId}\n参与者 ${row.participantId}`}>{row.deviceId.slice(0,8)} / {row.participantId.slice(0,8)}</small></td><td>{className(row.classCode)}</td><td>{sourceName(row.sourceApp)}</td><td>{row.conversationCount} / {row.turnCount} / {row.messageCount}</td><td>{date(row.receivedAt)}<small>快照生成：{date(row.exportedAt)}</small>{row.trashedAt && <small>移入回收站：{date(row.trashedAt)}</small>}</td><td><div className="local-backup-row-actions"><button className="admin-refresh" onClick={() => setSelected(row)}>查看记录</button>{view === "active" && <button className="admin-refresh" disabled={exporting || busy || mutating} onClick={() => void exportRecords([row])}>导出交互记录</button>}<button className={view === "trash" ? "admin-refresh" : "admin-danger"} disabled={exporting || busy || mutating} onClick={() => void recycleRecords([row], view === "trash" ? "restore" : "trash")}>{view === "trash" ? "恢复" : "移入回收站"}</button></div></td></tr>)}
       </tbody></table></div>
       {!busy && !data.records.length && <p>没有符合条件的云端备份。</p>}
       <div className="local-backup-pagination"><button className="admin-refresh" disabled={busy || page <= 1} onClick={() => setPage(value => value - 1)}>上一页</button><span>第 {page} / {Math.max(1, Math.ceil(data.total / data.pageSize))} 页</span><button className="admin-refresh" disabled={busy || page * data.pageSize >= data.total} onClick={() => setPage(value => value + 1)}>下一页</button></div>
     </>}
-    {selected && <BackupDetail key={`${selected.deviceId}:${selected.participantId}`} record={selected} onClose={() => setSelected(null)} />}
+    {selected && <BackupDetail key={`${selected.deviceId}:${selected.participantId}`} record={selected} inTrash={view === "trash"} onClose={() => setSelected(null)} />}
   </section>;
 }
 
@@ -125,12 +150,12 @@ function BackupCheckbox({ checked, mixed = false, disabled, label, onChange }: {
   return <input ref={ref} className="local-backup-checkbox" type="checkbox" checked={checked} disabled={disabled} aria-label={label} onChange={onChange} />;
 }
 
-function BackupDetail({ record, onClose }: { record: LocalBackupRow; onClose: () => void }) {
+function BackupDetail({ record, inTrash, onClose }: { record: LocalBackupRow; inTrash: boolean; onClose: () => void }) {
   const [archive, setArchive] = useState<Archive | null>(null);
   const [error, setError] = useState("");
   const dialog = useRef<HTMLElement>(null);
   const close = useRef<HTMLButtonElement>(null);
-  const endpoint = `/api/admin/local-backups?deviceId=${record.deviceId}&participantId=${record.participantId}`;
+  const endpoint = `/api/admin/local-backups?deviceId=${record.deviceId}&participantId=${record.participantId}&view=${inTrash ? "trash" : "active"}`;
   useEffect(() => {
     const controller = new AbortController();
     const previous = document.activeElement;
@@ -161,7 +186,7 @@ function BackupDetail({ record, onClose }: { record: LocalBackupRow; onClose: ()
     <div className="participant-record-head"><div><h2 id="local-backup-title">{record.participantName} 的备份记录</h2><p>{className(record.classCode)} · {sourceName(record.sourceApp)} · 快照版本 {record.revision}</p></div><button ref={close} className="admin-refresh" onClick={onClose}>关闭</button></div>
     {error && <p role="alert">{error}</p>}
     {!archive && !error && <p role="status">正在读取完整记录…</p>}
-    {archive && <><a className="admin-refresh local-backup-download" href={`${endpoint}&download=1`}>下载完整 JSON</a>
+    {archive && <>{!inTrash && <a className="admin-refresh local-backup-download" href={`${endpoint}&download=1`}>下载完整 JSON</a>}
       {archive.conversations.map(conversation => <section className="local-backup-conversation" key={conversation.id}><h3>{conversation.title || "新对话"}</h3><p>{date(conversation.created_at)}</p>{conversation.messages.map(message => <article className="local-backup-message" key={message.id}><header><strong>{message.role === "user" ? "学生" : message.role === "assistant" ? "AI" : message.role}</strong><span>第 {message.turn_index} 轮 · 顺序 {message.sequence_no} · {date(message.sent_at)}</span></header><div>{message.content}</div></article>)}{!conversation.messages.length && <p>该会话尚无消息。</p>}</section>)}
     </>}
   </section></div>;

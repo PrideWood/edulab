@@ -290,6 +290,8 @@
 .local-backup-message > div { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }
 .local-backup-error { color: #985347; }
 .local-backup-row-actions { display: flex; gap: 8px; }
+.local-backup-views { display: flex; gap: 10px; margin: 16px 0; }
+.local-backup-views button[aria-pressed="true"] { background: #2f7353; color: white; border-color: #2f7353; }
 .local-backup-checkbox { width: 17px; height: 17px; padding: 0; margin: 0; accent-color: #2f7353; cursor: pointer; }
 .local-backup-detail .participant-record-head { position: sticky; top: 0; background: white; padding-bottom: 12px; }
 .local-backups-panel .settings-card-head { flex-wrap: wrap; gap: 12px; }
