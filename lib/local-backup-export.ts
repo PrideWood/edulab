@@ -4,7 +4,7 @@ import { strToU8, zipSync } from "fflate";
 import { query } from "@/db";
 import { ApiError } from "@/lib/http";
 
-export type LocalBackupReference = { deviceId: string; participantId: string };
+export type LocalBackupReference = { deviceId: string; participantId: string; exportIndex?: number };
 const MAX_BYTES = 64 * 1024 * 1024;
 
 function segment(value: string, fallback: string) {
@@ -14,7 +14,7 @@ function segment(value: string, fallback: string) {
 }
 
 export async function buildLocalBackupZip(references: LocalBackupReference[]) {
-  const normalized = references.map(row => ({ deviceId: row.deviceId.toLowerCase(), participantId: row.participantId.toLowerCase() }));
+  const normalized = references.map(row => ({ deviceId: row.deviceId.toLowerCase(), participantId: row.participantId.toLowerCase(), exportIndex: row.exportIndex }));
   const selected = [...new Map(normalized.map(row => [`${row.deviceId}:${row.participantId}`, row])).values()];
   const ready = await query<{ relation: string | null; recycle_bin: string | null }>("SELECT to_regclass('edulab_local_backup.latest_participants')::text AS relation,to_regclass('public.local_backup_dispositions')::text AS recycle_bin");
   if (!ready.rows[0]?.relation) throw new ApiError(404, "LOCAL_BACKUPS_NOT_INITIALIZED", "当前数据库尚未接入本地版备份。");
@@ -36,19 +36,25 @@ export async function buildLocalBackupZip(references: LocalBackupReference[]) {
     )
     SELECT selected.*,budget.selected_count,budget.total_bytes
     FROM budget LEFT JOIN selected ON budget.total_bytes::bigint <= $3
-    ORDER BY selected.source_app,selected.class_code,selected.device_id,selected.participant_id`,
+    ORDER BY coalesce(
+      (SELECT min(nullif(c->>'created_at','')::timestamptz) FROM jsonb_array_elements(selected.archive->'conversations') c),
+      nullif(selected.archive->'participant'->>'created_at','')::timestamptz) DESC NULLS LAST,selected.device_id,selected.participant_id`,
     [selected.map(row => row.deviceId), selected.map(row => row.participantId), MAX_BYTES]);
   const count = Number(result.rows[0]?.selected_count ?? 0);
   if (count !== selected.length) throw new ApiError(404, "LOCAL_BACKUP_NOT_FOUND", "部分备份已移入回收站或不存在，请刷新列表后重新选择；本次未导出不完整压缩包。");
   if (Number(result.rows[0]?.total_bytes ?? 0) > MAX_BYTES) throw new ApiError(413, "LOCAL_BACKUP_EXPORT_TOO_LARGE", "所选记录较大，请减少勾选人数后分批导出。");
   const files: Record<string, Uint8Array> = {};
   let bytes = 0;
+  const indices = new Map(selected.map(row => [`${row.deviceId}:${row.participantId}`, row.exportIndex]));
+  let position = 0;
   for (const row of result.rows) {
     const content = strToU8(JSON.stringify(row.archive, null, 2));
     bytes += content.byteLength;
     if (bytes > MAX_BYTES) throw new ApiError(413, "LOCAL_BACKUP_EXPORT_TOO_LARGE", "所选记录较大，请减少勾选人数后分批导出。");
     const source = row.source_app === "teacher-lan" ? "教师机局域网" : "学生机轻量版";
-    const name = `${source}/${segment(row.class_code, "未分班")}/${segment(row.participant_name, "参与者")}__${row.device_id}__${row.participant_id}.json`;
+    const index = indices.get(`${row.device_id}:${row.participant_id}`) ?? ++position;
+    const prefix = String(index).padStart(5, "0");
+    const name = `${source}/${segment(row.class_code, "未分班")}/${prefix}_${segment(row.participant_name, "参与者")}__${row.device_id}__${row.participant_id}.json`;
     files[name] = content;
   }
   const zip = zipSync(files, { level: 4 });

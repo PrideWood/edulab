@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { LocalBackupRow } from "@/lib/local-backups";
 import type { LocalBackupReference } from "@/lib/local-backup-export";
+import { downloadLocalBackupBatches } from "@/lib/local-backup-download";
 
 type Message = { id: string; role: string; content: string; sent_at: string; turn_index: number; sequence_no: number };
 type Archive = { participant: { name: string }; conversations: Array<{
@@ -11,7 +12,7 @@ type Archive = { participant: { name: string }; conversations: Array<{
 }> };
 const sourceName = (source: string) => source === "teacher-lan" ? "教师机局域网" : "学生机轻量版";
 const className = (code: string) => (({ "3": "三班", "8": "八班", "9": "九班" })[code] ?? code) || "—";
-const date = (value: string) => new Date(value).toLocaleString("zh-CN", { hour12: false });
+const date = (value?: string | null) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
 const recordKey = (row: LocalBackupReference) => `${row.deviceId}:${row.participantId}`;
 
 export function LocalBackupsPanel() {
@@ -33,10 +34,13 @@ export function LocalBackupsPanel() {
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
   const [exportStatus, setExportStatus] = useState("");
+  const [selectingAll, setSelectingAll] = useState(false);
+  const selectionRequest = useRef<AbortController | null>(null);
   const selectedRecords = Object.values(checked);
+  const allSelected = Boolean(data?.total) && selectedRecords.length === data?.total;
   const allOnPage = Boolean(data?.records.length) && Boolean(data?.records.every(row => checked[recordKey(row)]));
 
-  function resetSelection() { setChecked({}); setExportError(""); setExportStatus(""); setActionError(""); setActionStatus(""); }
+  function resetSelection() { selectionRequest.current?.abort(); selectionRequest.current = null; setSelectingAll(false); setChecked({}); setExportError(""); setExportStatus(""); setActionError(""); setActionStatus(""); }
   function toggle(row: LocalBackupRow) {
     setChecked(current => {
       const next = { ...current }, key = recordKey(row);
@@ -55,6 +59,26 @@ export function LocalBackupsPanel() {
       return next;
     });
   }
+  async function toggleAll() {
+    if (allSelected) { resetSelection(); return; }
+    if (selectingAll || busy || exporting || mutating) return;
+    const controller = new AbortController(); selectionRequest.current = controller;
+    setSelectingAll(true); setExportError("");
+    const params = new URLSearchParams({ selection: "all", view });
+    if (source) params.set("source", source);
+    if (classCode) params.set("classCode", classCode);
+    if (appliedSearch) params.set("search", appliedSearch);
+    try {
+      const response = await fetch(`/api/admin/local-backups?${params}`, { cache: "no-store", signal: controller.signal });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result?.error?.message ?? "无法全选记录。");
+      if (controller.signal.aborted || selectionRequest.current !== controller) return;
+      setChecked(Object.fromEntries((result.records as LocalBackupReference[]).map(row => [recordKey(row), row])));
+      setData(current => current ? { ...current, total: result.total } : current);
+    } catch (failure) { if (!controller.signal.aborted) setExportError(failure instanceof Error ? failure.message : "无法全选记录。"); }
+    finally { if (selectionRequest.current === controller) { selectionRequest.current = null; setSelectingAll(false); } }
+  }
+  useEffect(() => () => selectionRequest.current?.abort(), []);
   async function recycleRecords(records: LocalBackupReference[], action: "trash" | "restore") {
     if (!records.length || exporting || mutating) return;
     const message = action === "trash"
@@ -73,23 +97,35 @@ export function LocalBackupsPanel() {
     finally { setMutating(false); }
   }
   async function exportRecords(records: LocalBackupReference[]) {
-    if (!records.length || exporting || mutating || view === "trash") return;
+    if (!records.length || exporting || mutating || selectingAll || view === "trash") return;
     setExporting(true); setExportError(""); setExportStatus("");
     try {
-      const response = await fetch("/api/admin/local-backups", { method: "POST",
-        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ records }) });
-      if (!response.ok) {
-        const failure = await response.json().catch(() => null);
-        throw new Error(failure?.error?.message ?? "导出失败，请稍后重试。");
-      }
-      const blob = await response.blob(), url = URL.createObjectURL(blob), link = document.createElement("a");
-      link.href = url;
-      link.download = response.headers.get("Content-Disposition")?.match(/filename="([^"]+)"/)?.[1] ?? "EduLab_local_interactions.zip";
-      document.body.append(link); link.click(); link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
-      setExportStatus(`已导出 ${Number(response.headers.get("X-EduLab-Export-Count")) || records.length} 位参与者的完整云端交互记录。`);
-    } catch (failure) { setExportError(failure instanceof Error ? failure.message : "导出失败。"); }
-    finally { setExporting(false); }
+      // Resolve order from the same filtered list, independently of click order or page.
+      const params = new URLSearchParams({ selection: "all", view });
+      if (source) params.set("source", source);
+      if (classCode) params.set("classCode", classCode);
+      if (appliedSearch) params.set("search", appliedSearch);
+      const response = await fetch(`/api/admin/local-backups?${params}`, { cache: "no-store" });
+      const selection = await response.json();
+      if (!response.ok) throw new Error(selection?.error?.message ?? "无法确认导出顺序。");
+      const wanted = new Set(records.map(recordKey));
+      const ordered = (selection.records as LocalBackupReference[]).filter(row => wanted.has(recordKey(row)));
+      if (ordered.length !== wanted.size) throw new Error("部分记录已变更，请刷新列表后重新选择；本次未导出。");
+      const result = await downloadLocalBackupBatches(ordered, {
+        request: batch => fetch("/api/admin/local-backups", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ records: batch }) }),
+        save: (blob, filename) => {
+          const url = URL.createObjectURL(blob), link = document.createElement("a");
+          link.href = url; link.download = filename; document.body.append(link); link.click(); link.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 5000);
+        },
+        progress: count => setExportStatus(`正在导出：${count} / ${records.length} 位…`),
+      });
+      setExportStatus(`已导出 ${result.count} 位参与者的完整云端交互记录${result.files > 1 ? `（${result.files} 个压缩包，请允许浏览器下载多个文件）` : ""}。`);
+    } catch (failure) {
+      const completed = (failure as { completedCount?: number }).completedCount ?? 0;
+      setExportError(`${completed ? `已完成 ${completed} 位的下载请求，其余未完成。` : ""}${failure instanceof Error ? failure.message : "导出失败。"}`);
+      setExportStatus("");
+    } finally { setExporting(false); }
   }
 
   useEffect(() => {
@@ -122,21 +158,21 @@ export function LocalBackupsPanel() {
       <label>班级<select value={classCode} onChange={event => { resetSelection(); setClassCode(event.target.value); setPage(1); }}><option value="">全部班级</option><option value="3">三班</option><option value="8">八班</option><option value="9">九班</option></select></label>
       <label>姓名<input value={search} onChange={event => setSearch(event.target.value)} maxLength={100} placeholder="如：测试" /></label><button className="admin-refresh" type="submit">查询</button>
     </form>
-    <p className="profile-hint">这里显示云端已确认的最新快照；本机尚未上传的记录不会出现在此处。同名学生按设备和参与者标识区分。</p>
+    <p className="profile-hint">按首次交互开始时间从新到旧固定排序，补传不会改变位置。这里显示云端已确认的最新快照；同名学生按设备和参与者标识区分。</p>
     {error && <p role="alert" className="local-backup-error">{error}</p>}
     {!error && data?.initialized === false && <p role="status">当前数据库尚未初始化本地版备份，请确认连接的是已接入备份的 Neon 数据库。</p>}
     {!error && data?.initialized && <>
       <p role="status">共 {data.total} 位参与者的备份{busy ? " · 正在刷新…" : ""}</p>
-      <div className="participant-export-toolbar"><div><strong>已选择 {selectedRecords.length} 位</strong><span>全选当前页；翻页保留选择，切换范围或筛选清空。每批最多 500 位。</span></div><div><button className="admin-refresh" disabled={!selectedRecords.length || exporting || mutating} onClick={resetSelection}>清空选择</button>{view === "active" && <button className="participant-export-button" disabled={!selectedRecords.length || selectedRecords.length > 500 || exporting || busy || mutating} onClick={() => void exportRecords(selectedRecords)}>{exporting ? "正在整理…" : "导出交互记录 (.zip)"}</button>}<button className={view === "trash" ? "admin-refresh" : "admin-danger"} disabled={!selectedRecords.length || selectedRecords.length > 500 || exporting || busy || mutating} onClick={() => void recycleRecords(selectedRecords, view === "trash" ? "restore" : "trash")}>{mutating ? "正在处理…" : view === "trash" ? "恢复所选记录" : "移入回收站"}</button></div></div>
+      <div className="participant-export-toolbar"><div><strong>已选择 {selectedRecords.length} 位</strong><span>全选覆盖当前筛选条件下的所有页。大批量导出自动分包；切换范围或筛选清空选择。移入或恢复每批最多 500 位。</span></div><div><button className="admin-refresh" disabled={busy || exporting || mutating || selectingAll || !data.records.length} onClick={() => void toggleAll()}>{selectingAll ? "正在全选…" : allSelected ? "取消全部选择" : "全选全部记录"}</button><button className="admin-refresh" disabled={busy || exporting || mutating || selectingAll || !data.records.length} onClick={togglePage}>{allOnPage ? "取消本页选择" : "选择本页"}</button><button className="admin-refresh" disabled={!selectedRecords.length || exporting || mutating} onClick={resetSelection}>清空选择</button>{view === "active" && <button className="participant-export-button" disabled={!selectedRecords.length || exporting || busy || mutating || selectingAll} onClick={() => void exportRecords(selectedRecords)}>{exporting ? "正在整理…" : "导出交互记录 (.zip)"}</button>}<button className={view === "trash" ? "admin-refresh" : "admin-danger"} disabled={!selectedRecords.length || selectedRecords.length > 500 || exporting || busy || mutating} onClick={() => void recycleRecords(selectedRecords, view === "trash" ? "restore" : "trash")}>{mutating ? "正在处理…" : view === "trash" ? "恢复所选记录" : "移入回收站"}</button></div></div>
       {actionError && <p className="local-backup-error" role="alert">{actionError}</p>}
       {actionStatus && <p className="agent-success" role="status">{actionStatus}</p>}
       {exportError && <p className="local-backup-error" role="alert">{exportError}</p>}
       {exportStatus && <p className="agent-success" role="status">{exportStatus}</p>}
-      <div className="local-backup-table-wrap"><table className="local-backup-table"><thead><tr><th><BackupCheckbox checked={allOnPage} mixed={!allOnPage && data.records.some(row => checked[recordKey(row)])} disabled={busy || exporting || mutating || !data.records.length} label="全选当前页备份" onChange={togglePage} /></th><th>姓名 / 标识</th><th>班级</th><th>来源</th><th>会话 / 轮次 / 消息</th><th>云端接收时间</th><th>操作</th></tr></thead><tbody>
-        {data.records.map(row => <tr key={recordKey(row)}><td><BackupCheckbox checked={Boolean(checked[recordKey(row)])} disabled={busy || exporting || mutating} label={`选择 ${row.participantName} ${row.deviceId} ${row.participantId}`} onChange={() => toggle(row)} /></td><td><strong>{row.participantName}</strong>{row.isTest && <span className="local-backup-tag">测试</span>}<small title={`设备 ${row.deviceId}\n参与者 ${row.participantId}`}>{row.deviceId.slice(0,8)} / {row.participantId.slice(0,8)}</small></td><td>{className(row.classCode)}</td><td>{sourceName(row.sourceApp)}</td><td>{row.conversationCount} / {row.turnCount} / {row.messageCount}</td><td>{date(row.receivedAt)}<small>快照生成：{date(row.exportedAt)}</small>{row.trashedAt && <small>移入回收站：{date(row.trashedAt)}</small>}</td><td><div className="local-backup-row-actions"><button className="admin-refresh" onClick={() => setSelected(row)}>查看记录</button>{view === "active" && <button className="admin-refresh" disabled={exporting || busy || mutating} onClick={() => void exportRecords([row])}>导出交互记录</button>}<button className={view === "trash" ? "admin-refresh" : "admin-danger"} disabled={exporting || busy || mutating} onClick={() => void recycleRecords([row], view === "trash" ? "restore" : "trash")}>{view === "trash" ? "恢复" : "移入回收站"}</button></div></td></tr>)}
+      <div className="local-backup-table-wrap"><table className="local-backup-table"><thead><tr><th><BackupCheckbox checked={allSelected} mixed={!allSelected && selectedRecords.length > 0} disabled={busy || exporting || mutating || selectingAll || !data.records.length} label="全选所有符合条件的备份" onChange={() => void toggleAll()} /></th><th>姓名 / 标识</th><th>班级</th><th>来源</th><th>会话 / 轮次 / 消息</th><th>交互开始 / 云端备份</th><th>操作</th></tr></thead><tbody>
+        {data.records.map(row => <tr key={recordKey(row)}><td><BackupCheckbox checked={Boolean(checked[recordKey(row)])} disabled={busy || exporting || mutating || selectingAll} label={`选择 ${row.participantName} ${row.deviceId} ${row.participantId}`} onChange={() => toggle(row)} /></td><td><strong>{row.participantName}</strong>{row.isTest && <span className="local-backup-tag">测试</span>}<small title={`设备 ${row.deviceId}\n参与者 ${row.participantId}`}>{row.deviceId.slice(0,8)} / {row.participantId.slice(0,8)}</small></td><td>{className(row.classCode)}</td><td>{sourceName(row.sourceApp)}</td><td>{row.conversationCount} / {row.turnCount} / {row.messageCount}</td><td>{date(row.interactionStartedAt)}<small>云端接收：{date(row.receivedAt)}</small>{row.trashedAt && <small>移入回收站：{date(row.trashedAt)}</small>}</td><td><div className="local-backup-row-actions"><button className="admin-refresh" onClick={() => setSelected(row)}>查看记录</button>{view === "active" && <button className="admin-refresh" disabled={exporting || busy || mutating} onClick={() => void exportRecords([row])}>导出交互记录</button>}<button className={view === "trash" ? "admin-refresh" : "admin-danger"} disabled={exporting || busy || mutating} onClick={() => void recycleRecords([row], view === "trash" ? "restore" : "trash")}>{view === "trash" ? "恢复" : "移入回收站"}</button></div></td></tr>)}
       </tbody></table></div>
       {!busy && !data.records.length && <p>没有符合条件的云端备份。</p>}
-      <div className="local-backup-pagination"><button className="admin-refresh" disabled={busy || page <= 1} onClick={() => setPage(value => value - 1)}>上一页</button><span>第 {page} / {Math.max(1, Math.ceil(data.total / data.pageSize))} 页</span><button className="admin-refresh" disabled={busy || page * data.pageSize >= data.total} onClick={() => setPage(value => value + 1)}>下一页</button></div>
+      <div className="local-backup-pagination"><button className="admin-refresh" disabled={busy || page <= 1} onClick={() => setPage(value => value - 1)}>上一页</button><span>每页 {data.pageSize} 位 · 第 {page} / {Math.max(1, Math.ceil(data.total / data.pageSize))} 页</span><button className="admin-refresh" disabled={busy || page * data.pageSize >= data.total} onClick={() => setPage(value => value + 1)}>下一页</button></div>
     </>}
     {selected && <BackupDetail key={`${selected.deviceId}:${selected.participantId}`} record={selected} inTrash={view === "trash"} onClose={() => setSelected(null)} />}
   </section>;

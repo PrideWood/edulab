@@ -34,7 +34,7 @@ test('invalid and oversized selections cannot trigger database reads',async()=>{
 test('ZIP contains unchanged full archives with student, AI, turn indices and request metadata',async()=>{
   const h=setup();const response=await h.post({records:[ref,ref,{deviceId:d.toUpperCase(),participantId:p.toUpperCase()}]});
   assert.equal(response.status,200);assert.equal(response.headers.get('Content-Type'),'application/zip');assert.equal(response.headers.get('X-EduLab-Export-Count'),'1');assert.match(response.headers.get('Cache-Control'),/no-store/);
-  const files=fflate.unzipSync(new Uint8Array(await response.arrayBuffer()));assert.equal(Object.keys(files).length,1);assert.ok(Object.keys(files)[0].includes('测试'));
+  const files=fflate.unzipSync(new Uint8Array(await response.arrayBuffer()));assert.equal(Object.keys(files).length,1);assert.ok(Object.keys(files)[0].includes('/00001_测试__'));
   assert.deepEqual(JSON.parse(fflate.strFromU8(Object.values(files)[0])),archive);
   const params=h.queries.at(-1).params;assert.deepEqual(Array.from(params[0]),[d]);assert.deepEqual(Array.from(params[1]),[p]);
 });
@@ -51,4 +51,14 @@ test('missing records or schema never silently produce a partial ZIP',async()=>{
 test('oversized raw or compressed exports fail clearly for safe batch retry',async()=>{
   const big=setup({rows:[{selected_count:'1',total_bytes:String(65*1024*1024)}]});assert.equal((await big.post({records:[ref]})).status,413);
   const compressed=setup({zip:()=>new Uint8Array(4_000_001)});assert.equal((await compressed.post({records:[ref]})).status,413);
+});
+
+test('filename numbering follows supplied display order even when database rows arrive differently',async()=>{
+  const rows=[d,d2].map(device=>({device_id:device,participant_id:p,participant_name:'测试',class_code:'3',source_app:'student-light',archive:{...archive,device_id:device},selected_count:'2',total_bytes:'2000'}));
+  const h=setup({rows});const response=await h.post({records:[{deviceId:d2,participantId:p,exportIndex:501},{...ref,exportIndex:502}]});
+  assert.equal(response.status,200);const files=fflate.unzipSync(new Uint8Array(await response.arrayBuffer()));
+  for(const [name,bytes] of Object.entries(files)){
+    const data=JSON.parse(fflate.strFromU8(bytes));assert.ok(name.includes(data.device_id===d2?'/00501_':'/00502_'));
+    assert.deepEqual(data,{...archive,device_id:data.device_id});
+  }
 });

@@ -78,7 +78,7 @@ export async function GET(request?: Request) {
        LEFT JOIN chat_requests request ON request.session_id = session.id
        WHERE p.experiment_id = $1 AND ($2::uuid IS NULL OR session.id IS NOT NULL)
        GROUP BY p.id, profile.participant_id
-       ORDER BY max(session.last_activity_at) DESC NULLS LAST, p.created_at DESC
+       ORDER BY coalesce(min(session.started_at),p.created_at) DESC, p.id
        LIMIT 500`,
       [experimentId,runId],
     );

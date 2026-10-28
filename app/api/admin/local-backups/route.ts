@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { assertSameOrigin, getAuthenticatedAdmin } from "@/lib/admin-auth";
-import { getLocalBackup, listLocalBackups } from "@/lib/local-backups";
+import { getLocalBackup, listLocalBackups, listLocalBackupSelection } from "@/lib/local-backups";
 import { buildLocalBackupZip } from "@/lib/local-backup-export";
 import { setLocalBackupsRecycled } from "@/lib/local-backup-recycle";
 import { ApiError, errorResponse } from "@/lib/http";
@@ -14,10 +14,12 @@ const filterSchema = z.object({
   deviceId: z.uuid().optional(), participantId: z.uuid().optional(),
   download: z.enum(["1"]).optional(),
   view: z.enum(["active", "trash"]).default("active"),
-}).refine(value => Boolean(value.deviceId) === Boolean(value.participantId), "需要完整记录标识");
+  selection: z.enum(["all"]).optional(),
+}).refine(value => Boolean(value.deviceId) === Boolean(value.participantId), "需要完整记录标识")
+  .refine(value => !value.selection || (!value.deviceId && !value.download), "全选不能同时指定单条记录");
 
 const exportSchema = z.object({
-  records: z.array(z.object({ deviceId: z.uuid(), participantId: z.uuid() })).min(1).max(500),
+  records: z.array(z.object({ deviceId: z.uuid(), participantId: z.uuid(), exportIndex: z.number().int().min(1).max(10000).optional() })).min(1).max(500),
 });
 const recycleSchema = z.object({
   action: z.enum(["trash", "restore"]),
@@ -57,6 +59,7 @@ export async function GET(request: Request) {
     const input = filterSchema.safeParse(Object.fromEntries(new URL(request.url).searchParams));
     if (!input.success) throw new ApiError(400, "INVALID_LOCAL_BACKUP_FILTER", "备份筛选条件或记录标识无效。");
     const headers = { "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" };
+    if (input.data.selection === "all") return Response.json(await listLocalBackupSelection(input.data), { headers });
     const { deviceId, participantId, download, view } = input.data;
     if (deviceId && participantId) {
       if (download && view === "trash") throw new ApiError(409, "LOCAL_BACKUP_IN_TRASH", "回收站中的记录不参与导出，请先恢复记录。");
