@@ -6,6 +6,8 @@ import type { ExperimentSettings } from "@/lib/experiment-settings";
 import type { ParticipantProfile } from "@/lib/client-types";
 import { BrandLogo } from "../brand-logo";
 import { RosterPanel } from "./roster-panel";
+import { DirectModelPanel } from "./direct-model-panel";
+import type { DirectModelConfig } from "@/lib/direct-model-config";
 import { LocalBackupsPanel } from "./local-backups-panel";
 import type { ExperimentSummary } from "@/lib/experiments";
 
@@ -19,7 +21,8 @@ type ParticipantDirectoryRow = {
   assignedAgents: Array<{id:string | null; internalName:string; runId:string | null}>;
 };
 type AgentSummary = {
-  id: string; internalName: string; provider: "coze" | "dify"; baseUrl: string; botId: string;
+  id: string; internalName: string; provider: "coze" | "dify" | "deepseek"; baseUrl: string; botId: string;
+  directModel?: DirectModelConfig;
   hasToken: boolean; enabled: boolean; hasReferences: boolean; hasExperimentRecords: boolean; updatedAt: string;
   tokenSource: "database" | "environment" | "missing";
 };
@@ -35,7 +38,7 @@ const sections: Array<{ id: Section; number: string; label: string; description:
   { id: "participants", number: "01", label: "参与者", description: "身份与编号对应表" },
   { id: "local-backups", number: "备份", label: "本地版备份", description: "学生机与教师机上传记录" },
   { id: "limits", number: "02", label: "交互规则", description: "次数、字数与时长" },
-  { id: "ai", number: "03", label: "智能体与入口", description: "分组链接与智能体配置" },
+  { id: "ai", number: "03", label: "模型与入口", description: "DeepSeek 直连、智能体与分组" },
   { id: "storage", number: "04", label: "数据保存", description: "数据库与人工备份" },
   { id: "content", number: "05", label: "可选任务说明", description: "通常无需展示" },
 ];
@@ -564,6 +567,10 @@ function AgentRunSettings({ experimentId, rosterEnabled, onRunsChanged }: { expe
   return <div className="settings-stack agent-run-settings">
     {(error || status) && <p className={error ? "directory-error" : "agent-success"} role={error ? "alert" : "status"}>{error || status}</p>}
 
+    <DirectModelPanel key={control.agents.filter(agent => agent.provider === "deepseek").map(agent => `${agent.id}-${agent.updatedAt}`).join(",")} endpoint={endpoint} agents={control.agents.filter(agent => agent.provider === "deepseek")} activeIds={activeAgentIds} busy={busy}
+      onSave={value => post({ action: "save_agent", agent: value }, `直连配置“${value.internalName}”已保存，可在下方创建分组入口。`)}
+      onDelete={agent => { const selected = control.agents.find(value => value.id === agent.id); if (selected) { setAgentDeleteError(""); setPendingAgentDelete(selected); } }} />
+
     <section className="settings-card">
       <div className="settings-card-head"><div><h2>创建分组入口</h2><p>为各组选择智能体并生成不同链接，可同时使用。每次创建会固定当前已保存的任务与规则；原有入口继续有效。</p></div><span className="field-status">新参与者生效</span></div>
       <div className="form-grid run-form"><label className="wide"><span>分组名称</span><input value={runName} onChange={(event) => setRunName(event.target.value)} placeholder="例如：实验一 · B 组" /></label><label><span>分配方式</span><select value={assignmentMode} onChange={(event) => setAssignmentMode(event.target.value as "fixed" | "balanced_random")}><option value="fixed">固定智能体</option><option value="balanced_random">均衡随机分配</option></select></label>{assignmentMode === "fixed" ? <label><span>指定智能体</span><select value={fixedAgentId} onChange={(event) => setFixedAgentId(event.target.value)}><option value="">请选择</option>{enabledAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.internalName}</option>)}</select></label> : <fieldset className="wide agent-choice-field"><legend>参与随机分配的智能体（至少两个）</legend>{enabledAgents.map((agent) => <label key={agent.id}><input type="checkbox" checked={randomAgentIds.includes(agent.id)} onChange={(event) => setRandomAgentIds(event.target.checked ? [...randomAgentIds, agent.id] : randomAgentIds.filter((id) => id !== agent.id))} /><span>{agent.internalName}</span></label>)}</fieldset>}</div>
@@ -583,7 +590,7 @@ function AgentRunSettings({ experimentId, rosterEnabled, onRunsChanged }: { expe
     <details className="settings-card agent-config-details">
       <summary>API 配置与连通测试<span>为不同智能体生成链接请使用上方“创建分组入口”</span></summary>
       <div className="settings-card-head"><div><h2>智能体 API 配置</h2><p>开放入口及已有学生报名的配置仅允许更新 API Key，其他配置保持锁定。无记录的配置需先停止报名再修改。更换智能体请新增配置与入口，API Key 加密保存且不会回显。Dify 无需 Bot ID，更新 Key 时请使用原 Dify 应用的新 Key。</p></div><button className="admin-refresh" onClick={() => setAdding(true)} disabled={busy || adding}>新增智能体</button></div>
-      <div className="agent-table-wrap"><table className="agent-table"><thead><tr><th>内部名称</th><th>提供商</th><th>API Base URL</th><th>Bot ID</th><th>API Key</th><th>启用</th><th>状态</th><th>操作</th></tr></thead><tbody>{control.agents.map((agent) => <AgentTableRow endpoint={endpoint} key={`${agent.id}-${agent.updatedAt}`} agent={agent} locked={activeAgentIds.has(agent.id) || agent.hasExperimentRecords} busy={busy} onDelete={() => { setAgentDeleteError(""); setPendingAgentDelete(agent); }} onSave={(value) => post({ action: "save_agent", agent: value, testAfterSave: Boolean(value.token?.trim()) }, `智能体“${value.internalName}”已保存。`)} />)}{adding && <AgentTableRow endpoint={endpoint} key="new-agent" agent={null} locked={false} busy={busy} onCancel={() => setAdding(false)} onSave={(value) => post({ action: "save_agent", agent: value, testAfterSave: Boolean(value.token?.trim()) }, `智能体“${value.internalName}”已添加。`)} />}</tbody></table></div>
+      <div className="agent-table-wrap"><table className="agent-table"><thead><tr><th>内部名称</th><th>提供商</th><th>API Base URL</th><th>Bot ID</th><th>API Key</th><th>启用</th><th>状态</th><th>操作</th></tr></thead><tbody>{control.agents.filter(agent => agent.provider !== "deepseek").map((agent) => <AgentTableRow endpoint={endpoint} key={`${agent.id}-${agent.updatedAt}`} agent={agent} locked={activeAgentIds.has(agent.id) || agent.hasExperimentRecords} busy={busy} onDelete={() => { setAgentDeleteError(""); setPendingAgentDelete(agent); }} onSave={(value) => post({ action: "save_agent", agent: value, testAfterSave: Boolean(value.token?.trim()) }, `智能体“${value.internalName}”已保存。`)} />)}{adding && <AgentTableRow endpoint={endpoint} key="new-agent" agent={null} locked={false} busy={busy} onCancel={() => setAdding(false)} onSave={(value) => post({ action: "save_agent", agent: value, testAfterSave: Boolean(value.token?.trim()) }, `智能体“${value.internalName}”已添加。`)} />}</tbody></table></div>
     </details>
     <div className="security-note"><strong>实验条件随会话锁定</strong><p>进入链接后锁定对应场次、智能体与任务快照。更改其他实验或开放新场次不会改变已有会话，密钥始终保留在服务端。</p></div>
     {pendingAgentDelete && <DangerConfirmation title={`删除智能体“${pendingAgentDelete.internalName}”？`} description="将永久删除该智能体的 API 地址、提供商配置和加密 API Key。仅在没有参与者记录且没有未结束场次引用时可删除。关联的空白已结束场次将一并清理，操作无法撤销。" expectedValue={pendingAgentDelete.internalName} expectedLabel="智能体名称" busy={busy} error={agentDeleteError} onCancel={() => setPendingAgentDelete(null)} onConfirm={(confirmation) => void removeAgent(pendingAgentDelete, confirmation)} />}
@@ -591,9 +598,9 @@ function AgentRunSettings({ experimentId, rosterEnabled, onRunsChanged }: { expe
   </div>;
 }
 
-function AgentTableRow({ endpoint, agent, locked, busy, onSave, onDelete, onCancel }: { endpoint: string; agent: AgentSummary | null; locked: boolean; busy: boolean; onSave: (value: { id?: string; internalName: string; provider: "coze" | "dify"; baseUrl: string; botId: string; token?: string; enabled: boolean }) => void; onDelete?: () => void; onCancel?: () => void }) {
+function AgentTableRow({ endpoint, agent, locked, busy, onSave, onDelete, onCancel }: { endpoint: string; agent: AgentSummary | null; locked: boolean; busy: boolean; onSave: (value: { id?: string; internalName: string; provider: "coze" | "dify" | "deepseek"; baseUrl: string; botId: string; token?: string; enabled: boolean }) => void; onDelete?: () => void; onCancel?: () => void }) {
   const [internalName, setInternalName] = useState(agent?.internalName ?? "");
-  const [provider, setProvider] = useState<"coze" | "dify">(agent?.provider ?? "coze");
+  const [provider, setProvider] = useState<"coze" | "dify" | "deepseek">(agent?.provider ?? "coze");
   const [baseUrl, setBaseUrl] = useState(agent?.baseUrl ?? "https://api.coze.cn");
   const [botId, setBotId] = useState(agent?.botId ?? "");
   const [token, setToken] = useState("");
@@ -648,7 +655,7 @@ function AgentTableRow({ endpoint, agent, locked, busy, onSave, onDelete, onCanc
   const canTest = Boolean(baseUrl.trim() && (provider === "dify" || botId.trim()) && (token.trim() || hasSavedKey));
   return <tr className={locked ? "agent-row-locked" : undefined}>
     <td data-label="内部名称"><input className="agent-table-input agent-name-input" aria-label={`${agent?.internalName ?? "新智能体"}内部名称`} value={internalName} onChange={(event) => updateDraft(() => setInternalName(event.target.value))} disabled={locked || testing || busy} placeholder="例如：智能体 B" /></td>
-    <td data-label="提供商"><select className="agent-table-input" aria-label={`${agent?.internalName ?? "新智能体"}提供商`} value={provider} disabled={locked || testing || busy} onChange={(event) => updateDraft(() => { const value = event.target.value as "coze" | "dify"; setProvider(value); setBaseUrl(value === "dify" ? "https://api.dify.ai/v1" : "https://api.coze.cn"); setToken(""); })}><option value="coze">Coze</option><option value="dify">Dify</option></select></td>
+    <td data-label="提供商"><select className="agent-table-input" aria-label={`${agent?.internalName ?? "新智能体"}提供商`} value={provider} disabled={locked || testing || busy} onChange={(event) => updateDraft(() => { const value = event.target.value as "coze" | "dify" | "deepseek"; setProvider(value); setBaseUrl(value === "dify" ? "https://api.dify.ai/v1" : "https://api.coze.cn"); setToken(""); })}><option value="coze">Coze</option><option value="dify">Dify</option></select></td>
     <td data-label="API Base URL"><input className="agent-table-input agent-api-input" aria-label={`${agent?.internalName ?? "新智能体"} API 地址`} value={baseUrl} onChange={(event) => updateDraft(() => setBaseUrl(event.target.value))} disabled={locked || testing || busy} /></td>
     <td data-label="Bot ID">{provider === "dify" ? <span className="agent-row-status">无需填写</span> : <input className="agent-table-input agent-bot-input" aria-label={`${agent?.internalName ?? "新智能体"} Bot ID`} value={botId} onChange={(event) => updateDraft(() => setBotId(event.target.value))} disabled={locked || testing || busy} placeholder="Coze Bot ID" />}</td>
     <td data-label="API Key"><input className="agent-table-input agent-token-input" aria-label={`${agent?.internalName ?? "新智能体"} API Key`} type="password" value={token} onChange={(event) => updateDraft(() => setToken(event.target.value))} disabled={testing || busy} autoComplete="new-password" placeholder={hasSavedKey ? "留空使用已配置 Key" : "输入 API Key"} /></td>

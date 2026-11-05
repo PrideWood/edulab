@@ -8,7 +8,7 @@ export interface TranscriptExportSession {
   lastActivityAt: string;
   participantCode: string;
   cozeConversationId: string | null;
-  provider?: "coze" | "dify";
+  provider?: "coze" | "dify" | "deepseek";
   difyConversationId?: string | null;
   experimentRunId: string | null;
   agentId: string | null;
@@ -70,7 +70,7 @@ export function buildTranscriptExport(input: {
       clientRequestId: message.clientRequestId,
       cozeMessageId: message.cozeMessageId,
       cozeChatId: message.cozeChatId,
-      ...(message.provider === "dify" ? { provider: message.provider, providerMessageId: message.providerMessageId ?? null, providerTaskId: message.providerTaskId ?? null } : {}),
+      ...((message.provider === "dify" || message.provider === "deepseek") ? { provider: message.provider, providerMessageId: message.providerMessageId ?? null, providerTaskId: message.providerTaskId ?? null } : {}),
     })),
   };
 }

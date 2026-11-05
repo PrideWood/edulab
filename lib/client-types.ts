@@ -17,7 +17,7 @@ export interface SessionPayload {
     lastActivityAt: string;
     participantCode: string;
     cozeConversationId: string | null;
-    provider?: "coze" | "dify";
+    provider?: "coze" | "dify" | "deepseek";
     difyConversationId?: string | null;
     experimentRunId: string | null;
     agentId: string | null;

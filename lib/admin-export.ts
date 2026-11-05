@@ -56,7 +56,7 @@ interface MessageExportRow {
   client_request_id: string | null;
   coze_message_id: string | null;
   coze_chat_id: string | null;
-  metadata?: { provider?: "dify"; provider_message_id?: string | null; provider_task_id?: string | null };
+  metadata?: { provider?: "dify" | "deepseek"; provider_message_id?: string | null; provider_task_id?: string | null };
 }
 
 function iso(value: Date | string) {
@@ -97,7 +97,7 @@ function storedMessage(row: MessageExportRow): StoredMessage {
     clientRequestId: row.client_request_id,
     cozeMessageId: row.coze_message_id,
     cozeChatId: row.coze_chat_id,
-    ...(row.metadata?.provider === "dify" ? {provider: "dify" as const, providerMessageId: row.metadata.provider_message_id ?? null, providerTaskId: row.metadata.provider_task_id ?? null} : {}),
+    ...((row.metadata?.provider === "dify" || row.metadata?.provider === "deepseek") ? {provider: row.metadata.provider, providerMessageId: row.metadata.provider_message_id ?? null, providerTaskId: row.metadata.provider_task_id ?? null} : {}),
     status: "completed",
   };
 }

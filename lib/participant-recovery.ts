@@ -63,7 +63,7 @@ export async function recoverParticipant(code: string, identity: string, entry?:
       row.dify_conversation_id = context.rows[0].conversation_id;
       if (!row.dify_conversation_id && context.rows[0].has_history) throw new ApiError(409, "RECOVERY_CONTEXT_MISSING", "此历史记录缺少 Dify 上下文标识，请联系教师处理。");
       if (row.dify_conversation_id) await client.query("UPDATE experiment_sessions SET dify_conversation_id=$2 WHERE id=$1", [row.id, row.dify_conversation_id]);
-    } else if (row.config_snapshot.ai.provider !== "dify" && !row.coze_conversation_id) {
+    } else if (row.config_snapshot.ai.provider !== "dify" && row.config_snapshot.ai.provider !== "deepseek" && !row.coze_conversation_id) {
       const context = await client.query<{ conversation_id: string | null; has_history: boolean }>(
         `SELECT (SELECT coze_conversation_id FROM chat_requests WHERE session_id=$1
             AND coze_conversation_id IS NOT NULL ORDER BY turn_index DESC LIMIT 1) AS conversation_id,

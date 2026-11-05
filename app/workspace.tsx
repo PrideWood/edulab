@@ -96,7 +96,7 @@ function transcriptUploadBody(messages: StoredMessage[]) {
       clientRequestId: message.clientRequestId,
       cozeMessageId: message.cozeMessageId,
       cozeChatId: message.cozeChatId,
-      ...(message.provider === "dify" ? {provider: message.provider, providerMessageId: message.providerMessageId ?? null, providerTaskId: message.providerTaskId ?? null} : {}),
+      ...((message.provider === "dify" || message.provider === "deepseek") ? {provider: message.provider, providerMessageId: message.providerMessageId ?? null, providerTaskId: message.providerTaskId ?? null} : {}),
     })),
   });
 }
@@ -1065,7 +1065,7 @@ export function ExperimentWorkspace({ experiment: initialExperiment, entryToken,
             clientRequestId: message.clientRequestId,
             cozeMessageId: message.cozeMessageId,
             cozeChatId: message.cozeChatId,
-            ...(message.provider === "dify" ? {provider: message.provider, providerMessageId: message.providerMessageId ?? null, providerTaskId: message.providerTaskId ?? null} : {}),
+            ...((message.provider === "dify" || message.provider === "deepseek") ? {provider: message.provider, providerMessageId: message.providerMessageId ?? null, providerTaskId: message.providerTaskId ?? null} : {}),
           })),
         };
       }),

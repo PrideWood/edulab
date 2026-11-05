@@ -339,3 +339,22 @@
     .admin-shell, .admin-login-page { height: auto; min-height: 100dvh; }
   }
 }
+
+.direct-model-note { color: #617268; font-size: 13px; line-height: 1.7; }
+.direct-model-item { padding: 20px; margin-top: 16px; border: 1px solid #dce5df; border-radius: 12px; background: #fafcfb; min-width: 0; }
+.direct-model-item summary { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; cursor: pointer; color: #253b2e; }
+.direct-model-item summary span { color: #617268; font-size: 13px; overflow-wrap: anywhere; }
+.direct-model-form { margin-top: 20px; }
+.direct-model-form .form-grid { margin: 0; }
+.direct-model-form textarea { resize: vertical; min-height: 180px; line-height: 1.7; }
+.direct-model-form small { font-size: 12px; color: #617268; line-height: 1.6; }
+.direct-model-form .direct-checkbox { display: flex; flex-direction: row; gap: 8px; align-items: center; }
+.direct-model-form .direct-checkbox input { width: auto; min-height: auto; }
+.direct-style-presets { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.direct-style-presets small { width: 100%; }
+.direct-model-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 20px; }
+.direct-model-actions .admin-save { margin: 0; width: auto; }
+@media (max-width: 620px) {
+  .direct-model-item { padding: 14px; }
+  .direct-model-form input, .direct-model-form textarea { font-size: 16px; }
+}

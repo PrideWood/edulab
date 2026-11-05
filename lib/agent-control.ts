@@ -1,5 +1,7 @@
 import "server-only";
 
+import type { DirectModelConfig } from "@/lib/direct-model-config";
+
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { query, transaction } from "@/db";
@@ -13,9 +15,10 @@ export type AssignmentMode = "fixed" | "balanced_random" | "roster";
 export interface AgentConfigSummary {
   id: string;
   internalName: string;
-  provider: "coze" | "dify";
+  provider: "coze" | "dify" | "deepseek";
   baseUrl: string;
   botId: string;
+  directModel?: DirectModelConfig;
   hasToken: boolean;
   tokenSource: "database" | "environment" | "missing";
   enabled: boolean;
@@ -45,8 +48,9 @@ interface AgentRow {
   experiment_id: string;
   internal_name: string;
   coze_api_base_url: string;
-  provider?: "coze" | "dify";
+  provider?: "coze" | "dify" | "deepseek";
   coze_bot_id: string | null;
+  direct_model?: DirectModelConfig | null;
   coze_token_ciphertext: string | null;
   coze_token_iv: string | null;
   coze_token_tag: string | null;
@@ -79,6 +83,7 @@ function mapAgent(row: AgentRow): AgentConfigSummary {
     baseUrl: row.coze_api_base_url,
     provider: row.provider ?? "coze",
     botId: row.coze_bot_id ?? "",
+    ...(row.direct_model ? { directModel: row.direct_model } : {}),
     hasToken: Boolean(row.coze_token_ciphertext || ((row.provider ?? "coze") === "coze" && process.env.COZE_API_TOKEN)),
     tokenSource: row.coze_token_ciphertext ? "database" : (row.provider ?? "coze") === "coze" && process.env.COZE_API_TOKEN ? "environment" : "missing",
     enabled: row.enabled,
@@ -143,7 +148,7 @@ async function entryCodeIsInUse(client: PoolClient, experimentId: string,
 export async function getAgentControl(experimentId: string) {
   const [agents, runs] = await Promise.all([
     query<AgentRow>(
-      `SELECT agent.id, agent.experiment_id, agent.internal_name, agent.provider, agent.coze_api_base_url, agent.coze_bot_id,
+      `SELECT agent.id, agent.experiment_id, agent.internal_name, agent.provider, agent.direct_model, agent.coze_api_base_url, agent.coze_bot_id,
          agent.coze_token_ciphertext, agent.coze_token_iv, agent.coze_token_tag, agent.enabled, agent.updated_at,
          (
            EXISTS (
@@ -191,7 +196,7 @@ export async function deleteAgentConfig(input: {
 }, adminUserId: string) {
   return transaction(async (client) => {
     const current = await client.query<AgentRow>(
-      `SELECT id, experiment_id, internal_name, provider, coze_api_base_url, coze_bot_id,
+      `SELECT id, experiment_id, internal_name, provider, direct_model, coze_api_base_url, coze_bot_id,
          coze_token_ciphertext, coze_token_iv, coze_token_tag, enabled, updated_at
        FROM ai_agent_configs WHERE id = $1 AND experiment_id = $2 FOR UPDATE`,
       [input.agentId, input.experimentId],
@@ -260,16 +265,17 @@ export async function saveAgentConfig(input: {
   id?: string;
   experimentId: string;
   internalName: string;
-  provider?: "coze" | "dify";
+  provider?: "coze" | "dify" | "deepseek";
   baseUrl: string;
   botId: string;
+  directModel?: DirectModelConfig;
   token?: string;
   enabled: boolean;
 }, adminUserId: string) {
   return transaction(async (client) => {
     const id = input.id ?? randomUUID();
     const current = input.id ? await client.query<AgentRow>(
-      `SELECT id, experiment_id, internal_name, provider, coze_api_base_url, coze_bot_id,
+      `SELECT id, experiment_id, internal_name, provider, direct_model, coze_api_base_url, coze_bot_id,
          coze_token_ciphertext, coze_token_iv, coze_token_tag, enabled, updated_at
        FROM ai_agent_configs WHERE id = $1 AND experiment_id = $2 FOR UPDATE`,
       [input.id, input.experimentId],
@@ -296,7 +302,8 @@ export async function saveAgentConfig(input: {
           || provider !== (previous.provider ?? "coze")
           || input.baseUrl !== previous.coze_api_base_url
           || input.botId !== (previous.coze_bot_id ?? "")
-          || input.enabled !== previous.enabled;
+          || input.enabled !== previous.enabled
+          || (provider === "deepseek" && ["model", "systemPrompt", "temperature", "maxTokens", "thinking"].some(key => input.directModel?.[key as keyof DirectModelConfig] !== previous.direct_model?.[key as keyof DirectModelConfig]));
         if (configChanged) throw new Error(usage.rows[0]?.has_records ? "AGENT_RECORDS_LOCKED" : "ACTIVE_AGENT_LOCKED");
         if (!input.token?.trim()) return mapAgent(previous);
         const encrypted = encryptSecret(input.token.trim());
@@ -304,7 +311,7 @@ export async function saveAgentConfig(input: {
           `UPDATE ai_agent_configs SET coze_token_ciphertext=$3, coze_token_iv=$4,
              coze_token_tag=$5, updated_by=$6, updated_at=now()
            WHERE id=$1 AND experiment_id=$2
-           RETURNING id, experiment_id, internal_name, provider, coze_api_base_url, coze_bot_id,
+           RETURNING id, experiment_id, internal_name, provider, direct_model, coze_api_base_url, coze_bot_id,
              coze_token_ciphertext, coze_token_iv, coze_token_tag, enabled, updated_at`,
           [id, input.experimentId, encrypted.ciphertext, encrypted.iv, encrypted.tag, adminUserId],
         );
@@ -319,28 +326,30 @@ export async function saveAgentConfig(input: {
     const encrypted = input.token?.trim() ? encryptSecret(input.token.trim()) : null;
     const sameProvider = !previous || (previous.provider ?? "coze") === provider;
     if (provider === "coze" && !input.botId.trim()) throw new Error("COZE_BOT_NOT_CONFIGURED");
-    if (!encrypted && (!sameProvider || (!previous?.coze_token_ciphertext && provider === "dify"))) throw new Error("DIFY_KEY_NOT_CONFIGURED");
+    if (!encrypted && (!sameProvider || (!previous?.coze_token_ciphertext && provider !== "coze"))) throw new Error(provider === "dify" ? "DIFY_KEY_NOT_CONFIGURED" : "PROVIDER_KEY_REQUIRED");
+    if (provider === "deepseek" && !input.directModel?.model.trim()) throw new Error("DIRECT_MODEL_REQUIRED");
     const saved = await client.query<AgentRow>(
       `INSERT INTO ai_agent_configs (
-         id, experiment_id, internal_name, provider, coze_api_base_url, coze_bot_id,
+         id, experiment_id, internal_name, provider, direct_model, coze_api_base_url, coze_bot_id,
          coze_token_ciphertext, coze_token_iv, coze_token_tag, enabled, updated_by
-       ) VALUES ($1,$2,$3,$11,$4,$5,$6,$7,$8,$9,$10)
+       ) VALUES ($1,$2,$3,$11,$12::jsonb,$4,$5,$6,$7,$8,$9,$10)
        ON CONFLICT (id) DO UPDATE SET
          internal_name = EXCLUDED.internal_name,
          provider = EXCLUDED.provider,
+         direct_model = EXCLUDED.direct_model,
          coze_api_base_url = EXCLUDED.coze_api_base_url,
          coze_bot_id = EXCLUDED.coze_bot_id,
          coze_token_ciphertext = EXCLUDED.coze_token_ciphertext,
          coze_token_iv = EXCLUDED.coze_token_iv,
          coze_token_tag = EXCLUDED.coze_token_tag,
          enabled = EXCLUDED.enabled, updated_by = EXCLUDED.updated_by, updated_at = now()
-       RETURNING id, experiment_id, internal_name, provider, coze_api_base_url, coze_bot_id,
+       RETURNING id, experiment_id, internal_name, provider, direct_model, coze_api_base_url, coze_bot_id,
          coze_token_ciphertext, coze_token_iv, coze_token_tag, enabled, updated_at`,
       [id, input.experimentId, input.internalName, input.baseUrl, provider === "coze" ? input.botId : null,
         encrypted?.ciphertext ?? previous?.coze_token_ciphertext ?? null,
         encrypted?.iv ?? previous?.coze_token_iv ?? null,
         encrypted?.tag ?? previous?.coze_token_tag ?? null,
-        input.enabled, adminUserId, provider],
+        input.enabled, adminUserId, provider, provider === "deepseek" ? JSON.stringify(input.directModel) : null],
     );
     await client.query(
       `INSERT INTO admin_audit_log (id, admin_user_id, action, experiment_id, before_data, after_data)
@@ -354,16 +363,17 @@ export async function saveAgentConfig(input: {
 export async function resolveAgentTestConnection(input: {
   experimentId: string;
   id?: string;
-  provider?: "coze" | "dify";
+  provider?: "coze" | "dify" | "deepseek";
   baseUrl: string;
   botId: string;
+  directModel?: DirectModelConfig;
   token?: string;
 }) {
   const provider = input.provider ?? "coze";
   let token = input.token?.trim() ?? "";
   if (!token && input.id) {
     const current = await query<AgentRow>(
-      `SELECT id, experiment_id, internal_name, provider, coze_api_base_url, coze_bot_id,
+      `SELECT id, experiment_id, internal_name, provider, direct_model, coze_api_base_url, coze_bot_id,
          coze_token_ciphertext, coze_token_iv, coze_token_tag, enabled, updated_at
        FROM ai_agent_configs WHERE id = $1 AND experiment_id = $2`,
       [input.id, input.experimentId],
@@ -384,8 +394,8 @@ export async function resolveAgentTestConnection(input: {
     }
   }
   if (provider === "coze") token ||= process.env.COZE_API_TOKEN ?? "";
-  if (!token) throw new Error(provider === "dify" ? "DIFY_KEY_NOT_CONFIGURED" : "COZE_TOKEN_NOT_CONFIGURED");
-  return { provider, token, baseUrl: input.baseUrl, botId: input.botId };
+  if (!token) throw new Error(provider !== "coze" ? "PROVIDER_KEY_REQUIRED" : "COZE_TOKEN_NOT_CONFIGURED");
+  return { provider, token, baseUrl: input.baseUrl, botId: input.botId, directModel: input.directModel };
 }
 
 export async function activateExperimentRun(input: {
@@ -401,8 +411,8 @@ export async function activateExperimentRun(input: {
       ? (input.fixedAgentId ? [input.fixedAgentId] : [])
       : [...new Set(input.randomAgentIds)];
     if (selectedIds.length < (input.assignmentMode === "fixed" ? 1 : 2)) throw new Error("INVALID_RUN_AGENTS");
-    const valid = await client.query<{ id: string }>(
-      `SELECT id FROM ai_agent_configs
+    const valid = await client.query<{ id: string; provider?: string }>(
+      `SELECT id, provider FROM ai_agent_configs
        WHERE experiment_id = $1 AND enabled = true AND id = ANY($2::uuid[]) FOR SHARE`,
       [input.experimentId, selectedIds],
     );
@@ -411,6 +421,7 @@ export async function activateExperimentRun(input: {
     const makeDefault = input.makeDefault ?? true;
     if (makeDefault) await client.query(`UPDATE experiment_runs SET is_default=false WHERE experiment_id=$1 AND is_default=true`, [input.experimentId]);
     const snapshot = buildSessionSnapshot(await getExperimentSettings(input.experimentId,false));
+    if (!snapshot.storage.databaseMessagesEnabled && valid.rows.some(agent => agent.provider === "deepseek")) throw new Error("DIRECT_MODEL_STORAGE_REQUIRED");
     const entryToken = await createRunEntryToken(client);
     const created = await client.query<RunRow>(
       `INSERT INTO experiment_runs (
@@ -459,9 +470,10 @@ export interface AssignedAgentRuntime {
   assignmentMode: AssignmentMode;
   agentId: string;
   internalName: string;
-  provider: "coze" | "dify";
+  provider: "coze" | "dify" | "deepseek";
   baseUrl: string;
   botId: string;
+  directModel?: DirectModelConfig;
   token: string;
 }
 
@@ -600,7 +612,7 @@ export async function assignAgentWithClient(
     );
   }
   const agent = await client.query<AgentRow>(
-    `SELECT id, experiment_id, internal_name, provider, coze_api_base_url, coze_bot_id,
+    `SELECT id, experiment_id, internal_name, provider, direct_model, coze_api_base_url, coze_bot_id,
        coze_token_ciphertext, coze_token_iv, coze_token_tag, enabled, updated_at
      FROM ai_agent_configs WHERE id = $1 AND experiment_id = $2 AND enabled = true`,
     [agentId, experimentId],
@@ -616,11 +628,11 @@ export async function assignAgentWithClient(
       tag: selected.coze_token_tag,
     });
   }
-  if (!token) throw new Error(provider === "dify" ? "DIFY_KEY_NOT_CONFIGURED" : "COZE_TOKEN_NOT_CONFIGURED");
+  if (!token) throw new Error(provider !== "coze" ? "PROVIDER_KEY_REQUIRED" : "COZE_TOKEN_NOT_CONFIGURED");
   return {
     assignmentId: assignmentId!, runId: active.id, runName: active.name,
     assignmentMode: active.assignment_mode, agentId: selected.id,
     internalName: selected.internal_name, provider, baseUrl: selected.coze_api_base_url,
-    botId: selected.coze_bot_id ?? "", token,
+    botId: selected.coze_bot_id ?? "", token, directModel: selected.direct_model ?? undefined,
   };
 }

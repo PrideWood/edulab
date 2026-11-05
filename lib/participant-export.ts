@@ -22,7 +22,7 @@ interface ExportMessage {
   id: string; session_id: string; sequence_no: number; turn_index: number; role: "user" | "assistant";
   content: string; sent_at: Date | string; reply_started_at: Date | string | null; reply_completed_at: Date | string | null;
   latency_ms: number | null; client_request_id: string | null; coze_message_id: string | null; coze_chat_id: string | null;
-  metadata: {provider?:"dify";provider_message_id?:string;provider_task_id?:string};
+  metadata: {provider?:"dify"|"deepseek";provider_message_id?:string;provider_task_id?:string};
 }
 
 function iso(value: Date | string) { return value instanceof Date ? value.toISOString() : new Date(value).toISOString(); }
@@ -56,7 +56,7 @@ export async function buildParticipantTranscriptArchive(session: AuthenticatedSe
         sentAt:iso(row.sent_at),replyStartedAt:row.reply_started_at ? iso(row.reply_started_at) : null,
         replyCompletedAt:row.reply_completed_at ? iso(row.reply_completed_at) : null,latencyMs:row.latency_ms,
         clientRequestId:row.client_request_id,cozeMessageId:row.coze_message_id,cozeChatId:row.coze_chat_id,status:"completed",
-        ...(row.metadata?.provider==="dify" ? {provider:"dify",providerMessageId:row.metadata.provider_message_id ?? null,providerTaskId:row.metadata.provider_task_id ?? null} : {})});
+        ...((row.metadata?.provider==="dify" || row.metadata?.provider==="deepseek") ? {provider:row.metadata.provider,providerMessageId:row.metadata.provider_message_id ?? null,providerTaskId:row.metadata.provider_task_id ?? null} : {})});
       bySession.set(row.session_id,messages);
     }
     const exportedAt = new Date().toISOString();

@@ -16,7 +16,7 @@ async function harness(db, sharedSources) {
     'lib/session.ts', 'lib/session-usage.ts', 'lib/session-write.ts', 'lib/session-memory.ts', 'lib/http.ts', 'lib/admin-auth.ts',
     'lib/participant-profile.ts', 'lib/participant-code-allocation.ts', 'lib/agent-control.ts', 'lib/roster.ts', 'lib/roster-allocation.ts', 'app/api/admin/rosters/route.ts',
     'lib/experiment-settings.ts', 'lib/experiment-limits.ts', 'lib/messages.ts', 'lib/coze.ts',
-    'lib/dify.ts', 'lib/dify-chat.ts', 'lib/sse.ts', 'lib/transcript.ts', 'lib/session-payload.ts', 'lib/runtime-session.ts', 'lib/session-draft.ts',
+    'lib/deepseek.ts', 'lib/deepseek-chat.ts', 'lib/dify.ts', 'lib/dify-chat.ts', 'lib/sse.ts', 'lib/transcript.ts', 'lib/session-payload.ts', 'lib/runtime-session.ts', 'lib/session-draft.ts',
     'lib/participant-recovery.ts', 'lib/interaction-start.ts', 'lib/experiment-entry.ts', 'lib/entry-links.ts', 'lib/entry-token.ts', 'lib/experiments.ts',
     'lib/admin-export.ts', 'lib/transcript-export.ts', 'lib/participant-export.ts', 'app/api/conversations/export/route.ts', 'lib/admin-records.ts', 'app/api/admin/agent-control/route.ts', 'app/api/admin/experiments/route.ts', 'app/api/admin/participants/route.ts',
     'app/api/participant-profile/route.ts', 'app/api/sessions/reset/route.ts', 'lib/legacy-runtime.ts', 'app/api/sessions/route.ts',
@@ -27,7 +27,7 @@ async function harness(db, sharedSources) {
   const jar = new Map(), cache = new Map(), chats = new Map(), creates = [], cozeConfigs = [];
   const forcedDraws = [];
   let providerPending = false;
-  const difyCalls = [], difyHistory = new Map(), afterTasks = [];
+  const deepseekCalls = [], difyCalls = [], difyHistory = new Map(), afterTasks = [];
   let difyMode = 'normal';
   const mockQuestion = content => {
     if (!content.startsWith('EduLab 历史背景 v1：')) return content;
@@ -35,6 +35,14 @@ async function harness(db, sharedSources) {
   };
   const difyFetch = async (url, options) => {
     const parsed = new URL(url);
+    if (parsed.pathname.endsWith('/chat/completions')) {
+      const body=JSON.parse(options.body);deepseekCalls.push(body);
+      return new Response(new ReadableStream({start(controller){
+        for(const event of [{id:crypto.randomUUID(),choices:[{delta:{content:'DeepSeek 回复'},finish_reason:null}]},
+          {choices:[{delta:{},finish_reason:'stop'}]}]) controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));controller.close();
+      }}),{headers:{'content-type':'text/event-stream'}});
+    }
     if (parsed.pathname.endsWith('/messages')) {
       const data = [...difyHistory.values()].filter(message => message.conversation_id === parsed.searchParams.get('conversation_id') && message.user === parsed.searchParams.get('user'));
       return Response.json({data,has_more:false});
@@ -88,6 +96,7 @@ async function harness(db, sharedSources) {
       require: name => {
         if (name in mocks) return mocks[name];
         if (name.startsWith('@/')) return load(`${name.slice(2)}.ts`);
+        if (name === './deepseek-chat') return load('lib/deepseek-chat.ts');
         if (name === './dify-chat') return load('lib/dify-chat.ts');
         throw new Error(`Unexpected module ${name}`);
       },
@@ -95,7 +104,7 @@ async function harness(db, sharedSources) {
     return exports;
   }
   const request = (body, url = 'http://localhost/api/sessions') => ({ url, headers: new Headers({ origin:'http://localhost' }), json:async () => JSON.parse(JSON.stringify(body)), text:async () => JSON.stringify(body) });
-  return { load, jar, request, creates, cozeConfigs, sources, difyCalls, afterTasks, setDifyMode:value => { difyMode=value; }, setPending:value => { providerPending = value; },
+  return { load, jar, request, creates, cozeConfigs, sources, deepseekCalls, difyCalls, afterTasks, setDifyMode:value => { difyMode=value; }, setPending:value => { providerPending = value; },
     forceToken:value => forcedDraws.push(...[...value].map(char => 'abcdefghjkmnpqrstuvwxyz23456789'.indexOf(char))) };
 }
 
@@ -115,6 +124,8 @@ test('roster rollout preserves old experiments and enables allocation only for n
     for (const file of (await readdir('db/migrations')).filter(file => file.endsWith('.sql') && file < '0016').sort()) {
       await pool.query(await readFile(`db/migrations/${file}`, 'utf8'));
     }
+    // Direct-model columns are independent of the roster rollout under test.
+    await pool.query(await readFile('db/migrations/0019_deepseek_direct.sql', 'utf8'));
     const db = { query: (sql, values) => pool.query(sql, values), transaction: async work => {
       const client = await pool.connect();
       try {
@@ -963,6 +974,57 @@ test('recovery SQL integration preserves participants, context, drafts, assignme
       h.forceToken(run.entryToken);
       assert.notEqual((await newFixedRun(await newAgent('清理后新配置'),'清理后的新入口')).entryToken,run.entryToken);
       await assert.rejects(() => entries.getExperimentEntry(run.entryToken),error => error.code==='ENTRY_NOT_FOUND');
+    });
+
+    await t.test('DeepSeek direct sessions preserve prompt snapshots, complete multi-turn context, duplicate safety, recovery and project copying', async () => {
+      asAdmin();
+      const experimentId='deepseek-full-integration';
+      await pool.query('INSERT INTO experiments(id,name) VALUES ($1,$2)',[experimentId,'DeepSeek integration']);
+      const settings=await settingsLib.getExperimentSettings(study.id,false);
+      await settingsLib.saveExperimentSettings({...settings,experiment:{...settings.experiment,id:experimentId},
+        storage:{databaseMessagesEnabled:true},limits:{maxUserMessages:null,maxMessageChars:2000,sessionDurationMinutes:null}},adminId);
+      const directModel={model:'deepseek-flash',systemPrompt:'只给提示。',temperature:0.3,maxTokens:4096,thinking:false};
+      const agent=await control.saveAgentConfig({experimentId,provider:'deepseek',internalName:'引导风格',baseUrl:'https://api.deepseek.com',
+        botId:'',token:'sk-synthetic-deepseek-key',enabled:true,directModel},adminId);
+      const run=await control.activateExperimentRun({experimentId,name:'DeepSeek group',assignmentMode:'fixed',fixedAgentId:agent.id,randomAgentIds:[],makeDefault:false},adminId);
+      const req=(body,path='/api/messages')=>scopedRequest(run,body,path);
+      const joined=await sessions.POST(req({profile:{fullName:'DeepSeek student',studentNumber:'deepseek-synthetic-001'}},'/api/sessions'));
+      assert.equal(joined.status,201);
+      const active=await auth.getAuthenticatedSession(await entries.getExperimentEntry(run.entryToken));
+      assert.equal(active.configSnapshot.ai.directModel.systemPrompt,directModel.systemPrompt);
+      const parse=async response=>{
+        assert.match(response.headers.get('content-type'),/text\/event-stream/);
+        const events=(await response.text()).split('\n\n').filter(frame=>frame.startsWith('data: ')).map(frame=>JSON.parse(frame.slice(6)));
+        assert.equal(events.some(event=>event.event==='error'),false,JSON.stringify(events));
+        return events.find(event=>event.event==='completed').payload;
+      };
+      const requestId=crypto.randomUUID();
+      assert.equal((await parse(await messages.POST(req({clientRequestId:requestId,content:'第一个问题'})))).messages.length,2);
+      assert.equal(h.deepseekCalls.at(-1).messages[0].content,directModel.systemPrompt);
+      const count=h.deepseekCalls.length;
+      assert.equal((await messages.POST(req({clientRequestId:requestId,content:'重复点击'}))).body.messages.length,2);
+      assert.equal(h.deepseekCalls.length,count);
+      const second=await parse(await messages.POST(req({clientRequestId:crypto.randomUUID(),content:'第二个问题'})));
+      assert.equal(second.messages.length,4);
+      const sent=h.deepseekCalls.at(-1).messages;
+      assert.deepEqual(Array.from(sent,message=>message.role),['system','user','assistant','user']);
+      assert.equal(sent[1].content,'第一个问题');assert.equal(sent[2].content,'DeepSeek 回复');
+      assert.equal(second.messages[1].provider,'deepseek');
+      assert.equal(second.session.cozeConversationId,null);assert.equal(second.session.difyConversationId,null);
+      const interrupted=await messages.POST(req({clientRequestId:crypto.randomUUID(),content:'暂时写入失败'}));
+      failMessageWrite=true;
+      let raw;
+      try { raw=await interrupted.text(); } finally { failMessageWrite=false; }
+      assert.match(raw,/"event":"error"/);
+      const calls=h.deepseekCalls.length;
+      const restored=await sessions.GET(req({},'/api/sessions'));
+      assert.equal(restored.body.messages.length,6);assert.equal(restored.body.pending,false);
+      assert.equal(h.deepseekCalls.length,calls);
+      h.jar.delete(entries.sessionCookieName(await entries.getExperimentEntry(run.entryToken)));
+      const resumed=await resume.POST(req({participantCode:joined.body.session.participantCode,identity:'deepseek-synthetic-001'},'/api/sessions/resume'));
+      assert.equal(resumed.status,200);assert.equal((await sessions.GET(req({},'/api/sessions'))).body.messages.length,6);
+      const copied=await h.load('lib/experiments.ts').createExperiment('DeepSeek copy',experimentId,adminId);
+      assert.equal((await control.getAgentControl(copied.id)).agents[0].directModel.systemPrompt,directModel.systemPrompt);
     });
 
     await t.test('Dify encrypted app keys, streaming, multi-turn persistence, duplicates and recovery preserve Coze records', async () => {

@@ -17,7 +17,7 @@ export async function listMessages(sessionId: string): Promise<StoredMessage[]> 
     sent_at: string; reply_started_at: string | null; reply_completed_at: string | null;
     latency_ms: number | null; client_request_id: string | null; coze_message_id: string | null;
     coze_chat_id: string | null; status: "completed";
-    metadata: { provider?: "dify"; provider_message_id?: string | null; provider_task_id?: string | null };
+    metadata: { provider?: "dify" | "deepseek"; provider_message_id?: string | null; provider_task_id?: string | null };
   }>(`SELECT id, sequence_no, turn_index, role, content, sent_at, reply_started_at,
              reply_completed_at, latency_ms, client_request_id, coze_message_id, coze_chat_id, status, metadata
       FROM messages WHERE session_id = $1 ORDER BY sequence_no ASC`, [sessionId]);
@@ -27,7 +27,7 @@ export async function listMessages(sessionId: string): Promise<StoredMessage[]> 
     replyCompletedAt: row.reply_completed_at, latencyMs: row.latency_ms,
     clientRequestId: row.client_request_id, cozeMessageId: row.coze_message_id,
     cozeChatId: row.coze_chat_id, status: row.status,
-    ...(row.metadata?.provider === "dify" ? { provider: "dify" as const,
+    ...(["dify", "deepseek"].includes(row.metadata?.provider ?? "") ? { provider: row.metadata.provider,
       providerMessageId: row.metadata.provider_message_id ?? null, providerTaskId: row.metadata.provider_task_id ?? null } : {}),
   }));
 }
@@ -51,7 +51,7 @@ export async function getLatestFailedRequest(sessionId: string) {
   }
   const internalCodes = new Set(["UNEXPECTED_ERROR", "COZE_CREATE_UNCERTAIN", "UNKNOWN_AFTER_CREATE", "RECOVERY_TIMEOUT", "COZE_TIMEOUT"]);
   const message = row.error_code && row.error_message && !internalCodes.has(row.error_code)
-    ? `${row.provider === "dify" ? "Dify" : "Coze"} 返回错误（${row.error_code}）：${row.error_message}`
+    ? `${row.provider === "deepseek" ? "DeepSeek" : row.provider === "dify" ? "Dify" : "Coze"} 返回错误（${row.error_code}）：${row.error_message}`
     : "上一条消息未能获得 AI 回复，你可以重新发送。";
   return { clientRequestId: row.client_request_id, content: row.content, message, retryable: true };
 }

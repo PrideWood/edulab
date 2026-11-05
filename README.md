@@ -13,6 +13,7 @@ EduLab 是一个面向教育实验研究的轻量 AI 智能体交互平台。教
 - Next.js App Router：学生页面和仅服务端可访问的 API
 - Coze 官方 `@coze/api` SDK：非流式创建 Chat、轮询状态并读取最终消息
 - Dify Cloud 聊天 API：SSE 流式响应、独立 conversation_id、多轮对话和请求恢复
+- DeepSeek 直接调用：独立 API Key、系统提示词与风格参数，SSE 流式回复，服务端维护多轮上下文
 - 标准 PostgreSQL + `pg`：Neon 可直接使用，也可迁移到任何 PostgreSQL 服务
 - HttpOnly 会话 Cookie：浏览器无法读取会话密钥，修改 URL 不能读取其他参与者数据
 - 独立参与者身份表：姓名、学号加密保存，通过内部 Participant ID 与交互记录关联
@@ -23,11 +24,11 @@ EduLab 是一个面向教育实验研究的轻量 AI 智能体交互平台。教
 
 ## 本地启动
 
-1. 复制 `.env.example` 为 `.env.local`，填写 PostgreSQL 和加密密钥；Coze 可使用环境 Token，Dify 应用 Key 在管理后台配置。
-2. 创建数据库结构：`npm run db:migrate`
+1. 复制 `.env.example` 为 `.env.local`，填写 PostgreSQL 和加密密钥；Coze 可使用环境 Token，Dify 应用 Key 和 DeepSeek API Key 在管理后台配置。
+2. 创建数据库结构：`npm run db:migrate`（自动读取项目根目录的 `.env.local` / `.env`，终端已有的环境变量优先）
 3. 临时设置 `EDULAB_ADMIN_PASSWORD`，创建管理员：`npm run admin:create -- researcher`
 4. 删除临时的 `EDULAB_ADMIN_PASSWORD`，启动项目：`npm run dev`
-5. 打开 `/admin` 配置实验，在“智能体与入口”中创建分组入口，复制信息和链接发给学生。
+5. 打开 `/admin` 配置实验，在“模型与入口”中创建分组入口，复制信息和链接发给学生。
 
 学生使用各组链接进入，先填写基本信息，提交后才生成 Participant ID，不需要研究者逐人制作链接。不同实验和智能体使用后台生成的分组链接。历史首页签名编号链接不再作为报名入口，打开后只显示链接提示；既有记录仍保留，可在后台查看和导出。
 
@@ -36,6 +37,18 @@ EduLab 是一个面向教育实验研究的轻量 AI 智能体交互平台。教
 智能体必须发布到 API 渠道。国际版通常使用 `https://api.coze.com`，中国区使用与你的 Coze 账号和 Token 匹配的官方 API 地址。管理员可以在“智能体与入口”中保存多个 Bot ID；每个智能体可使用自己的加密 Token，没有单独填写时仍可使用服务器环境变量中的 `COZE_API_TOKEN`。EduLab 使用同一个 `conversation_id` 和稳定的会话级 `user_id` 维持多轮上下文。
 
 实现依据：[Coze Chat v3](https://www.coze.com/open/docs/developer_guides/chat_v3)、[Retrieve chat](https://www.coze.com/open/docs/developer_guides/retrieve_chat)、[Personal Access Token](https://www.coze.com/open/docs/developer_guides/pat) 和 [Coze 官方 JavaScript SDK](https://github.com/coze-dev/coze-js)。
+
+## DeepSeek 大模型直连
+
+先应用 `0019_deepseek_direct.sql`（`npm run db:migrate`，自动读取 `.env.local` 中的目标 `DATABASE_URL`，也可由环境变量提供）。进入 `/admin` → **模型与入口** → **DeepSeek 大模型直连** → **新增直连配置**，填写名称和 DeepSeek API Key。默认 API 地址为 `https://api.deepseek.com`，模型预填 `deepseek-flash`，也可选 `deepseek-v4-pro` 或手动填写服务支持的模型名称。
+
+系统提示词用于设置角色、语气、引导方式和回答格式；支持“耐心引导 / 严谨分析 / 创意启发”预设，选中后可继续编辑。温度范围 0–2，支持最大输出 Token 数和深度思考开关。思考模式下温度不生效，Token 上限包含思考消耗，学生仅看到最终回答。模型和参数依据 [DeepSeek 官方 Chat Completions 文档](https://api-docs.deepseek.com/api/create-chat-completion/)；可通过手动模型名适配后续变更。
+
+保存后可单独点击“测试连通”（会调用模型并消耗额度），然后用该配置创建固定、随机或名单分组。不同输出风格请保存为不同配置。DeepSeek 多轮上下文由本项目维护，需要在“数据保存”中开启数据库消息保存；不开启时不能创建直连分组或发送直连消息。API Key 在服务端加密保存，留空可保留原 Key。系统提示词和参数随会话快照固定；开放入口或已有实验记录的配置只允许更新 Key，更换风格请新增配置与入口。
+
+流中断不会将部分回答保存为完整回复，也不会自动重新请求模型。完整回复先持久化检查点，再以事务保存消息并完成请求，刷新可恢复已确认的结果。无法确认的请求会保留核验提示，避免重复消费额度。默认单次调用最多等待 110 秒。
+
+新增测试：`node --test tests/deepseek.test.mjs`。可对已迁移的测试 PostgreSQL 设置 `DEEPSEEK_TEST_DATABASE_URL`，执行 `node --test tests/deepseek.integration.test.mjs`；测试使用合成数据，所有写入最终回滚，不调用真实模型。
 
 ## Dify 配置
 

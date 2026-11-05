@@ -160,6 +160,7 @@ export async function POST(request: Request) {
       }
       if(rosterEntryId) await client.query("UPDATE roster_entries SET participant_id=$2 WHERE id=$1",[rosterEntryId,participantId]);
       const assignedAgent = await assignAgentWithClient(client, experimentId, participantId, entry?.runId);
+      if (assignedAgent.provider === "deepseek" && !baseSnapshot.storage.databaseMessagesEnabled) throw new ApiError(409, "DIRECT_MODEL_STORAGE_REQUIRED", "此分组未开启数据库消息保存，无法使用 DeepSeek 多轮对话，请联系教师重新创建入口。");
       const snapshot = {
         ...baseSnapshot,
         ai: {
@@ -169,6 +170,7 @@ export async function POST(request: Request) {
           agentId: assignedAgent.agentId,
           runId: assignedAgent.runId,
           internalName: assignedAgent.internalName,
+          ...(assignedAgent.directModel ? { directModel: assignedAgent.directModel } : {}),
         },
       };
       await client.query(

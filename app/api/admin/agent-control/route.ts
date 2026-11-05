@@ -5,6 +5,7 @@ import { activateExperimentRun, closeActiveExperimentRun, deleteAgentConfig, del
 import { assertSameOrigin, getAuthenticatedAdmin } from "@/lib/admin-auth";
 import { formatAgentTestFailure } from "@/lib/agent-test-error";
 import { testCozeConnection } from "@/lib/coze";
+import { testDeepSeekConnection } from "@/lib/deepseek";
 import { testDifyConnection } from "@/lib/dify";
 import { ApiError, errorResponse } from "@/lib/http";
 
@@ -14,12 +15,20 @@ const httpsUrl = z.url().refine((value) => {
 }, "API 地址必须使用 HTTPS");
 
 const connectionSchema = z.object({
-  id: z.uuid().optional(), provider: z.enum(["coze", "dify"]).default("coze"),
+  id: z.uuid().optional(), provider: z.enum(["coze", "dify", "deepseek"]).default("coze"),
   baseUrl: httpsUrl, botId: z.string().trim().max(200).default(""),
   token: z.string().trim().max(2000).optional(),
+  directModel: z.object({
+    model: z.string().trim().min(1).max(200),
+    systemPrompt: z.string().max(30000),
+    temperature: z.number().min(0).max(2),
+    maxTokens: z.number().int().min(1).max(65536),
+    thinking: z.boolean(),
+  }).optional(),
 });
 const validateProvider = (agent: z.infer<typeof connectionSchema>, ctx: z.RefinementCtx) => {
   if (agent.provider === "coze" && !agent.botId) ctx.addIssue({ code: "custom", path: ["botId"], message: "Coze 需要 Bot ID。" });
+  if (agent.provider === "deepseek" && !agent.directModel) ctx.addIssue({ code: "custom", path: ["directModel"], message: "请填写模型和输出设置。" });
   const url = new URL(agent.baseUrl);
   if (url.username || url.password || url.search || url.hash) ctx.addIssue({ code: "custom", path: ["baseUrl"], message: "API Base URL 不能包含账号、查询参数或片段。" });
 };
@@ -59,8 +68,9 @@ const deleteSchema = z.object({
 
 function controlError(error: unknown) {
   const message = error instanceof Error ? error.message : "";
+  if (message === "DIRECT_MODEL_STORAGE_REQUIRED") return new ApiError(400, message, "DeepSeek 多轮对话需要保存上下文，请先在数据保存设置中开启数据库消息保存，再创建入口。");
   if (message === "AGENT_NOT_FOUND") return new ApiError(404, message, "找不到这个智能体配置。");
-  if (message === "DIFY_KEY_NOT_CONFIGURED" || message === "PROVIDER_KEY_REQUIRED") return new ApiError(400, message, "请为选定的提供商输入新的 API Key。Dify 不会使用 Coze Token。");
+  if (message === "DIFY_KEY_NOT_CONFIGURED" || message === "PROVIDER_KEY_REQUIRED") return new ApiError(400, message, "请为选定的服务输入新的 API Key，不同服务之间不会共用密钥。");
   if (message === "AGENT_TOKEN_DECRYPT_FAILED") return new ApiError(409, message, "数据库中的 Token 无法解密。请确认本地与 Vercel 的 SETTINGS_ENCRYPTION_KEY 一致且未更换；也可重新输入 Token 并保存。");
   if (message === "ACTIVE_AGENT_LOCKED") return new ApiError(409, message, "开放入口正在使用这个智能体，目前仅允许更新 API Key。修改其他配置请先停止报名；已有实验记录时请新增智能体与入口。");
   if (message === "AGENT_RECORDS_LOCKED") return new ApiError(409, message, "这个智能体或其分组已有关联实验记录，仅允许更新 API Key，停止报名或删除链接后也不能修改其他配置。更换智能体请新增配置与入口。");
@@ -96,7 +106,8 @@ export async function POST(request: Request) {
     if (input.data.action === "test_agent") {
       const connection = await resolveAgentTestConnection({ ...input.data.agent, experimentId: experimentId });
       try {
-        if (connection.provider === "dify") await testDifyConnection({ ...connection, timeoutMs: 20_000 });
+        if (connection.provider === "deepseek") await testDeepSeekConnection({ ...connection, timeoutMs: 20_000 });
+        else if (connection.provider === "dify") await testDifyConnection({ ...connection, timeoutMs: 20_000 });
         else await testCozeConnection({ ...connection, timeoutMs: 20_000 });
       } catch (error) {
         const upstream = error as { status?: number; code?: string };
@@ -110,11 +121,12 @@ export async function POST(request: Request) {
       if (input.data.testAfterSave) {
         // Read back the committed credential: never test the submitted draft here.
         const connection = await resolveAgentTestConnection({
-          id: saved.id, experimentId: experimentId, provider: saved.provider, baseUrl: saved.baseUrl, botId: saved.botId,
+          id: saved.id, experimentId: experimentId, provider: saved.provider, baseUrl: saved.baseUrl, botId: saved.botId, directModel: saved.directModel,
         });
         let test;
         try {
-          if (connection.provider === "dify") await testDifyConnection({ ...connection, timeoutMs: 20_000 });
+          if (connection.provider === "deepseek") await testDeepSeekConnection({ ...connection, timeoutMs: 20_000 });
+          else if (connection.provider === "dify") await testDifyConnection({ ...connection, timeoutMs: 20_000 });
           else await testCozeConnection({ ...connection, timeoutMs: 20_000 });
           test = { ok: true, message: "配置已保存，数据库 API Key 连接成功。" };
         } catch (error) {

@@ -15,7 +15,7 @@ export interface StoredMessage {
   clientRequestId: string | null;
   cozeMessageId: string | null;
   cozeChatId: string | null;
-  provider?: "coze" | "dify";
+  provider?: "coze" | "dify" | "deepseek";
   providerMessageId?: string | null;
   providerTaskId?: string | null;
   status: "completed";

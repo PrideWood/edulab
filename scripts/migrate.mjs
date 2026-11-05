@@ -2,9 +2,12 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import pg from "pg";
+import nextEnv from "@next/env";
+
+nextEnv.loadEnvConfig(process.cwd());
 
 const connectionString = process.env.DATABASE_URL;
-if (!connectionString) throw new Error("DATABASE_URL is required");
+if (!connectionString) throw new Error("DATABASE_URL is required. 请在项目根目录的 .env.local 中配置 DATABASE_URL，或通过环境变量提供。");
 
 const client = new pg.Client({
   connectionString,

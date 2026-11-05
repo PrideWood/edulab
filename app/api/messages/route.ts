@@ -11,6 +11,7 @@ import { assertSessionCanSend, getSessionControls } from "@/lib/experiment-limit
 import { assertSameOrigin } from "@/lib/admin-auth";
 import { importLegacyRuntime } from "@/lib/legacy-runtime";
 import { getSessionDraft } from "@/lib/session-draft";
+import { createDeepSeekChatResponse } from "@/lib/deepseek-chat";
 import { createDifyChatResponse } from "@/lib/dify-chat";
 
 export const runtime = "nodejs";
@@ -56,6 +57,10 @@ export async function POST(request: Request) {
     const state = await assertSessionCanSend(session, input.data.content);
     const databaseMessagesEnabled = state.controls.databaseMessagesEnabled;
 
+    if (session.configSnapshot?.ai.provider === "deepseek" && !databaseMessagesEnabled) {
+      throw new ApiError(409, "DIRECT_MODEL_STORAGE_REQUIRED", "DeepSeek 多轮对话需要保存上下文，请联系教师开启数据库消息保存后创建新入口。");
+    }
+
     let begun;
     try { begun = await beginChatRequest(session, input.data.clientRequestId, input.data.content, databaseMessagesEnabled); }
     catch (error) {
@@ -73,6 +78,12 @@ export async function POST(request: Request) {
       if (begun.request.status === "failed" || begun.request.status === "uncertain") throw new ApiError(409, "REQUEST_FAILED", "这次发送未完成，请使用重试按钮重新发送。");
       const recovery = await recoverPendingRequest(session);
       return NextResponse.json(await responsePayload(session, recovery.pending, recovery.messages, begun.request.cozeConversationId), { status: recovery.pending ? 202 : 200 });
+    }
+
+    if (session.configSnapshot?.ai.provider === "deepseek") {
+      const activeSession = session;
+      return createDeepSeekChatResponse(activeSession, begun.request, begun.providerContent ?? input.data.content,
+        messages => responsePayload(activeSession, false, messages));
     }
 
     if (session.configSnapshot?.ai.provider === "dify") {

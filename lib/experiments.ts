@@ -49,8 +49,8 @@ export async function createExperiment(name: string, sourceId: string, adminId: 
     if (!copied.rowCount) throw new ApiError(409, "EXPERIMENT_SETTINGS_MISSING", "来源实验尚未保存配置，请先保存后重试。");
     const agents = await client.query<{ id: string }>("SELECT id FROM ai_agent_configs WHERE experiment_id=$1", [sourceId]);
     for (const agent of agents.rows) await client.query(`INSERT INTO ai_agent_configs (id,experiment_id,internal_name,
-      provider,coze_api_base_url,coze_bot_id,coze_token_ciphertext,coze_token_iv,coze_token_tag,enabled,updated_by)
-      SELECT $1,$2,internal_name,provider,coze_api_base_url,coze_bot_id,coze_token_ciphertext,coze_token_iv,coze_token_tag,enabled,$3
+      provider,direct_model,coze_api_base_url,coze_bot_id,coze_token_ciphertext,coze_token_iv,coze_token_tag,enabled,updated_by)
+      SELECT $1,$2,internal_name,provider,direct_model,coze_api_base_url,coze_bot_id,coze_token_ciphertext,coze_token_iv,coze_token_tag,enabled,$3
       FROM ai_agent_configs WHERE id=$4`, [randomUUID(),id,adminId,agent.id]);
     await client.query(`INSERT INTO admin_audit_log (id,admin_user_id,action,experiment_id,after_data)
       VALUES ($1,$2,'experiment.create',$3,$4::jsonb)`, [randomUUID(),adminId,id,JSON.stringify({ name,sourceId })]);

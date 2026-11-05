@@ -498,6 +498,10 @@ async function loadUnstoredRequestMessages(session: AuthenticatedSession, reques
 }
 
 export async function getUnstoredCompletedRequestMessages(session: AuthenticatedSession, request: RequestRecord) {
+  if (session.configSnapshot?.ai.provider === "deepseek") {
+    const { getDeepSeekCompletedRequestMessages } = await import("./deepseek-chat");
+    return getDeepSeekCompletedRequestMessages(session, request);
+  }
   if (session.configSnapshot?.ai.provider === "dify") {
     const { getDifyCompletedRequestMessages } = await import("./dify-chat");
     return getDifyCompletedRequestMessages(session, request);
@@ -516,6 +520,10 @@ export async function markRequestFailed(sessionId: string, requestId: string, co
 }
 
 export async function recoverPendingRequest(session: AuthenticatedSession): Promise<{ pending: boolean; messages: StoredMessage[] }> {
+  if (session.configSnapshot?.ai.provider === "deepseek") {
+    const { recoverDeepSeekPendingRequest } = await import("./deepseek-chat");
+    return recoverDeepSeekPendingRequest(session);
+  }
   if (session.configSnapshot?.ai.provider === "dify") {
     const { recoverDifyPendingRequest } = await import("./dify-chat");
     return recoverDifyPendingRequest(session);

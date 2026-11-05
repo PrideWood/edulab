@@ -1,5 +1,7 @@
 import "server-only";
 
+import type { DirectModelConfig } from "@/lib/direct-model-config";
+
 import { randomUUID } from "node:crypto";
 import { experiment as defaultExperiment, type ExperimentConfig } from "@/config/experiment";
 import { query, transaction } from "@/db";
@@ -28,7 +30,7 @@ export interface ExperimentSessionSnapshot {
   experiment: ExperimentConfig;
   limits: ExperimentLimits;
   storage: { databaseMessagesEnabled: boolean };
-  ai: { provider?: "coze" | "dify"; baseUrl: string; botId: string; agentId?: string; runId?: string; internalName?: string };
+  ai: { provider?: "coze" | "dify" | "deepseek"; baseUrl: string; botId: string; agentId?: string; runId?: string; internalName?: string; directModel?: DirectModelConfig };
   memory?: HistoryMemorySettings;
 }
 
@@ -130,7 +132,7 @@ export function buildSessionSnapshot(settings: ExperimentSettings): ExperimentSe
 
 export async function getRuntimeAiConfig(experimentId: string, snapshot: ExperimentSessionSnapshot | null) {
   if (snapshot?.ai.agentId) {
-    const agents = await query<{ provider?: "coze" | "dify"; coze_token_ciphertext: string | null; coze_token_iv: string | null; coze_token_tag: string | null }>(
+    const agents = await query<{ provider?: "coze" | "dify" | "deepseek"; coze_token_ciphertext: string | null; coze_token_iv: string | null; coze_token_tag: string | null }>(
       `SELECT provider, coze_token_ciphertext, coze_token_iv, coze_token_tag FROM ai_agent_configs WHERE id=$1 AND experiment_id=$2`,
       [snapshot.ai.agentId, experimentId]);
     const agent = agents.rows[0];
@@ -140,10 +142,10 @@ export async function getRuntimeAiConfig(experimentId: string, snapshot: Experim
     const token = agent.coze_token_ciphertext && agent.coze_token_iv && agent.coze_token_tag
       ? decryptSecret({ ciphertext: agent.coze_token_ciphertext, iv: agent.coze_token_iv, tag: agent.coze_token_tag })
       : provider === "coze" ? process.env.COZE_API_TOKEN ?? "" : "";
-    return { provider, token, botId: snapshot.ai.botId, baseUrl: snapshot.ai.baseUrl };
+    return { provider, token, botId: snapshot.ai.botId, baseUrl: snapshot.ai.baseUrl, directModel: snapshot.ai.directModel };
   }
 
-  if (snapshot?.ai.provider === "dify") throw new Error("ASSIGNED_AGENT_NOT_FOUND");
+  if (snapshot?.ai.provider === "dify" || snapshot?.ai.provider === "deepseek") throw new Error("ASSIGNED_AGENT_NOT_FOUND");
   let row: SettingsRow | undefined;
   try { row = (await query<SettingsRow>(SETTINGS_SELECT, [experimentId])).rows[0]; } catch { /* Environment fallback below. */ }
   let token = process.env.COZE_API_TOKEN ?? "";
