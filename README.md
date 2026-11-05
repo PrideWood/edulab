@@ -38,17 +38,19 @@ EduLab 是一个面向教育实验研究的轻量 AI 智能体交互平台。教
 
 实现依据：[Coze Chat v3](https://www.coze.com/open/docs/developer_guides/chat_v3)、[Retrieve chat](https://www.coze.com/open/docs/developer_guides/retrieve_chat)、[Personal Access Token](https://www.coze.com/open/docs/developer_guides/pat) 和 [Coze 官方 JavaScript SDK](https://github.com/coze-dev/coze-js)。
 
-## DeepSeek 大模型直连
+## DeepSeek 共享模型与提示词对比
 
-先应用 `0019_deepseek_direct.sql`（`npm run db:migrate`，自动读取 `.env.local` 中的目标 `DATABASE_URL`，也可由环境变量提供）。进入 `/admin` → **模型与入口** → **DeepSeek 大模型直连** → **新增直连配置**，填写名称和 DeepSeek API Key。默认 API 地址为 `https://api.deepseek.com`，模型预填 `deepseek-flash`，也可选 `deepseek-v4-pro` 或手动填写服务支持的模型名称。
+应用迁移至 `0020_shared_deepseek_model.sql`（`npm run db:migrate` 会自动读取 `.env.local`）。进入 `/admin` → **模型与入口** → **DeepSeek 提示词工作台**。展开默认折叠的“共享模型设置”，填写一次 API Key、模型和 API 地址；所有实验的新提示词风格共用该连接，无需重复填写。模型默认 `deepseek-flash`，可选 `deepseek-v4-pro` 或手动输入服务支持的模型名。温度、最大输出 Token 和深度思考在“高级输出参数”中调整，对比的所有组保持一致；思考模式下温度不生效。
 
-系统提示词用于设置角色、语气、引导方式和回答格式；支持“耐心引导 / 严谨分析 / 创意启发”预设，选中后可继续编辑。温度范围 0–2，支持最大输出 Token 数和深度思考开关。思考模式下温度不生效，Token 上限包含思考消耗，学生仅看到最终回答。模型和参数依据 [DeepSeek 官方 Chat Completions 文档](https://api-docs.deepseek.com/api/create-chat-completion/)；可通过手动模型名适配后续变更。
+在“实验提示词风格”中为不同输出风格分别填写名称、系统提示词，或从耐心引导、严谨分析、创意启发预设开始编辑。保存后可创建固定、随机或名单分组。开放入口或已有记录的提示词保持锁定，可复制为新风格继续修改。多轮对话需要开启数据库消息保存。
 
-保存后可单独点击“测试连通”（会调用模型并消耗额度），然后用该配置创建固定、随机或名单分组。不同输出风格请保存为不同配置。DeepSeek 多轮上下文由本项目维护，需要在“数据保存”中开启数据库消息保存；不开启时不能创建直连分组或发送直连消息。API Key 在服务端加密保存，留空可保留原 Key。系统提示词和参数随会话快照固定；开放入口或已有实验记录的配置只允许更新 Key，更换风格请新增配置与入口。
+“同一问题，对比不同系统提示词”支持 2–4 组，可载入已有风格或预设，也可直接编辑测试提示词。输入一次统一问题并点击开始，系统为每组发起一次独立模型请求，使用同一份共享模型、Key 和输出参数，仅系统提示词不同。回答流式并排展示；单组失败不影响其他组，可停止测试。每次测试会消耗相应组数的调用额度；提示词和回答只显示在当前页面，不写入学生实验记录。结果保留本次模型参数、问题和提示词快照，后续编辑不会更改已显示结果的含义。
 
-流中断不会将部分回答保存为完整回复，也不会自动重新请求模型。完整回复先持久化检查点，再以事务保存消息并完成请求，刷新可恢复已确认的结果。无法确认的请求会保留核验提示，避免重复消费额度。默认单次调用最多等待 110 秒。
+迁移会把最近一次已保存的 DeepSeek Key 和模型复制为共享设置，无需重新输入。旧版独立配置及既有会话保持原样；未锁定的旧风格保存后改用共享模型，已锁定的可复制为新共享风格。共享模型或参数变更用于新加入的共享风格会话与后续测试，已有会话保留模型快照；共享 Key 更新用于所有共享风格会话。旧版独立会话继续使用原独立凭证。
 
-新增测试：`node --test tests/deepseek.test.mjs`。可对已迁移的测试 PostgreSQL 设置 `DEEPSEEK_TEST_DATABASE_URL`，执行 `node --test tests/deepseek.integration.test.mjs`；测试使用合成数据，所有写入最终回滚，不调用真实模型。
+Key 始终在服务端加密保存，不会回显。流中断不会把部分回答保存为完整实验回复，也不会自动重新请求模型；已持久化的完整回复可幂等恢复。默认单次调用最多等待 110 秒。接口依据 [DeepSeek 官方 Chat Completions 文档](https://api-docs.deepseek.com/api/create-chat-completion/)。
+
+测试：`node --test tests/deepseek.test.mjs tests/model-workbench.test.mjs`；设置已迁移的测试库 `DEEPSEEK_TEST_DATABASE_URL` 可执行 `tests/deepseek.integration.test.mjs`，验证共享密钥、模型快照、轮换和回复恢复，合成记录最终回滚，不调用真实模型。
 
 ## Dify 配置
 

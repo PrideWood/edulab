@@ -12,7 +12,7 @@ import { formatAgentTestFailure } from '../lib/agent-test-error.js';
 // Run actual application SQL against a disposable, uniquely named schema.
 // Every connection explicitly uses ONLY that schema; no public table is touched.
 async function harness(db, sharedSources) {
-  const files = ['config/experiment.ts', 'lib/security.ts', 'lib/secret-crypto.ts',
+  const files = ['config/experiment.ts', 'lib/security.ts', 'lib/secret-crypto.ts', 'lib/shared-model.ts', 'lib/direct-model-config.ts',
     'lib/session.ts', 'lib/session-usage.ts', 'lib/session-write.ts', 'lib/session-memory.ts', 'lib/http.ts', 'lib/admin-auth.ts',
     'lib/participant-profile.ts', 'lib/participant-code-allocation.ts', 'lib/agent-control.ts', 'lib/roster.ts', 'lib/roster-allocation.ts', 'app/api/admin/rosters/route.ts',
     'lib/experiment-settings.ts', 'lib/experiment-limits.ts', 'lib/messages.ts', 'lib/coze.ts',

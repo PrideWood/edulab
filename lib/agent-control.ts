@@ -2,6 +2,7 @@ import "server-only";
 
 import type { DirectModelConfig } from "@/lib/direct-model-config";
 
+import { getSharedModelConnection } from "@/lib/shared-model";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { query, transaction } from "@/db";
@@ -84,8 +85,8 @@ function mapAgent(row: AgentRow): AgentConfigSummary {
     provider: row.provider ?? "coze",
     botId: row.coze_bot_id ?? "",
     ...(row.direct_model ? { directModel: row.direct_model } : {}),
-    hasToken: Boolean(row.coze_token_ciphertext || ((row.provider ?? "coze") === "coze" && process.env.COZE_API_TOKEN)),
-    tokenSource: row.coze_token_ciphertext ? "database" : (row.provider ?? "coze") === "coze" && process.env.COZE_API_TOKEN ? "environment" : "missing",
+    hasToken: Boolean(row.direct_model?.useSharedConnection || row.coze_token_ciphertext || ((row.provider ?? "coze") === "coze" && process.env.COZE_API_TOKEN)),
+    tokenSource: row.direct_model?.useSharedConnection || row.coze_token_ciphertext ? "database" : (row.provider ?? "coze") === "coze" && process.env.COZE_API_TOKEN ? "environment" : "missing",
     enabled: row.enabled,
     hasReferences: Boolean(row.has_references),
     hasExperimentRecords: Boolean(row.has_experiment_records),
@@ -272,6 +273,11 @@ export async function saveAgentConfig(input: {
   token?: string;
   enabled: boolean;
 }, adminUserId: string) {
+  if (input.provider === "deepseek" && input.directModel?.useSharedConnection) {
+    const shared = await getSharedModelConnection();
+    input = { ...input, baseUrl: shared.baseUrl, token: undefined,
+      directModel: { ...input.directModel, ...shared.config } };
+  }
   return transaction(async (client) => {
     const id = input.id ?? randomUUID();
     const current = input.id ? await client.query<AgentRow>(
@@ -303,7 +309,7 @@ export async function saveAgentConfig(input: {
           || input.baseUrl !== previous.coze_api_base_url
           || input.botId !== (previous.coze_bot_id ?? "")
           || input.enabled !== previous.enabled
-          || (provider === "deepseek" && ["model", "systemPrompt", "temperature", "maxTokens", "thinking"].some(key => input.directModel?.[key as keyof DirectModelConfig] !== previous.direct_model?.[key as keyof DirectModelConfig]));
+          || (provider === "deepseek" && ["model", "systemPrompt", "temperature", "maxTokens", "thinking", "useSharedConnection"].some(key => input.directModel?.[key as keyof DirectModelConfig] !== previous.direct_model?.[key as keyof DirectModelConfig]));
         if (configChanged) throw new Error(usage.rows[0]?.has_records ? "AGENT_RECORDS_LOCKED" : "ACTIVE_AGENT_LOCKED");
         if (!input.token?.trim()) return mapAgent(previous);
         const encrypted = encryptSecret(input.token.trim());
@@ -323,10 +329,11 @@ export async function saveAgentConfig(input: {
         return mapAgent(renewed.rows[0]);
       }
     }
+    const shared = provider === "deepseek" && input.directModel?.useSharedConnection;
     const encrypted = input.token?.trim() ? encryptSecret(input.token.trim()) : null;
     const sameProvider = !previous || (previous.provider ?? "coze") === provider;
     if (provider === "coze" && !input.botId.trim()) throw new Error("COZE_BOT_NOT_CONFIGURED");
-    if (!encrypted && (!sameProvider || (!previous?.coze_token_ciphertext && provider !== "coze"))) throw new Error(provider === "dify" ? "DIFY_KEY_NOT_CONFIGURED" : "PROVIDER_KEY_REQUIRED");
+    if (!shared && !encrypted && (!sameProvider || (!previous?.coze_token_ciphertext && provider !== "coze"))) throw new Error(provider === "dify" ? "DIFY_KEY_NOT_CONFIGURED" : "PROVIDER_KEY_REQUIRED");
     if (provider === "deepseek" && !input.directModel?.model.trim()) throw new Error("DIRECT_MODEL_REQUIRED");
     const saved = await client.query<AgentRow>(
       `INSERT INTO ai_agent_configs (
@@ -370,6 +377,11 @@ export async function resolveAgentTestConnection(input: {
   token?: string;
 }) {
   const provider = input.provider ?? "coze";
+  if (provider === "deepseek" && input.directModel?.useSharedConnection) {
+    const shared = await getSharedModelConnection();
+    return { provider, token: shared.token, baseUrl: shared.baseUrl, botId: "",
+      directModel: { ...input.directModel, ...shared.config } };
+  }
   let token = input.token?.trim() ?? "";
   if (!token && input.id) {
     const current = await query<AgentRow>(
@@ -621,12 +633,18 @@ export async function assignAgentWithClient(
   if (!selected) throw new Error("NO_AVAILABLE_AGENT");
   const provider = selected.provider ?? "coze";
   let token = provider === "coze" ? process.env.COZE_API_TOKEN ?? "" : "";
-  if (selected.coze_token_ciphertext && selected.coze_token_iv && selected.coze_token_tag) {
+  if (!selected.direct_model?.useSharedConnection && selected.coze_token_ciphertext && selected.coze_token_iv && selected.coze_token_tag) {
     token = decryptSecret({
       ciphertext: selected.coze_token_ciphertext,
       iv: selected.coze_token_iv,
       tag: selected.coze_token_tag,
     });
+  }
+  if (provider === "deepseek" && selected.direct_model?.useSharedConnection) {
+    const shared = await getSharedModelConnection();
+    token = shared.token;
+    selected.coze_api_base_url = shared.baseUrl;
+    selected.direct_model = { ...selected.direct_model, ...shared.config };
   }
   if (!token) throw new Error(provider !== "coze" ? "PROVIDER_KEY_REQUIRED" : "COZE_TOKEN_NOT_CONFIGURED");
   return {

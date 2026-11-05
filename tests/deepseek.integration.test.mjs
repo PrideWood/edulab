@@ -24,6 +24,9 @@ test('PostgreSQL DeepSeek configs encrypt keys, lock prompts, preserve credentia
     {exports,process:{env:{SETTINGS_ENCRYPTION_KEY:'synthetic-test-encryption-key-at-least-32-chars'}},Buffer,Date,Error,require:name=>modules[name]});return exports;}
   try{
     modules['@/lib/secret-crypto']=await load('lib/secret-crypto.ts');
+    modules['@/lib/direct-model-config']=await load('lib/direct-model-config.ts');
+    modules['@/lib/http']={ApiError:class extends Error{constructor(status,code,message){super(message);this.status=status;this.code=code;}}};
+    modules['@/lib/shared-model']=await load('lib/shared-model.ts');
     modules['@/lib/experiment-settings']={};
     const agents=await load('lib/agent-control.ts');
     const admin=crypto.randomUUID(),participant=crypto.randomUUID(),sessionId=crypto.randomUUID(),requestId=crypto.randomUUID(),cid=crypto.randomUUID();
@@ -60,5 +63,34 @@ test('PostgreSQL DeepSeek configs encrypt keys, lock prompts, preserve credentia
     assert.equal(state.active_request_id,null);assert.equal(state.next_sequence,3);
     const audits=(await query('SELECT after_data FROM admin_audit_log WHERE experiment_id=$1',[draft.experimentId])).rows;
     assert.equal(JSON.stringify(audits).includes(draft.token),false);
+
+    const shared=modules['@/lib/shared-model'];
+    const model={model:'deepseek-flash',temperature:0.5,maxTokens:3000,thinking:false};
+    await shared.saveSharedModel({baseUrl:'https://api.deepseek.com',token:'sk-synthetic-shared-key',config:model},admin);
+    const a=await agents.saveAgentConfig({...draft,internalName:'共享引导',token:undefined,directModel:{...draft.directModel,useSharedConnection:true}},admin);
+    const b=await agents.saveAgentConfig({...draft,internalName:'共享分析',token:undefined,directModel:{...draft.directModel,systemPrompt:'先结论。',useSharedConnection:true}},admin);
+    for(const item of [a,b]){
+      assert.equal(item.hasToken,true);assert.equal(item.directModel.model,model.model);
+      assert.equal((await query('SELECT coze_token_ciphertext FROM ai_agent_configs WHERE id=$1',[item.id])).rows[0].coze_token_ciphertext,null);
+    }
+    assert.equal((await shared.getSharedModelSummary()).hasToken,true);
+    assert.equal(JSON.stringify(await shared.getSharedModelSummary()).includes('sk-synthetic-shared-key'),false);
+    const runtime=await load('lib/experiment-settings.ts');
+    const snapshot={ai:{agentId:a.id,provider:'deepseek',baseUrl:a.baseUrl,botId:'',directModel:a.directModel}};
+    await shared.saveSharedModel({baseUrl:'https://api.deepseek.com',token:'',config:{...model,model:'future-model'}},admin);
+    const existing=await runtime.getRuntimeAiConfig(draft.experimentId,snapshot);
+    assert.equal(existing.token,'sk-synthetic-shared-key');assert.equal(existing.directModel.model,'deepseek-flash');
+    await shared.saveSharedModel({baseUrl:'https://api.deepseek.com',token:'sk-synthetic-new-shared-key',config:{...model,model:'future-model'}},admin);
+    assert.equal((await runtime.getRuntimeAiConfig(draft.experimentId,snapshot)).token,'sk-synthetic-new-shared-key');
+    const sharedRun=crypto.randomUUID();
+    await query("INSERT INTO experiment_runs(id,experiment_id,name,status,assignment_mode,fixed_agent_id,is_default) VALUES ($1,$2,'shared','active','fixed',$3,false)",[sharedRun,draft.experimentId,a.id]);
+    // A converted legacy style can retain old credentials for old snapshots;
+    // shared assignments must never attempt to decrypt those obsolete values.
+    await query("UPDATE ai_agent_configs SET coze_token_ciphertext='obsolete',coze_token_iv='obsolete',coze_token_tag='obsolete' WHERE id=$1",[a.id]);
+    const assignment=await agents.assignAgentWithClient(client,draft.experimentId,participant,sharedRun);
+    assert.equal(assignment.directModel.model,'future-model');assert.equal(assignment.directModel.systemPrompt,a.directModel.systemPrompt);
+    assert.equal(assignment.token,'sk-synthetic-new-shared-key');
+    // Legacy snapshots still use their own credential, unaffected by the global rotation.
+    assert.equal((await runtime.getRuntimeAiConfig(draft.experimentId,{ai:{agentId:saved.id,provider:'deepseek',baseUrl:draft.baseUrl,botId:'',directModel:draft.directModel}})).token,'sk-synthetic-rotated-key');
   }finally{await query('ROLLBACK');await client.end();}
 });

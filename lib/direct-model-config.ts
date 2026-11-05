@@ -1,4 +1,5 @@
 export interface DirectModelConfig {
+  useSharedConnection?: boolean;
   model: string;
   systemPrompt: string;
   temperature: number;

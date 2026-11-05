@@ -489,11 +489,12 @@ function AgentRunSettings({ experimentId, rosterEnabled, onRunsChanged }: { expe
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error?.message ?? "保存失败。");
-      if (!mountedRef.current) return;
+      if (!mountedRef.current) return false;
       setControl(data.control as AgentControl); onRunsChanged(data.control.runs); setAdding(false);
       if (data.test?.ok === false) setError(data.test.message);
       else setStatus(data.test?.message ?? success);
-    } catch (postError) { setError(postError instanceof Error ? postError.message : "保存失败。"); }
+      return true;
+    } catch (postError) { setError(postError instanceof Error ? postError.message : "保存失败。"); return false; }
     finally { setBusy(false); }
   }
 
@@ -567,8 +568,8 @@ function AgentRunSettings({ experimentId, rosterEnabled, onRunsChanged }: { expe
   return <div className="settings-stack agent-run-settings">
     {(error || status) && <p className={error ? "directory-error" : "agent-success"} role={error ? "alert" : "status"}>{error || status}</p>}
 
-    <DirectModelPanel key={control.agents.filter(agent => agent.provider === "deepseek").map(agent => `${agent.id}-${agent.updatedAt}`).join(",")} endpoint={endpoint} agents={control.agents.filter(agent => agent.provider === "deepseek")} activeIds={activeAgentIds} busy={busy}
-      onSave={value => post({ action: "save_agent", agent: value }, `直连配置“${value.internalName}”已保存，可在下方创建分组入口。`)}
+    <DirectModelPanel key={experimentId} endpoint={endpoint} agents={control.agents.filter(agent => agent.provider === "deepseek")} activeIds={activeAgentIds} busy={busy}
+      onSave={value => post({ action: "save_agent", agent: value }, `提示词风格“${value.internalName}”已保存，可在下方创建分组入口。`)}
       onDelete={agent => { const selected = control.agents.find(value => value.id === agent.id); if (selected) { setAgentDeleteError(""); setPendingAgentDelete(selected); } }} />
 
     <section className="settings-card">

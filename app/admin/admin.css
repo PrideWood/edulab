@@ -358,3 +358,20 @@
   .direct-model-item { padding: 14px; }
   .direct-model-form input, .direct-model-form textarea { font-size: 16px; }
 }
+
+.shared-model-settings { border: 1px solid #dce5df; border-radius: 12px; padding: 16px 20px; background: #f5f8f6; margin-bottom: 28px; }
+.shared-model-settings > summary { display: flex; flex-wrap: wrap; gap: 12px; cursor: pointer; }
+.shared-model-settings > summary span { color: #617268; font-size: 13px; }
+.shared-model-fields { border: 0; padding: 0; min-width: 0; }
+.model-advanced { margin: 18px 0; grid-column: 1 / -1; }
+.model-advanced > summary { cursor: pointer; color: #617268; font-size: 13px; margin-bottom: 14px; }
+.model-comparison { margin-bottom: 32px; padding-bottom: 28px; border-bottom: 1px solid #dce5df; }
+.comparison-variants, .comparison-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 18px 0; }
+.comparison-variant, .comparison-result { border: 1px solid #dce5df; border-radius: 12px; padding: 18px; min-width: 0; }
+.comparison-variant label, .comparison-question { display: grid; gap: 8px; margin-bottom: 14px; color: #4e5b54; font-size: 13px; }
+.model-comparison input, .model-comparison select, .model-comparison textarea { width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid #d6dfd9; border-radius: 9px; background: #fbfcfb; color: #223029; font: inherit; }
+.model-comparison textarea { resize: vertical; line-height: 1.7; }
+.comparison-question { margin-top: 20px; }
+.comparison-result h4 { margin: 0 0 8px; overflow-wrap: anywhere; }
+.comparison-answer { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; font-size: 14px; margin-top: 14px; }
+@media (max-width: 800px) { .comparison-variants, .comparison-results { grid-template-columns: minmax(0, 1fr); } }

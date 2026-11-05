@@ -19,6 +19,7 @@ const connectionSchema = z.object({
   baseUrl: httpsUrl, botId: z.string().trim().max(200).default(""),
   token: z.string().trim().max(2000).optional(),
   directModel: z.object({
+    useSharedConnection: z.boolean().optional(),
     model: z.string().trim().min(1).max(200),
     systemPrompt: z.string().max(30000),
     temperature: z.number().min(0).max(2),

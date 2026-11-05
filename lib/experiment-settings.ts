@@ -2,6 +2,7 @@ import "server-only";
 
 import type { DirectModelConfig } from "@/lib/direct-model-config";
 
+import { getSharedModelConnection } from "@/lib/shared-model";
 import { randomUUID } from "node:crypto";
 import { experiment as defaultExperiment, type ExperimentConfig } from "@/config/experiment";
 import { query, transaction } from "@/db";
@@ -139,9 +140,11 @@ export async function getRuntimeAiConfig(experimentId: string, snapshot: Experim
     if (!agent) throw new Error("ASSIGNED_AGENT_NOT_FOUND");
     const provider = snapshot.ai.provider ?? "coze";
     if (provider !== (agent.provider ?? "coze")) throw new Error("ASSIGNED_PROVIDER_MISMATCH");
-    const token = agent.coze_token_ciphertext && agent.coze_token_iv && agent.coze_token_tag
+    const sharedToken = provider === "deepseek" && snapshot.ai.directModel?.useSharedConnection
+      ? (await getSharedModelConnection()).token : "";
+    const token = sharedToken || (agent.coze_token_ciphertext && agent.coze_token_iv && agent.coze_token_tag
       ? decryptSecret({ ciphertext: agent.coze_token_ciphertext, iv: agent.coze_token_iv, tag: agent.coze_token_tag })
-      : provider === "coze" ? process.env.COZE_API_TOKEN ?? "" : "";
+      : provider === "coze" ? process.env.COZE_API_TOKEN ?? "" : "");
     return { provider, token, botId: snapshot.ai.botId, baseUrl: snapshot.ai.baseUrl, directModel: snapshot.ai.directModel };
   }
 
