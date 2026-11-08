@@ -4,7 +4,7 @@ const display={};vm.runInNewContext(await code('lib/sql-study-display.ts'),{expo
 const policy={};vm.runInNewContext(await code('lib/sql-study-policy.ts'),{exports:policy,require:n=>n==='zod'?{z}:n.endsWith('sql-study-display')?display:crypto});const routeSource=await code('app/api/admin/sql-study/route.ts');
 const cfg=JSON.parse(await readFile('lib/sql-study-defaults.json','utf8'));
 class ApiError extends Error{constructor(status,code,message){super(message);this.status=status;this.code=code;}}
-function setup(auth=true,records=[],grades=[]){let writes=0,reads=0;const route={};const control={getSqlDashboard:async()=>{reads++;return {revision:1,config:cfg,records,grades,assignments:[],balance:[]};},getSqlControl:async()=>({config:cfg}),saveSqlControl:async()=>{writes++;return {ok:true};},assignSqlClass:async()=>{writes++;return {assigned:2};},gradeSql:async()=>{writes++;return {ok:true};}};
+function setup(auth=true,records=[],grades=[]){let writes=0,reads=0;const route={};const control={selectSqlTestLesson:async()=>{writes++;return {ok:true};},getSqlDashboard:async()=>{reads++;return {revision:1,config:cfg,records,grades,assignments:[],balance:[]};},getSqlControl:async()=>({config:cfg}),saveSqlControl:async()=>{writes++;return {ok:true};},assignSqlClass:async()=>{writes++;return {assigned:2};},gradeSql:async()=>{writes++;return {ok:true};}};
  const deps={'zod':{z},'@/lib/admin-auth':{getAuthenticatedAdmin:async()=>auth?{id:'admin'}:null,assertSameOrigin:r=>{if(r.headers.get('origin')!==new URL(r.url).origin)throw new ApiError(403,'ORIGIN','invalid');}},'@/lib/http':{ApiError,errorResponse:e=>Response.json({error:{message:e.message}},{status:e.status??500})},'@/lib/sql-study-control':control,'@/lib/sql-study-policy':policy,'@/lib/shared-model':{getSharedModelSummary:async()=>({hasToken:false})},'@/lib/deepseek':{DeepSeekError:class extends Error{}}};
  vm.runInNewContext(routeSource,{exports:route,require:n=>{if(n in deps)return deps[n];throw Error(n);},Response,URL,AbortSignal});
  return {route,reads:()=>reads,writes:()=>writes,post:(body,origin='http://localhost')=>route.POST(new Request('http://localhost/api/admin/sql-study',{method:'POST',headers:{'Content-Type':'application/json',origin},body:JSON.stringify(body)}))};}
@@ -30,4 +30,11 @@ test('choice posttest exports keep ten answers, question snapshots and automatic
  const [headers,row]=combined.trim().replace(/^\uFEFF/,'').split('\r\n').map(parse);
  assert.equal(row[headers.indexOf('第2课_后测总分')],'80');
  assert.equal(row[headers.indexOf('第2课_SQL题1得分')],'');assert.equal(h.writes(),0);
+});
+
+test('test lesson commands require admin, same origin and a valid four-lesson identity payload',async()=>{
+ const body={action:'select_test_lesson',deviceId:'7ee99094-b337-4a64-9c61-acd3ba784321',participantId:'46ec9456-d3c6-4a24-b931-5229027d6211',lesson:3};
+ const denied=setup(false);assert.equal((await denied.post(body)).status,401);assert.equal(denied.writes(),0);
+ const h=setup();assert.equal((await h.post(body,'http://other.test')).status,403);assert.equal((await h.post({...body,lesson:4})).status,400);assert.equal(h.writes(),0);
+ assert.equal((await h.post(body)).status,200);assert.equal(h.writes(),1);
 });

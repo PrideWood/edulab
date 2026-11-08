@@ -380,6 +380,46 @@ class StudyTests(unittest.TestCase):
         finally:server.shutdown();server.server_close()
 
 
+    def test_cloud_test_switch_restores_first_lesson_and_preserves_old_round(self):
+        from unittest.mock import patch,MagicMock
+        pid=self.prepared();self.interact(pid);p=self.s.get(pid)
+        previous=json.loads(encode(p['rounds']));measurements=(p['pretest'],p['meta_pre'],p['group'],p.get('assignment'))
+        # Simulate a pre-four-course archive with its second displayed class active.
+        p.pop('course_order');self.s.save(p)
+        command={'id':'switch-one','device_id':self.s.setting('device'),'participant_id':pid,'lesson':3,'test_identity_verified':True}
+        cfg=self.s.config()
+        for rule in cfg['schedules'][CLASSES[0]].values():rule['mode']='closed'
+        payload={'config':cfg,'revision':12,'assignments':[],'grades':[],'test_lesson_commands':[command]}
+        self.s.connection=lambda:{'source':'edulab-local-bridge','base_url':'http://127.0.0.1:3005/api/sql-local','token':'test-bridge'}
+        response=MagicMock();response.__enter__.return_value.read.return_value=json.dumps(payload).encode()
+        with patch('urllib.request.build_opener') as opener:
+            opener.return_value.open.return_value=response;self.s.sync_cloud_control()
+            p=self.s.get(pid)
+            self.assertEqual(p['rounds'],[]);self.assertEqual(p['course_order'],[3,0,1,2])
+            self.assertEqual(p['test_lesson_history'][0]['rounds'],previous)
+            self.assertEqual((p['pretest'],p['meta_pre'],p['group'],p.get('assignment')),measurements)
+            state=self.s.state(pid);self.assertEqual(state['next_lesson'],3);self.assertEqual(state['unavailable_lessons'],[])
+            self.assertTrue(state['gates']['ai3']['open']);self.assertFalse(state['gates']['ai0']['open'])
+            self.assertNotIn('test_lesson_history',state)
+            self.s.act(pid,'new_round',{});self.s.act(pid,'start_teaching',{})
+            self.assertEqual(self.s.get(pid)['rounds'][0]['group'],'P')
+            self.s.sync_cloud_control()  # Repeated polling must not restart the selected lesson.
+            self.assertEqual(len(self.s.get(pid)['test_lesson_history']),1)
+            self.assertEqual(self.s.get(pid)['rounds'][0]['phase'],'teaching')
+            with self.assertRaises(Problem):self.s.act(pid,'draft',{'round_id':previous[0]['id'],'sql':'stale'})
+            with self.assertRaises(Problem):self.s.chat(pid,{'round_id':previous[0]['id'],'text':'stale'})
+        again=Store(self.tmp.name,clock=lambda:self.clock[0]);self.assertEqual(again.get(pid)['test_lesson_history'][0]['rounds'],previous)
+
+    def test_test_switch_is_device_scoped_verified_and_defers_running_model(self):
+        pid=self.prepared();p=self.s.get(pid)
+        cmd={'id':'switch','device_id':self.s.setting('device'),'participant_id':pid,'lesson':3,'test_identity_verified':True}
+        for bad in [{**cmd,'device_id':'other-device'},{**cmd,'participant_id':'other-student'},{**cmd,'test_identity_verified':False},{**cmd,'lesson':True}]:
+            self.assertFalse(self.s.apply_test_lesson_command(p,bad))
+        self.s.active.add(pid);self.assertFalse(self.s.apply_test_lesson_command(p,cmd));self.s.active.remove(pid)
+        self.assertTrue(self.s.apply_test_lesson_command(p,cmd));self.assertFalse(self.s.apply_test_lesson_command(p,cmd))
+        self.assertEqual(len(p['test_lesson_history']),1)
+
+
 
 class FourLessonTests(unittest.TestCase):
     setUp=StudyTests.setUp

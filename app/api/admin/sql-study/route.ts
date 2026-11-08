@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import {getAuthenticatedAdmin,assertSameOrigin} from '@/lib/admin-auth';
 import {ApiError,errorResponse} from '@/lib/http';
-import {getSqlDashboard,getSqlControl,saveSqlControl,assignSqlClass,gradeSql,assignSqlTest} from '@/lib/sql-study-control';
+import {getSqlDashboard,getSqlControl,saveSqlControl,assignSqlClass,gradeSql,assignSqlTest,selectSqlTestLesson} from '@/lib/sql-study-control';
 import {composeSqlPrompt,toCsv,SQL_LESSON_ORDER,sqlLessonNumber} from '@/lib/sql-study-policy';
 import {getSharedModelConnection,getSharedModelSummary} from '@/lib/shared-model';
 import {runDeepSeekChat,DeepSeekError} from '@/lib/deepseek';
@@ -9,6 +9,7 @@ export const runtime='nodejs';export const maxDuration=120;
 const headers={'Cache-Control':'private, no-store'};
 const input=z.discriminatedUnion('action',[
  z.object({action:z.literal('save'),revision:z.number().int().positive(),config:z.unknown()}),
+ z.object({action:z.literal('select_test_lesson'),deviceId:z.uuid(),participantId:z.uuid(),lesson:z.number().int().min(0).max(3)}),
  z.object({action:z.literal('assign_test'),classCode:z.string(),name:z.string().trim().min(1).max(100),group:z.enum(['L','T'])}),
  z.object({action:z.literal('assign'),classCode:z.string(),includeTests:z.boolean().default(false)}),
  z.object({action:z.literal('grade'),deviceId:z.uuid(),participantId:z.uuid(),lesson:z.number().int().min(0).max(3),scores:z.array(z.number().min(0).max(20)).length(2)}),
@@ -71,6 +72,7 @@ export async function POST(request:Request){try{
  const parsed=input.safeParse(await request.json());if(!parsed.success)throw new ApiError(400,'INVALID_SQL_ACTION','请检查课堂设置或作答评分。');const body=parsed.data;
  if(body.action==='save')return Response.json(await saveSqlControl(body.config,body.revision,admin.id),{headers});
  if(body.action==='assign')return Response.json(await assignSqlClass(body.classCode,body.includeTests,admin.id),{headers});
+ if(body.action==='select_test_lesson')return Response.json(await selectSqlTestLesson(body,admin.id),{headers});
  if(body.action==='assign_test')return Response.json(await assignSqlTest(body.classCode,body.name,body.group,admin.id),{headers});
  if(body.action==='grade')return Response.json(await gradeSql(body,admin.id),{headers});
  const {config}=await getSqlControl();const shared=config.mode==='real'?await getSharedModelConnection():null;

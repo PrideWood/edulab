@@ -7,7 +7,7 @@ async function setup(extra={}){
  state={...state,...extra};
  const context={document:{querySelector:node,querySelectorAll:()=>[]},location:{hash:'',pathname:'/'},history:{replaceState(){}},sessionStorage:{getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,v)},URLSearchParams,Date,JSON,Promise,console,setInterval:(fn,ms)=>timers.push({fn,ms}),setTimeout(){},requestAnimationFrame:fn=>fn(),clearTimeout(){},fetch:async(path,opts)=>{calls.push({path,opts});return {ok:true,json:async()=>path.includes('/api/questions?kind=posttest')?Array.from({length:10},(_,i)=>({text:'单选题'+(i+1),options:['甲','乙','丙','丁']})):path.includes('/api/questions?kind=meta')?Array.from({length:13},(_,i)=>'问卷题'+(i+1)):JSON.parse(JSON.stringify(state))};}};
  vm.runInNewContext(source,context);await new Promise(resolve=>setImmediate(resolve));
- return {node,calls,openQuiz:()=>context.navigate('quiz0'),quizBody:()=>context.quizBody(),saveQuiz:()=>context.saveQuiz(),openPretest:()=>context.navigate('pretest'),openMeta:()=>context.navigate('meta_pre'),openAI:()=>context.navigate('ai0'),poll:()=>timers.find(t=>t.ms===3000).fn(),open:()=>{state.gates.pretest={open:true,reason:'已开放'};}};
+ return {node,calls,change:next=>{state={...state,...next};},openQuiz:()=>context.navigate('quiz0'),quizBody:()=>context.quizBody(),saveQuiz:()=>context.saveQuiz(),openPretest:()=>context.navigate('pretest'),openMeta:()=>context.navigate('meta_pre'),openAI:()=>context.navigate('ai0'),poll:()=>timers.find(t=>t.ms===3000).fn(),open:()=>{state.gates.pretest={open:true,reason:'已开放'};}};
 }
 test('an already logged-in student sees a newly opened pretest without reloading',async()=>{const h=await setup();assert.match(h.node('#app').innerHTML,/data-go="pretest" disabled/);h.open();await h.poll();assert.doesNotMatch(h.node('#app').innerHTML,/data-go="pretest" disabled/);assert.match(h.node('#app').innerHTML,/已开放/);});
 test('manual refresh synchronizes classroom state through the authenticated endpoint',async()=>{const h=await setup();h.open();await h.node('#refresh-classroom').onclick();assert.ok(h.calls.some(c=>c.path==='/api/refresh'&&c.opts.method==='POST'));assert.doesNotMatch(h.node('#app').innerHTML,/data-go="pretest" disabled/);assert.equal(h.node('#toast').textContent,'课堂安排已同步');});
@@ -48,4 +48,17 @@ test('immediate posttest uses ten independent four-option questions and submits 
  const body=h.quizBody();assert.equal(body.answers.length,10);assert.equal(body.answers[0],'A');assert.ok(!('sql_answers' in body));
  await h.saveQuiz();const save=h.calls.find(c=>c.opts?.body?.includes('quiz_draft'));
  assert.equal(JSON.parse(save.opts.body).answers.length,10);assert.ok(!('sql_answers' in JSON.parse(save.opts.body)));
+});
+
+test('a teacher test-lesson switch leaves stale chat and highlights the newly selected first class',async()=>{
+ const tasks=[task,task,task,task];
+ const h=await setup({is_test:true,tasks,course_order:[3,0,1,2],next_lesson:1,has_pretest:true,has_meta_pre:true,group_assigned:true,unavailable_lessons:[3],rounds:[{id:'old',index:0,task,phase:'teaching',teaching_deadline:Date.now()/1000+900,messages:[],requests:[]}]});
+ assert.match(h.node('#app').innerHTML,/保留旧版课堂记录/);await h.openAI();
+ h.change({rounds:[],next_lesson:3,unavailable_lessons:[],test_lesson_revision:'switch-id',gates:{ai3:{open:true,reason:'已开放'}}});
+ await h.poll();
+ const html=h.node('#app').innerHTML;
+ assert.match(html,/data-lesson="3" open/);assert.match(html,/data-go="ai3"\s*>进入/);
+ assert.doesNotMatch(html,/id="chat-form"/);
+ const first=html.slice(html.indexOf('data-lesson="3"'),html.indexOf('data-lesson="0"'));
+ assert.match(first,/当前课堂/);
 });

@@ -89,9 +89,25 @@ def install(Base, Problem, encode, stamp):
                         q=round_record.get('quiz') if round_record else None
                         if not q or q.get('format')=='single_choice' or 'sql_answers' not in q or q.get('cloud_graded_at')==grade['updated_at'] or q.get('mcq_score') is None:continue
                         scores=grade['scores'];q.update(sql_scores=scores,sql_score=sum(scores),score=round(q['mcq_score']+sum(scores),2),grading='teacher_graded',graded_at=grade['updated_at'],cloud_graded_at=grade['updated_at']);changed=True
+                    for command in payload.get('test_lesson_commands',[]):
+                        if self.apply_test_lesson_command(p,command):changed=True
                     if changed:p['control_revision']=revision;self.save(p)
                 self.remote_time_offset=payload.get('server_now',self.clock())-self.clock()
                 self.last_control_sync=time.monotonic();self.control_sync_error=None
+            return True
+
+        def apply_test_lesson_command(self,p,command):
+            if command.get('test_identity_verified') is not True or command.get('device_id')!=self.setting('device') or command.get('participant_id')!=p['id']:
+                return False
+            lesson=command.get('lesson')
+            if type(lesson)!=int or lesson not in COURSE_ORDER or not isinstance(command.get('id'),str):return False
+            if p.get('test_lesson_control',{}).get('id')==command['id'] or p['id'] in self.active:return False
+            p.setdefault('test_lesson_history',[]).append({'switched_at':stamp(),'command_id':command['id'],
+                'course_order':list(course_order(p)),'rounds':copy.deepcopy(p['rounds'])})
+            p['rounds']=[]
+            p['course_order']=[lesson]+[i for i in COURSE_ORDER if i!=lesson]
+            p['test_lesson_control']={'id':command['id'],'lesson':lesson,'applied_at':stamp()}
+            self.event(p,'test_lesson_selected',lesson=lesson,command_id=command['id'])
             return True
 
         def put_config(self,cfg):
@@ -120,6 +136,9 @@ def install(Base, Problem, encode, stamp):
             if key=='meta_post' and (next_lesson(p) is not None or not p['rounds'] or p['rounds'][-1]['phase']!='done'):return {'open':False,'reason':'请先完成全部课程任务和后测'}
             if self.cloud_managed and (self.last_control_sync is None or time.monotonic()-self.last_control_sync>120): return {'open':False,'reason':'等待教师课堂安排同步'}
             rule=self.config()['schedules'].get(p['class_code'],{}).get(key,{'mode':'closed'})
+            selection=p.get('test_lesson_control')
+            if selection and key in [stage+str(selection['lesson']) for stage in ('ai','practice','posttest')]:
+                rule={'mode':'auto' if key.startswith('practice') else 'open'}
             now=self.clock()+self.remote_time_offset; mode=rule.get('mode','closed')
             if mode=='auto' and key.startswith('practice'):
                 i=int(key[-1]);r=next((r for r in p['rounds'] if r['index']==i),None)
@@ -159,6 +178,8 @@ def install(Base, Problem, encode, stamp):
         def public(self,p):
             out=super().public(p)
             out.pop('code',None);out['name']=p.get('name',p['code'])
+            out['is_test']=bool(p.get('test_lesson_control')) or p.get('name','').strip().lower() in ('test','测试','ceshi')
+            out['test_lesson_revision']=p.get('test_lesson_control',{}).get('id')
             out['measurement_drafts']=p.get('measurement_drafts',{})
             out['meta_spec']=self.bank['meta_spec']
             out['gates']={k:self.gate(p,k) for k in self.config()['schedules'].get(p['class_code'],{})}
@@ -174,6 +195,7 @@ def install(Base, Problem, encode, stamp):
         def act(self,pid,action,data):
             with self.lock:
                 p=self.get(pid)
+                if data.get('round_id') and (not p['rounds'] or p['rounds'][-1]['id']!=data['round_id']):raise Problem('课堂已切换，请返回课堂任务。',409)
                 if action=='measurement_draft':
                     kind=data.get('kind');values=data.get('answers')
                     if kind not in ('meta_pre','meta_post'):raise Problem('问卷类型无效。')
@@ -246,9 +268,11 @@ def install(Base, Problem, encode, stamp):
             return changed
 
         def chat(self,pid,body):
-            p=self.get(pid)
-            if p['rounds']: self.require_gate(p,'ai'+str(p['rounds'][-1]['index']))
-            return super().chat(pid,body)
+            with self.lock:
+                p=self.get(pid)
+                if body.get('round_id') and (not p['rounds'] or p['rounds'][-1]['id']!=body['round_id']):raise Problem('课堂已切换，请返回课堂任务。',409)
+                if p['rounds']: self.require_gate(p,'ai'+str(p['rounds'][-1]['index']))
+                return super().chat(pid,body)
 
         def archive(self,pid):
             out=super().archive(pid);p=self.get(pid)
