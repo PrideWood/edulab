@@ -88,3 +88,11 @@ test('JSON mode and image content are forwarded only when requested',async()=>{
   assert.equal(body.response_format.type,'json_object');assert.deepEqual(body.messages.at(-1),messages[0]);
   await api.runDeepSeekChat({...input});assert.equal(body.response_format,undefined);
 });
+
+test('a normally finished blank JSON response is distinct from an interrupted generation',async()=>{
+ let events=[chunk({content:'   '}),chunk({},'stop'),'[DONE]'];
+ const api=await load('lib/deepseek.ts',{'@/lib/sse':sse},{fetch:async()=>stream(events)});
+ await assert.rejects(()=>api.runDeepSeekChat({...input,jsonOutput:true}),e=>e.code==='EMPTY_ANSWER'&&e.definitive);
+ events=[chunk({content:'{"reply":"部分'})];
+ await assert.rejects(()=>api.runDeepSeekChat({...input,jsonOutput:true}),e=>e.code==='STREAM_INTERRUPTED');
+});

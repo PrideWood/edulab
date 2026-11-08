@@ -420,6 +420,21 @@ class StudyTests(unittest.TestCase):
         self.assertEqual(len(p['test_lesson_history']),1)
 
 
+    def test_model_bridge_failure_retains_safe_diagnostics_and_separates_billing_from_empty(self):
+        import io
+        from unittest.mock import patch,MagicMock
+        pid=self.prepared();r=self.s.get(pid)['rounds'][-1];r['config']['mode']='real';r['requests']=[{'turn_index':1}]
+        self.s.connection=lambda:{'base_url':'http://127.0.0.1:3005/api/sql-local','source':'edulab-local-bridge','token':'synthetic-token','model':'deepseek-flash'}
+        for status,code,expected in [(502,'EMPTY_ANSWER','空内容'),(402,'DEEPSEEK_HTTP_402','余额不足'),(429,'DEEPSEEK_HTTP_429','并发限制')]:
+            error=urllib.error.HTTPError('http://127.0.0.1',status,'synthetic',{},io.BytesIO(encode({'code':code,'error':'SECRET_MUST_NOT_LEAK','attempts':3,'elapsed_ms':900}).encode()))
+            with patch('server.urllib.request.build_opener') as opener:
+                opener.return_value.open.side_effect=error
+                with self.assertRaises(Problem) as caught:self.s.infer(r)
+                self.assertIn(expected,str(caught.exception));self.assertNotIn('SECRET_MUST_NOT_LEAK',str(caught.exception))
+                self.assertEqual(caught.exception.code,code);self.assertEqual(caught.exception.diagnostics['attempts'],3)
+                self.assertEqual(opener.return_value.open.call_args.kwargs['timeout'],110)
+
+
 
 class FourLessonTests(unittest.TestCase):
     setUp=StudyTests.setUp

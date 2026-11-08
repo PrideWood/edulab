@@ -67,7 +67,8 @@ export async function runDeepSeekChat(input: {
       finished = true;
     }
   }
-  if (!finished || !answer.trim()) throw new DeepSeekError("STREAM_INTERRUPTED", "模型回复中断或为空，请核对请求结果。");
+  if (!finished) throw new DeepSeekError("STREAM_INTERRUPTED", "模型回复中断，请核对请求结果。");
+  if (!answer.trim()) throw new DeepSeekError("EMPTY_ANSWER", "模型已结束生成，但返回了空内容。", 502, true);
   return { answer, messageId, replyStartedAt, completedAt: new Date().toISOString() };
 }
 
