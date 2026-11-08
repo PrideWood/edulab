@@ -1,6 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {readFile} from 'node:fs/promises';import ts from 'typescript';import vm from 'node:vm';import {z} from 'zod';import * as crypto from 'node:crypto';
 const source=ts.transpileModule(await readFile('lib/sql-study-policy.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
-const exports={};vm.runInNewContext(source,{exports,require:n=>n==='zod'?{z}:crypto});const p=exports;
+const display={};vm.runInNewContext(ts.transpileModule(await readFile('lib/sql-study-display.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports:display});
+const exports={};vm.runInNewContext(source,{exports,require:n=>n==='zod'?{z}:n.endsWith('sql-study-display')?display:crypto});const p=exports;
 const cfg=JSON.parse(await readFile('lib/sql-study-defaults.json','utf8'));
 test('SQL classes use nearby pretest pairs with balanced group counts and dispersion',()=>{
  const people=Array.from({length:24},(_,i)=>({name:'S'+i,score:Math.floor(i/2)*5}));let seed=81;const result=p.matchedAssignment(people,m=>{seed=(seed*16807)%2147483647;return seed%m;});
@@ -23,7 +24,24 @@ test('backup is always on, minute values fit an 80-minute class, and only practi
  const good=structuredClone(cfg);good.schedules['计网2541'].practice0.mode='auto';assert.equal(p.controlSchema.safeParse(good).success,true);
 });
 
-test('version summaries describe changed lesson content instead of only showing counters',()=>{const next=structuredClone(cfg);next.tasks[0].checks[0]+=' 新检查';next.prompts.common+=' 自然学生语气';const summary=Array.from(p.summarizeSqlChanges(cfg,next));assert.ok(summary.includes('第1课检查点'));assert.ok(summary.includes('更新通用学徒规则与表达方式'));});
-test('classroom controls are ordered by measurement and lesson, with each lesson kept together',async()=>{const exports={};vm.runInNewContext(ts.transpileModule(await readFile('lib/sql-study-display.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports});const groups=exports.classroomScheduleGroups();assert.deepEqual(Array.from(groups[1].keys),['ai0','practice0','posttest0']);assert.deepEqual(Array.from(groups[2].keys),['ai1','practice1','posttest1']);assert.equal(groups.flatMap(x=>x.keys).length,12);});
+test('version summaries describe changed lesson content instead of only showing counters',()=>{const next=structuredClone(cfg);next.tasks[0].checks[0]+=' 新检查';next.prompts.common+=' 自然学生语气';const summary=Array.from(p.summarizeSqlChanges(cfg,next));assert.ok(summary.includes('第2课检查点'));assert.ok(summary.includes('更新通用学徒规则与表达方式'));});
+test('classroom controls are ordered by measurement and lesson, with each lesson kept together',async()=>{const exports={};vm.runInNewContext(ts.transpileModule(await readFile('lib/sql-study-display.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports});const groups=exports.classroomScheduleGroups();assert.deepEqual(Array.from(groups[1].keys),['ai3','practice3','posttest3']);assert.deepEqual(Array.from(groups[2].keys),['ai0','practice0','posttest0']);assert.equal(groups.flatMap(x=>x.keys).length,15);});
 
 test('legacy question-count settings normalize to unlimited without rejecting old controls',()=>{const legacy=structuredClone(cfg);legacy.max_questions=6;assert.equal(p.controlSchema.parse(legacy).max_questions,0);const missing=structuredClone(cfg);delete missing.max_questions;assert.equal(p.controlSchema.parse(missing).max_questions,0);});
+
+test('preparation has a shared prompt regardless of later group and keeps original formal targets',()=>{
+ const left=p.composeSqlPrompt(cfg,3,'L',3),right=p.composeSqlPrompt(cfg,3,'T',3);
+ assert.equal(left,right);assert.ok(left.includes(cfg.prompts.preparation));assert.ok(!right.includes('target必须为'));
+ const altered=structuredClone(cfg);altered.preparation_timing.teaching_seconds=2400;
+ assert.equal(p.controlSchema.safeParse(altered).success,false);
+});
+
+test('browser admin reads lesson numbers from the dependency-free display module',async()=>{const panel=await readFile('app/admin/sql-study-panel.tsx','utf8');assert.match(panel,/import type \{SqlControl\} from '@\/lib\/sql-study-policy'/);assert.match(panel,/import \{classroomScheduleGroups,SQL_LESSON_ORDER,sqlLessonNumber\} from '@\/lib\/sql-study-display'/);});
+
+test('version history compares legacy three-lesson revisions and transitions without throwing',()=>{
+ const old=structuredClone(cfg);old.tasks.pop();old.prompts.lessons.pop();delete old.prompts.preparation;delete old.preparation_timing;
+ const next=structuredClone(old);next.tasks[0].brief+=' 历史调整';
+ assert.ok(Array.from(p.summarizeSqlChanges(old,next)).includes('第2课名称或实操题干'));
+ assert.ok(Array.from(p.summarizeSqlChanges(next,cfg)).some(x=>x.startsWith('新增第1课')));
+ assert.ok(Array.from(p.summarizeSqlChanges(cfg,next)).some(x=>x.startsWith('移除第1课')));
+});
