@@ -69,6 +69,7 @@ class StudyTests(unittest.TestCase):
         pid=self.prepared();r=self.s.get(pid)['rounds'][-1]
         r['config']['mode']='real';r['group']='T';r['requests']=[{'turn_index':1}]
         image='data:image/png;base64,'+base64.b64encode(b'\x89PNG\r\n\x1a\nsynthetic').decode()
+        r['messages'] += [{'role':'user' if i%2==0 else 'assistant','content':'合成历史'+str(i)} for i in range(50)]
         r['messages'].append({'role':'user','content':'请看截图','image':image})
         self.s.connection=lambda:{'base_url':'http://127.0.0.1:3005/api/sql-local','source':'edulab-local-bridge','token':'synthetic-token','model':'deepseek-flash'}
         reply={'reply':'老师，这里选的是哪一列？','target':0,'knowledge':{},'reason':'核对'}
@@ -80,6 +81,8 @@ class StudyTests(unittest.TestCase):
             self.assertEqual(result['target'],0)
             payload=json.loads(opener.open.call_args[0][0].data)
             self.assertEqual(payload['response_format'],{'type':'json_object'})
+            self.assertEqual(len(payload['messages']),25)
+            self.assertGreater(len(r['messages']),50)
             self.assertEqual(payload['messages'][-1]['content'][1]['image_url']['url'],image)
             reply['target']=1
             response.read.return_value=encode({'choices':[{'finish_reason':'stop','message':{'content':encode(reply)}}]}).encode()
@@ -98,7 +101,12 @@ class StudyTests(unittest.TestCase):
         r=self.s.get(pid)['rounds'][-1]
         self.assertEqual(r['requests'][-1]['turn_index'],1)
         self.assertEqual(r['requests'][-1]['status'],'completed')
-        with self.assertRaises(Problem):self.s.chat(pid,{'text':'再次发送','request_id':'beyond-limit'})
+        for n in range(8):
+            self.s.chat(pid,{'text':'继续解释姓名列','request_id':'unlimited-'+str(n)})
+            for _ in range(100):
+                if pid not in self.s.active:break
+                time.sleep(.01)
+        self.assertEqual(len(self.s.get(pid)['rounds'][-1]['requests']),10)
         for invalid in ['data:text/html;base64,PHNjcmlwdD4=','https://example.org/image.png','data:image/png;base64,YWJj']:
             with self.assertRaises(Problem):self.s.chat(pid,{'text':'图片','image':invalid,'request_id':'bad-image'})
 
@@ -123,6 +131,30 @@ class StudyTests(unittest.TestCase):
         self.assertEqual(set(transport['archive']),{'exported_at'})
         self.assertEqual(transport['canonical'].count(image),2)
         self.assertEqual(encode(transport).count(image),2)
+
+    def test_pending_reply_does_not_delay_practice_or_attach_to_a_later_round(self):
+        pid=self.prepared();started=threading.Event();release=threading.Event()
+        p=self.s.get(pid);p['rounds'][0]['config']['mode']='real';self.s.save(p)
+        self.s.connection=lambda:{'token':'synthetic'}
+        def delayed(r,c):
+            started.set();release.wait(3)
+            return {'reply':'延迟的模拟回复','target':0,'knowledge':{},'source':'synthetic'}
+        self.s.model_call=delayed
+        self.s.chat(pid,{'text':'从学生表选姓名列','request_id':'pending'})
+        self.assertTrue(started.wait(2));self.clock[0]+=901;self.open('practice0','auto')
+        self.assertTrue(self.s.state(pid)['gates']['practice0']['open'])
+        self.s.act(pid,'start_practice',{})
+        p=self.s.get(pid);start=p['rounds'][0]['practice_start']
+        self.assertTrue(any(e['type']=='practice_without_completed_ai_reply' for e in p['events']))
+        p['rounds'].append({'id':'later-round','index':1,'requests':[],'messages':[]});self.s.save(p)
+        release.set()
+        for _ in range(100):
+            if pid not in self.s.active:break
+            time.sleep(.01)
+        p=self.s.get(pid)
+        self.assertEqual(p['rounds'][0]['requests'][-1]['status'],'completed')
+        self.assertEqual(p['rounds'][0]['practice_start'],start)
+        self.assertEqual(p['rounds'][1]['messages'],[])
 
     def test_name_confirmation_and_same_name_restores_record(self):
         with self.assertRaises(Problem):self.s.enter({'class_code':CLASSES[0],'name':'测试'})
@@ -226,15 +258,17 @@ class StudyTests(unittest.TestCase):
         self.assertEqual(self.s.config()['cloud_revision'],7);self.assertEqual(self.s.remote_time_offset,20)
         self.assertNotIn('教师管理',(Path(__file__).resolve().parents[1]/'web/app.js').read_text());self.assertNotIn('teacher-content',(Path(__file__).resolve().parents[1]/'web/index.html').read_text())
 
-    def test_automatic_practice_unlocks_only_after_teaching_and_successful_chat(self):
+    def test_automatic_practice_unlocks_after_teaching_and_a_submitted_explanation(self):
         pid=self.prepared();self.open('practice0','auto')
         self.assertFalse(self.s.state(pid)['gates']['practice0']['open'])
         self.clock[0]+=901;self.assertFalse(self.s.state(pid)['gates']['practice0']['open'])
-        p=self.s.get(pid);p['rounds'][0]['requests'].append({'status':'completed'});self.s.save(p)
+        p=self.s.get(pid);p['rounds'][0]['requests'].append({'id':'failed-explanation','status':'failed'});p['rounds'][0]['messages'].append({'role':'user','content':'解释已提交','request_id':'failed-explanation'});self.s.save(p)
         self.assertTrue(self.s.state(pid)['gates']['practice0']['open'])
         self.s.act(pid,'start_practice',{});self.open('practice0','closed')
         self.s.act(pid,'draft',{'sql':'SELECT 1;','result':'1'});self.s.act(pid,'submit_practice',{})
         self.assertEqual(self.s.get(pid)['rounds'][0]['submission']['sql'],'SELECT 1;')
+        self.assertEqual(self.s.get(pid)['rounds'][0]['requests'][0]['status'],'failed')
+        self.assertEqual(sum(e['type']=='practice_without_completed_ai_reply' for e in self.s.get(pid)['events']),1)
 
     def test_backup_cannot_be_disabled(self):
         with self.assertRaises(Problem):self.s.configure({'backup_enabled':False})

@@ -119,8 +119,9 @@ def install(Base, Problem, encode, stamp):
                 i=int(key[-1]);r=next((r for r in p['rounds'] if r['index']==i),None)
                 if not r:return {'open':False,'reason':'完成本课AI交互后自动解锁'}
                 if r['phase'] in ('practice','quiz','done'):return {'open':True,'reason':'实操已解锁'}
-                if r['phase']=='teaching' and self.clock()>=r.get('teaching_deadline',float('inf')) and any(q['status']=='completed' for q in r['requests']):return {'open':True,'reason':'教学结束，实操已自动解锁'}
-                return {'open':False,'reason':'成功与AI交互且教学时段结束后自动解锁'}
+                if r['phase']=='teaching' and self.clock()>=r.get('teaching_deadline',float('inf')) and any(m.get('role')=='user' and m.get('request_id') for m in r['messages']):return {'open':True,'reason':'教学结束，实操已自动解锁'}
+                if self.clock()>=r.get('teaching_deadline',float('inf')):return {'open':False,'reason':'教学时间已结束，但尚未发送讲解，请联系教师'}
+                return {'open':False,'reason':'发送讲解且教学时段结束后自动解锁'}
             if mode=='open': return {'open':True,'reason':'已开放'}
             if mode=='scheduled':
                 start,end=rule.get('open_at'),rule.get('close_at')
@@ -171,7 +172,8 @@ def install(Base, Problem, encode, stamp):
                     key=('ai' if action=='start_teaching' else 'practice' if action in ('start_practice','draft','submit_practice') else 'posttest')+str(i)
                     active_submission=(action in ('draft','submit_practice') and r['phase']=='practice') or (action in ('quiz_draft','quiz') and r['phase']=='quiz' and r.get('quiz_start') is not None)
                     if not active_submission:self.require_gate(p,key)
-                    if action=='start_practice' and not any(q['status']=='completed' for q in r['requests']): raise Problem('请先完成与学徒的交互。',409)
+                    if action=='start_practice':
+                        if not any(m.get('role')=='user' and m.get('request_id') for m in r['messages']):raise Problem('请先向学徒发送讲解。',409)
                     if action=='quiz_draft':
                         self.expire(p,r)
                         if r['phase']!='quiz' or not r.get('quiz_start'): raise Problem('后测已结束或未开始。',409)
@@ -188,6 +190,11 @@ def install(Base, Problem, encode, stamp):
                                 'sql_score':None,'score':None,'grading':'pending_teacher','rubrics':SQL_ITEMS[i], 'status':'submitted','at':stamp(),'finished_epoch':self.clock(),'elapsed_seconds':round(self.clock()-r['quiz_start'],3),'version':'pilot-sql/2'})
                         self.event(p,action);self.save(p);return self.public(p)
                 result=super().act(pid,action,data)
+                if action=='start_practice':
+                    p=self.get(pid);r=p['rounds'][-1]
+                    if not any(q.get('status')=='completed' for q in r['requests']):
+                        self.event(p,'practice_without_completed_ai_reply',lesson=r['index'],statuses=[q.get('status') for q in r['requests']])
+                        self.save(p)
                 if action in ('pretest','meta_pre','meta_post'):
                     p=self.get(pid);start=p.get('measurement_starts',{}).get(action)
                     p[action].update(started_epoch=start,finished_epoch=self.clock(),elapsed_seconds=round(self.clock()-start,3) if start is not None else None)

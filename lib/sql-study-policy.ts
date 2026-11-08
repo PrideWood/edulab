@@ -7,7 +7,7 @@ const rule=z.object({mode:z.enum(['closed','open','scheduled','auto']),open_at:z
 export const controlSchema=z.object({
  demonstration_minutes:z.number().int().min(1).max(77).default(40),
  teaching_seconds:z.number().int().min(60).max(4800).multipleOf(60),practice_seconds:z.number().int().min(60).max(4800).multipleOf(60),quiz_seconds:z.number().int().min(60).max(4800).multipleOf(60),
- max_questions:z.number().int().min(1).max(20),mode:z.enum(['demo','real']),backup_enabled:z.literal(true),prompt_version:z.number().int().positive(),
+ max_questions:z.number().int().min(0).max(20).transform(()=>0).default(0),mode:z.enum(['demo','real']),backup_enabled:z.literal(true),prompt_version:z.number().int().positive(),
  tasks:z.array(z.object({id:text,title:text,pages:text,brief:text,points:z.array(text).length(6),checks:z.array(text).length(6)})).length(3),
  prompts:z.object({common:text,policies:z.object({L:text,T:text}),lessons:z.array(text).length(3)}),
  schedules:z.record(z.string(),z.record(z.string(),rule))

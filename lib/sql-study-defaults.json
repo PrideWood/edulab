@@ -2,7 +2,7 @@
   "teaching_seconds": 900,
   "practice_seconds": 900,
   "quiz_seconds": 600,
-  "max_questions": 6,
+  "max_questions": 0,
   "mode": "demo",
   "backup_enabled": true,
   "tasks": [
