@@ -13,7 +13,7 @@ export type LocalBackupRow = {
 };
 const PAGE_SIZE = 50;
 
-type BackupFilters = { source?: BackupSource; classCode?: string; search?: string; view?: "active" | "trash" };
+type BackupFilters = { source?: BackupSource; classCode?: string; search?: string; view?: "active" | "trash"; scope?: "current" | "science-archive" };
 
 // Stable research time: later uploads and new conversations must not move an
 // existing participant. Never sort by the mutable cloud receipt/export clock.
@@ -22,12 +22,13 @@ const interactionStart = `coalesce(
   nullif(p.archive->'participant'->>'created_at','')::timestamptz)`;
 
 function filters(input: BackupFilters) {
-  return { values: [input.source ?? null, input.classCode ?? null, input.search?.trim() || null, input.view === "trash"],
+  return { values: [input.source ?? null, input.classCode ?? null, input.search?.trim() || null, input.view === "trash", input.scope ?? "current"],
     where: `WHERE ($1::text IS NULL OR source_app=$1)
       AND ($2::text IS NULL OR class_code=$2)
       AND ($3::text IS NULL OR position(lower($3) in lower(participant_name))>0)
       AND $4::boolean = EXISTS (SELECT 1 FROM public.local_backup_dispositions d
-        WHERE d.device_id=p.device_id AND d.participant_id=p.participant_id AND d.is_trashed)` };
+        WHERE d.device_id=p.device_id AND d.participant_id=p.participant_id AND d.is_trashed)
+      AND ($5::text = 'science-archive') = (p.archive->>'study_schema' IS DISTINCT FROM 'sql-teachable-mvp/1' AND NOT p.is_test AND p.class_code IN ('3','8','9'))` };
 }
 
 async function available() {
@@ -54,7 +55,7 @@ export async function listLocalBackups(input: BackupFilters & { page: number }) 
         (SELECT coalesce(sum(jsonb_array_length(CASE WHEN jsonb_typeof(c->'messages')='array' THEN c->'messages' ELSE '[]'::jsonb END)),0)::text
           FROM jsonb_array_elements(archive->'conversations') c) AS message_count
       FROM edulab_local_backup.latest_participants p ${where}
-      ORDER BY interaction_started_at DESC NULLS LAST,device_id,participant_id LIMIT ${PAGE_SIZE} OFFSET $5`, [...values, (input.page - 1) * PAGE_SIZE]),
+      ORDER BY interaction_started_at DESC NULLS LAST,device_id,participant_id LIMIT ${PAGE_SIZE} OFFSET $6`, [...values, (input.page - 1) * PAGE_SIZE]),
   ]);
   return { initialized: true, total: Number(count.rows[0].total), page: input.page, pageSize: PAGE_SIZE,
     records: result.rows.map(row => ({ deviceId: row.device_id, participantId: row.participant_id,
@@ -76,12 +77,13 @@ export async function listLocalBackupSelection(input: BackupFilters) {
     records: result.rows.map(row => ({ deviceId: row.device_id, participantId: row.participant_id })) };
 }
 
-export async function getLocalBackup(deviceId: string, participantId: string, view: "active" | "trash" = "active") {
+export async function getLocalBackup(deviceId: string, participantId: string, view: "active" | "trash" = "active", scope: "current" | "science-archive" = "current") {
   if (!await available()) throw new ApiError(404, "LOCAL_BACKUPS_NOT_INITIALIZED", "当前数据库尚未接入本地版备份。");
   const result = await query<{ archive: Record<string, unknown> }>(
     `SELECT archive FROM edulab_local_backup.latest_participants p WHERE device_id=$1 AND participant_id=$2
       AND $3::boolean = EXISTS (SELECT 1 FROM public.local_backup_dispositions d
-        WHERE d.device_id=p.device_id AND d.participant_id=p.participant_id AND d.is_trashed)`, [deviceId, participantId, view === "trash"]);
+        WHERE d.device_id=p.device_id AND d.participant_id=p.participant_id AND d.is_trashed)
+      AND ($4::text = 'science-archive') = (p.archive->>'study_schema' IS DISTINCT FROM 'sql-teachable-mvp/1' AND NOT p.is_test AND p.class_code IN ('3','8','9'))`, [deviceId, participantId, view === "trash", scope]);
   if (!result.rows[0]) throw new ApiError(404, "LOCAL_BACKUP_NOT_FOUND", "找不到这条本地版备份，请刷新列表。");
   return result.rows[0].archive;
 }

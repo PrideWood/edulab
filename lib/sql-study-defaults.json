@@ -1,0 +1,278 @@
+{
+  "teaching_seconds": 900,
+  "practice_seconds": 900,
+  "quiz_seconds": 600,
+  "max_questions": 6,
+  "mode": "demo",
+  "backup_enabled": true,
+  "tasks": [
+    {
+      "id": "R1",
+      "title": "项目五 学籍信息查询",
+      "pages": "项目五正文",
+      "brief": "试运行题：在学生表中显示学生姓名、职务和入学日期。正式使用前请由教师替换为当堂演示原题。",
+      "points": [
+        "来源表与任务目标",
+        "输出列的含义",
+        "选列和筛行的区别",
+        "表达式及别名",
+        "条件和排序",
+        "去重与常用处理"
+      ],
+      "checks": [
+        "你先教我，这次要从哪张表取得什么信息？",
+        "结果应当有哪些列？每列表示什么？",
+        "少显示几列和少保留几行，是同一件事吗？请教我区分。",
+        "表达式和别名有什么作用？请结合你讲过的内容解释。",
+        "如果教材要求筛选或排序，我该如何判断相应部分？",
+        "你怎样核对结果？请检查我刚才的复述。"
+      ]
+    },
+    {
+      "id": "R2",
+      "title": "项目六 聚合与分组",
+      "pages": "项目六任务一和任务二",
+      "brief": "试运行原题：查询选修课程编号为K01的最高成绩和最低成绩。请在SQL Server中执行，保存代码与结果。",
+      "points": [
+        "统计范围",
+        "聚合函数的含义",
+        "计数口径",
+        "分组粒度",
+        "行条件与组条件",
+        "结果核查"
+      ],
+      "checks": [
+        "参与统计的是哪些记录？请先教我确定范围。",
+        "最高、最低、总分和均分分别怎样得到？",
+        "这里数的是记录、成绩还是学生？请告诉我依据。",
+        "按班汇总后，结果的一行代表什么？",
+        "行条件和汇总后的条件应怎样区分？请你解释。",
+        "请教我用原始成绩核对结果，并检查我有没有理解错。"
+      ]
+    },
+    {
+      "id": "R3",
+      "title": "项目六 子查询与比较",
+      "pages": "项目六任务三",
+      "brief": "试运行题：参照教材任务三，分别复现ANY与ALL的比较查询，提交两条SQL及运行结果。正式测量的比较对象与条件由教师按教材原题确认。",
+      "points": [
+        "查询目标",
+        "内层结果",
+        "外层比较对象",
+        "ANY的含义",
+        "ALL的含义",
+        "核查比较边界"
+      ],
+      "checks": [
+        "请先教我内外两个查询各要解决什么问题。",
+        "内层查询给外层提供了哪些比较值？",
+        "外层的每个值要和谁比较？",
+        "ANY在这里表示什么？请你用教材数据举例。",
+        "ALL和ANY的要求有什么不同？",
+        "请核对两种结果的边界，并检查我刚才的理解。"
+      ]
+    }
+  ],
+  "prompt_version": 1,
+  "prompts": {
+    "common": "你是学生教导的SQL虚拟学徒，不是教师。不直接提供SQL答案，不主动补充学生尚未教的知识。回应老师刚教的内容，并围绕一个知识点自然提问，请学生解释理由或检查你的理解；不宣称执行过SQL或决定提前结束课堂。对学生解释的判断仅是可见解释的估计，不是真实掌握结论。只输出JSON：reply字符串、target整数0至5、reason字符串、knowledge对象。knowledge以知识点编号为键，每项包含status(unknown/partial/misconception/explained)和evidence(学生原话)。\n【共同学生表达风格 v1】\n你扮演一名正在向学生学习SQL的虚拟学徒，称呼正在教你的学生为“老师”。两组第一次开场统一且仅说：“老师好，今天我们要学什么？”\n之后像认真但并不全懂的学生自然接话：关注刚讲到的表、列、条件、统计含义等具体内容，也可以表现出想明白了、犹豫或想再确认的反应。可偶尔使用“哦”“嗯”“我有点没分清”，不要每句都套用。\n不要像评分员逐项验收，也不要每次都机械复述或说“谢谢，我记下了”。通常30—100字即可；简单问题可以更短，一次只问一个重点，不为凑字数扩写。不展示检查点编号、掌握评分、组别或内部策略。\n保持虚拟学徒身份，不编造真实校园经历。只基于老师已经教过的内容表达理解，不主动补出完整SQL、不反过来讲课、不为了活泼而增加新知识或新的任务要求。追问选择仍严格遵守本组既定策略；口语风格不得改变L/T两组的推进差异。",
+    "policies": {
+      "L": "根据学生当前解释的充分程度调整追问，优先核查误解、遗漏和缺少理由的内容。可在相同知识范围内改变检查点次序。",
+      "T": "严格按预定的六个检查点顺序推进，不因学生解释充分或不足改变下一检查点；疑点只记录在状态中。"
+    },
+    "lessons": [
+      "试运行题：在学生表中显示学生姓名、职务和入学日期。正式使用前请由教师替换为当堂演示原题。",
+      "试运行原题：查询选修课程编号为K01的最高成绩和最低成绩。请在SQL Server中执行，保存代码与结果。",
+      "试运行题：参照教材任务三，分别复现ANY与ALL的比较查询，提交两条SQL及运行结果。正式测量的比较对象与条件由教师按教材原题确认。"
+    ]
+  },
+  "schedules": {
+    "计网2541": {
+      "pretest": {
+        "mode": "open",
+        "open_at": null,
+        "close_at": null
+      },
+      "meta_pre": {
+        "mode": "open",
+        "open_at": null,
+        "close_at": null
+      },
+      "meta_post": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "ai0": {
+        "mode": "open",
+        "open_at": null,
+        "close_at": null
+      },
+      "practice0": {
+        "mode": "auto",
+        "open_at": null,
+        "close_at": null
+      },
+      "posttest0": {
+        "mode": "open",
+        "open_at": null,
+        "close_at": null
+      },
+      "ai1": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "practice1": {
+        "mode": "auto",
+        "open_at": null,
+        "close_at": null
+      },
+      "posttest1": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "ai2": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "practice2": {
+        "mode": "auto",
+        "open_at": null,
+        "close_at": null
+      },
+      "posttest2": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      }
+    },
+    "计网2542": {
+      "pretest": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "meta_pre": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "meta_post": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "ai0": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "practice0": {
+        "mode": "auto",
+        "open_at": null,
+        "close_at": null
+      },
+      "posttest0": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "ai1": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "practice1": {
+        "mode": "auto",
+        "open_at": null,
+        "close_at": null
+      },
+      "posttest1": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "ai2": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "practice2": {
+        "mode": "auto",
+        "open_at": null,
+        "close_at": null
+      },
+      "posttest2": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      }
+    },
+    "计网2543": {
+      "pretest": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "meta_pre": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "meta_post": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "ai0": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "practice0": {
+        "mode": "auto",
+        "open_at": null,
+        "close_at": null
+      },
+      "posttest0": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "ai1": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "practice1": {
+        "mode": "auto",
+        "open_at": null,
+        "close_at": null
+      },
+      "posttest1": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "ai2": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      },
+      "practice2": {
+        "mode": "auto",
+        "open_at": null,
+        "close_at": null
+      },
+      "posttest2": {
+        "mode": "closed",
+        "open_at": null,
+        "close_at": null
+      }
+    }
+  },
+  "demonstration_minutes": 40
+}

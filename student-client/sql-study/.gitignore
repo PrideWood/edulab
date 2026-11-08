@@ -1,0 +1,9 @@
+.private/
+data/
+test-data/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+.preview/

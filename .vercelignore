@@ -1,0 +1,12 @@
+.env*
+.git
+.next
+node_modules
+dist
+build
+**/.private/**
+**/*.sqlite3*
+**/data/**
+*.tsbuildinfo
+
+student-client

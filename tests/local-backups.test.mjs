@@ -34,7 +34,7 @@ test('an unmigrated database returns an empty initialized=false result without b
 test('backup filters are bounded and parameterized, list omits message bodies',async()=>{
   const h=setup();const response=await h.get('?source=student-light&classCode=3&search=%27%3BDELETE&page=2');
   const body=await response.json();assert.equal(response.status,200);assert.equal(body.total,1);assert.equal(body.pageSize,50);assert.equal(body.records[0].turnCount,3);assert.equal(body.records[0].messageCount,6);assert.equal(body.records[0].isTest,true);assert.equal('archive' in body.records[0],false);
-  const list=h.queries.at(-1);assert.deepEqual(Array.from(list.params),['student-light','3',"';DELETE",false,50]);assert.match(list.sql,/LIMIT 50 OFFSET \$5/);assert.match(list.sql,/ORDER BY interaction_started_at DESC NULLS LAST,device_id,participant_id/);assert.ok(!list.sql.includes("';DELETE"));assert.match(response.headers.get('cache-control'),/no-store/);
+  const list=h.queries.at(-1);assert.deepEqual(Array.from(list.params),['student-light','3',"';DELETE",false,'current',50]);assert.match(list.sql,/LIMIT 50 OFFSET \$6/);assert.match(list.sql,/ORDER BY interaction_started_at DESC NULLS LAST,device_id,participant_id/);assert.ok(!list.sql.includes("';DELETE"));assert.match(response.headers.get('cache-control'),/no-store/);
 });
 test('invalid sources, pages and partial/composite record IDs fail before backup reads',async()=>{
   for(const suffix of ['?source=wrong','?page=0','?page=9999999','?deviceId=wrong',`?deviceId=${device}`]){
@@ -44,7 +44,7 @@ test('invalid sources, pages and partial/composite record IDs fail before backup
 test('detail and JSON download use both device and participant keys and preserve all archive contents',async()=>{
   const archive={participant:{name:'测试'},conversations:[{messages:[{role:'user',content:'问题',turn_index:1},{role:'assistant',content:'回答',turn_index:1}]}]};
   const h=setup({archive});const response=await h.get(`?deviceId=${device}&participantId=${participant}&download=1`);
-  assert.equal(response.status,200);assert.deepEqual(await response.json(),archive);assert.match(response.headers.get('content-disposition'),/attachment/);assert.deepEqual(Array.from(h.queries.at(-1).params),[device,participant,false]);
+  assert.equal(response.status,200);assert.deepEqual(await response.json(),archive);assert.match(response.headers.get('content-disposition'),/attachment/);assert.deepEqual(Array.from(h.queries.at(-1).params),[device,participant,false,'current']);
   const missing=setup({archive:null});assert.equal((await missing.get(`?deviceId=${device}&participantId=${participant}`)).status,404);
 });
 test('trash view is explicitly selected and direct trash downloads cannot bypass export separation',async()=>{
@@ -56,10 +56,18 @@ test('trash view is explicitly selected and direct trash downloads cannot bypass
 test('global selection includes all pages with identical filters and no archive bodies',async()=>{
   const h=setup({selectionCount:123});const response=await h.get('?selection=all&classCode=8&source=student-light&search=test');
   const body=await response.json();assert.equal(response.status,200);assert.equal(body.records.length,123);assert.equal(body.total,123);
-  const list=h.queries.at(-1);assert.deepEqual(Array.from(list.params),['student-light','8','test',false]);assert.ok(!list.sql.includes('SELECT archive'));
+  const list=h.queries.at(-1);assert.deepEqual(Array.from(list.params),['student-light','8','test',false,'current']);assert.ok(!list.sql.includes('SELECT archive'));
   assert.deepEqual(Object.keys(body.records[0]).sort(),['deviceId','participantId']);
 });
 test('global selection rejects oversized selection rather than silently truncating',async()=>{
   const h=setup({selectionCount:10001});assert.equal((await h.get('?selection=all')).status,413);
   const forbidden=setup();assert.equal((await forbidden.get(`?selection=all&deviceId=${device}&participantId=${participant}`)).status,400);assert.equal(forbidden.queries.length,0);
+});
+
+
+test('science archive is explicit, excludes test identities and uses the same scope for pages and full selection',async()=>{
+ const h=setup();assert.equal((await h.get('?scope=science-archive')).status,200);
+ assert.equal(h.queries.at(-1).params[4],'science-archive');assert.match(h.queries.at(-1).sql,/NOT p.is_test/);assert.match(h.queries.at(-1).sql,/study_schema/);
+ const all=setup();await all.get('?scope=science-archive&selection=all');assert.equal(all.queries.at(-1).params[4],'science-archive');
+ const invalid=setup();assert.equal((await invalid.get('?scope=anything')).status,400);assert.equal(invalid.queries.length,0);
 });

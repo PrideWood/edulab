@@ -8,6 +8,7 @@ import { ApiError, errorResponse } from "@/lib/http";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 const filterSchema = z.object({
+  scope: z.enum(["current", "science-archive"]).default("current"),
   source: z.enum(["student-light", "teacher-lan"]).optional(),
   classCode: z.string().max(30).optional(), search: z.string().max(100).optional(),
   page: z.coerce.number().int().min(1).max(100000).default(1),
@@ -63,7 +64,7 @@ export async function GET(request: Request) {
     const { deviceId, participantId, download, view } = input.data;
     if (deviceId && participantId) {
       if (download && view === "trash") throw new ApiError(409, "LOCAL_BACKUP_IN_TRASH", "回收站中的记录不参与导出，请先恢复记录。");
-      const archive = await getLocalBackup(deviceId, participantId, view);
+      const archive = await getLocalBackup(deviceId, participantId, view, input.data.scope);
       if (download) return new Response(JSON.stringify(archive, null, 2), { headers: { ...headers,
         "Content-Type": "application/json; charset=utf-8",
         "Content-Disposition": `attachment; filename="EduLab-local-${deviceId.slice(0,8)}-${participantId}.json"` } });

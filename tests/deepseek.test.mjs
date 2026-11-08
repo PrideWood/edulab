@@ -79,3 +79,12 @@ test('DeepSeek recovery finalizes a durable completion once, never sends another
   await api.recoverDeepSeekPendingRequest({id:'session-1'});
   assert.equal(persisted,1); assert.equal(failed[0][4],'uncertain');
 });
+
+test('JSON mode and image content are forwarded only when requested',async()=>{
+  let body;
+  const api=await load('lib/deepseek.ts',{'@/lib/sse':sse},{fetch:async(_url,options)=>{body=JSON.parse(options.body);return stream([chunk({content:'{"reply":"老师好"}'}),chunk({},'stop'),'[DONE]']);}});
+  const messages=[{role:'user',content:[{type:'text',text:'示例截图'},{type:'image_url',image_url:{url:'data:image/png;base64,c3ludGhldGlj'}}]}];
+  await api.runDeepSeekChat({...input,messages,jsonOutput:true});
+  assert.equal(body.response_format.type,'json_object');assert.deepEqual(body.messages.at(-1),messages[0]);
+  await api.runDeepSeekChat({...input});assert.equal(body.response_format,undefined);
+});

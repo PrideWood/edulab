@@ -56,7 +56,7 @@ export function DirectModelPanel({ agents, activeIds, busy, onSave, onDelete }: 
   </section>;
 }
 
-function SharedModelSettings({ model, onSaved }: { model: SharedModelSummary; onSaved: (model: SharedModelSummary) => void }) {
+export function SharedModelSettings({ model, onSaved }: { model: SharedModelSummary; onSaved: (model: SharedModelSummary) => void }) {
   const [baseUrl, setBaseUrl] = useState(model.baseUrl);
   const [token, setToken] = useState("");
   const [config, setConfig] = useState(model.config);

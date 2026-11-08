@@ -6,7 +6,12 @@ import type { LocalBackupReference } from "@/lib/local-backup-export";
 import { downloadLocalBackupBatches } from "@/lib/local-backup-download";
 
 type Message = { id: string; role: string; content: string; sent_at: string; turn_index: number; sequence_no: number };
-type Archive = { participant: { name: string }; conversations: Array<{
+type SqlStudy = { group: string | null; pretest: { score: number } | null; assignment?: { pair: number; method: string }; meta_pre: { answers: number[] } | null; meta_post: { answers: number[] } | null; rounds: Array<{
+  id: string; index: number; phase: string; config: { prompt_version?: number }; task: { title: string };
+  submission: { status: string; elapsed_seconds: number; sql: string; result: string } | null;
+  quiz?: { status: string; mcq_score?: number; sql_score?: number | null; score: number | null; sql_answers?: string[]; grading?: string };
+}> };
+type Archive = { study_schema?: string; study?: SqlStudy; participant: { name: string }; conversations: Array<{
   id: string; title: string; created_at: string; messages: Message[];
   requests: Array<{ id: string; turn_index: number; status: string }>;
 }> };
@@ -15,7 +20,7 @@ const className = (code: string) => (({ "3": "三班", "8": "八班", "9": "九�
 const date = (value?: string | null) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—";
 const recordKey = (row: LocalBackupReference) => `${row.deviceId}:${row.participantId}`;
 
-export function LocalBackupsPanel() {
+export function LocalBackupsPanel({ scope = "current" }: { scope?: "current" | "science-archive" }) {
   const [view, setView] = useState<"active" | "trash">("active");
   const [mutating, setMutating] = useState(false);
   const [actionError, setActionError] = useState("");
@@ -64,7 +69,7 @@ export function LocalBackupsPanel() {
     if (selectingAll || busy || exporting || mutating) return;
     const controller = new AbortController(); selectionRequest.current = controller;
     setSelectingAll(true); setExportError("");
-    const params = new URLSearchParams({ selection: "all", view });
+    const params = new URLSearchParams({ selection: "all", view, scope });
     if (source) params.set("source", source);
     if (classCode) params.set("classCode", classCode);
     if (appliedSearch) params.set("search", appliedSearch);
@@ -101,7 +106,7 @@ export function LocalBackupsPanel() {
     setExporting(true); setExportError(""); setExportStatus("");
     try {
       // Resolve order from the same filtered list, independently of click order or page.
-      const params = new URLSearchParams({ selection: "all", view });
+      const params = new URLSearchParams({ selection: "all", view, scope });
       if (source) params.set("source", source);
       if (classCode) params.set("classCode", classCode);
       if (appliedSearch) params.set("search", appliedSearch);
@@ -130,7 +135,7 @@ export function LocalBackupsPanel() {
 
   useEffect(() => {
     const controller = new AbortController();
-    const params = new URLSearchParams({ page: String(page), view });
+    const params = new URLSearchParams({ page: String(page), view, scope });
     if (source) params.set("source", source);
     if (classCode) params.set("classCode", classCode);
     if (appliedSearch) params.set("search", appliedSearch);
@@ -147,15 +152,15 @@ export function LocalBackupsPanel() {
     }
     void load();
     return () => controller.abort();
-  }, [source, classCode, appliedSearch, page, refresh, view]);
+  }, [source, classCode, appliedSearch, page, refresh, view, scope]);
 
   return <section className="settings-card local-backups-panel">
-    <div className="settings-card-head"><div><h2>本地版云端备份</h2><p>汇总学生机与教师机已上传的记录，独立于左侧当前实验及原有 P/T 编号。</p></div><button className="admin-refresh" disabled={busy || mutating} onClick={() => setRefresh(value => value + 1)}>{busy ? "读取中…" : "刷新备份"}</button></div>
+    <div className="settings-card-head"><div><h2>{scope === "science-archive" ? "科学教育 · 本地备份归档" : "本地数据备份"}</h2><p>{scope === "science-archive" ? "已完成的三、八、九班科学教育正式记录；完整数据保留，可查看与导出。" : "当前班级、测试身份与新实验的云端备份；科学教育正式数据已移至独立归档入口。"}</p></div><button className="admin-refresh" disabled={busy || mutating} onClick={() => setRefresh(value => value + 1)}>{busy ? "读取中…" : "刷新备份"}</button></div>
     <div className="local-backup-views" role="group" aria-label="记录范围">{(["active", "trash"] as const).map(value => <button key={value} className="admin-refresh" aria-pressed={view === value} disabled={mutating || exporting} onClick={() => { resetSelection(); setView(value); setPage(1); }}>{value === "active" ? "正常记录" : "回收站"}</button>)}</div>
     {view === "trash" && <p className="profile-hint">回收站保留完整数据，不参与正常导出。可以批量恢复，不提供彻底删除。</p>}
     <form className="local-backup-filters" onSubmit={event => { event.preventDefault(); resetSelection(); setPage(1); setAppliedSearch(search.trim()); setRefresh(value => value + 1); }}>
       <label>来源<select value={source} onChange={event => { resetSelection(); setSource(event.target.value); setPage(1); }}><option value="">全部来源</option><option value="student-light">学生机轻量版</option><option value="teacher-lan">教师机局域网</option></select></label>
-      <label>班级<select value={classCode} onChange={event => { resetSelection(); setClassCode(event.target.value); setPage(1); }}><option value="">全部班级</option><option value="3">三班</option><option value="8">八班</option><option value="9">九班</option></select></label>
+      <label>班级<select value={classCode} onChange={event => { resetSelection(); setClassCode(event.target.value); setPage(1); }}><option value="">全部班级</option><option value="3">三班</option><option value="8">八班</option><option value="9">九班</option><option value="计网2541">计网2541</option><option value="计网2542">计网2542</option><option value="计网2543">计网2543</option></select></label>
       <label>姓名<input value={search} onChange={event => setSearch(event.target.value)} maxLength={100} placeholder="如：测试" /></label><button className="admin-refresh" type="submit">查询</button>
     </form>
     <p className="profile-hint">按首次交互开始时间从新到旧固定排序，补传不会改变位置。这里显示云端已确认的最新快照；同名学生按设备和参与者标识区分。</p>
@@ -174,7 +179,7 @@ export function LocalBackupsPanel() {
       {!busy && !data.records.length && <p>没有符合条件的云端备份。</p>}
       <div className="local-backup-pagination"><button className="admin-refresh" disabled={busy || page <= 1} onClick={() => setPage(value => value - 1)}>上一页</button><span>每页 {data.pageSize} 位 · 第 {page} / {Math.max(1, Math.ceil(data.total / data.pageSize))} 页</span><button className="admin-refresh" disabled={busy || page * data.pageSize >= data.total} onClick={() => setPage(value => value + 1)}>下一页</button></div>
     </>}
-    {selected && <BackupDetail key={`${selected.deviceId}:${selected.participantId}`} record={selected} inTrash={view === "trash"} onClose={() => setSelected(null)} />}
+    {selected && <BackupDetail key={`${selected.deviceId}:${selected.participantId}`} record={selected} inTrash={view === "trash"} scope={scope} onClose={() => setSelected(null)} />}
   </section>;
 }
 
@@ -186,12 +191,12 @@ function BackupCheckbox({ checked, mixed = false, disabled, label, onChange }: {
   return <input ref={ref} className="local-backup-checkbox" type="checkbox" checked={checked} disabled={disabled} aria-label={label} onChange={onChange} />;
 }
 
-function BackupDetail({ record, inTrash, onClose }: { record: LocalBackupRow; inTrash: boolean; onClose: () => void }) {
+function BackupDetail({ record, inTrash, scope, onClose }: { record: LocalBackupRow; inTrash: boolean; scope: string; onClose: () => void }) {
   const [archive, setArchive] = useState<Archive | null>(null);
   const [error, setError] = useState("");
   const dialog = useRef<HTMLElement>(null);
   const close = useRef<HTMLButtonElement>(null);
-  const endpoint = `/api/admin/local-backups?deviceId=${record.deviceId}&participantId=${record.participantId}&view=${inTrash ? "trash" : "active"}`;
+  const endpoint = `/api/admin/local-backups?deviceId=${record.deviceId}&participantId=${record.participantId}&view=${inTrash ? "trash" : "active"}&scope=${scope}`;
   useEffect(() => {
     const controller = new AbortController();
     const previous = document.activeElement;
@@ -223,7 +228,20 @@ function BackupDetail({ record, inTrash, onClose }: { record: LocalBackupRow; in
     {error && <p role="alert">{error}</p>}
     {!archive && !error && <p role="status">正在读取完整记录…</p>}
     {archive && <>{!inTrash && <a className="admin-refresh local-backup-download" href={`${endpoint}&download=1`}>下载完整 JSON</a>}
+      {archive.study_schema === "sql-teachable-mvp/1" && archive.study && <SqlStudyDetail study={archive.study} />}
       {archive.conversations.map(conversation => <section className="local-backup-conversation" key={conversation.id}><h3>{conversation.title || "新对话"}</h3><p>{date(conversation.created_at)}</p>{conversation.messages.map(message => <article className="local-backup-message" key={message.id}><header><strong>{message.role === "user" ? "学生" : message.role === "assistant" ? "AI" : message.role}</strong><span>第 {message.turn_index} 轮 · 顺序 {message.sequence_no} · {date(message.sent_at)}</span></header><div>{message.content}</div></article>)}{!conversation.messages.length && <p>该会话尚无消息。</p>}</section>)}
     </>}
   </section></div>;
+}
+
+function SqlStudyDetail({ study }: { study: SqlStudy }) {
+  return <section className="local-backup-conversation"><h3>SQL 教学实验 · 测量与实操</h3>
+    <p>前测：{study.pretest?.score ?? "未完成"} · 智能体组：{study.group ?? "待分组"} · 分层配对：{study.assignment?.pair ?? "—"}</p>
+    <p>课前问卷：{study.meta_pre ? "已提交" : "未提交"} · 课后问卷：{study.meta_post ? "已提交" : "未提交"}</p>
+    {study.rounds.map(round => <section key={round.id}><h4>第 {round.index + 1} 课 · {round.task.title}</h4>
+      <p>阶段：{round.phase} · 提示词版本：{round.config.prompt_version ?? "早期试运行"}</p>
+      {round.submission && <><p>实操：{round.submission.status} · 用时 {round.submission.elapsed_seconds} 秒（应结合正确性评分）</p><pre>{round.submission.sql}</pre><pre>{round.submission.result}</pre></>}
+      {round.quiz && <><p>后测：{round.quiz.status} · 选择题 {round.quiz.mcq_score ?? "—"}/60 · SQL {round.quiz.sql_score ?? "待教师评分"}/40 · 总分 {round.quiz.score ?? "待评分"}</p>{round.quiz.sql_answers?.map((answer, i) => <pre key={i}>SQL题 {i+1}：{answer || "未作答"}</pre>)}</>}
+    </section>)}<p className="profile-hint">完整 JSON 包含前测答案、分组依据、课堂配置快照、问卷、计时、后测答案及评分；可从上方下载。</p>
+  </section>;
 }

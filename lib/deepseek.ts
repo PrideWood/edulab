@@ -10,7 +10,8 @@ export class DeepSeekError extends Error {
   }
 }
 
-export type ModelMessage = { role: "system" | "user" | "assistant"; content: string };
+export type ModelContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
+export type ModelMessage = { role: "system" | "user" | "assistant"; content: string | ModelContentPart[] };
 export type ModelReply = { answer: string; messageId: string; replyStartedAt: string | null; completedAt: string };
 
 export function deepSeekBaseUrl(value: string) {
@@ -24,7 +25,7 @@ export function deepSeekBaseUrl(value: string) {
 
 export async function runDeepSeekChat(input: {
   token: string; baseUrl: string; directModel?: DirectModelConfig; messages: ModelMessage[];
-  signal: AbortSignal; onAnswer?: (answer: string) => Promise<void>;
+  signal: AbortSignal; jsonOutput?: boolean; onAnswer?: (answer: string) => Promise<void>;
 }): Promise<ModelReply> {
   if (!input.token || !input.directModel?.model) throw new DeepSeekError("MODEL_NOT_CONFIGURED", "请先配置 DeepSeek API Key 和模型。", 400, true);
   const config = input.directModel;
@@ -33,7 +34,7 @@ export async function runDeepSeekChat(input: {
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${input.token}` },
     body: JSON.stringify({ model: config.model,
       messages: [...(config.systemPrompt ? [{ role: "system", content: config.systemPrompt }] : []), ...input.messages],
-      stream: true, temperature: config.temperature, max_tokens: config.maxTokens,
+      stream: true, ...(input.jsonOutput ? { response_format: { type: "json_object" } } : {}), temperature: config.temperature, max_tokens: config.maxTokens,
       thinking: { type: config.thinking ? "enabled" : "disabled" },
     }),
   });

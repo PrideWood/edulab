@@ -9,9 +9,10 @@ import { RosterPanel } from "./roster-panel";
 import { DirectModelPanel } from "./direct-model-panel";
 import type { DirectModelConfig } from "@/lib/direct-model-config";
 import { LocalBackupsPanel } from "./local-backups-panel";
+import { SqlStudyPanel } from "./sql-study-panel";
 import type { ExperimentSummary } from "@/lib/experiments";
 
-type Section = "participants" | "content" | "limits" | "storage" | "ai" | "local-backups";
+type Section = "participants" | "content" | "limits" | "storage" | "ai" | "local-backups" | "sql-study" | "science-archive";
 type Admin = { id: string; username: string; displayName: string };
 type ParticipantDirectoryRow = {
   id: string; participantCode: string; fullName: string; studentNumber: string;
@@ -35,12 +36,9 @@ type RunSummary = {
 type AgentControl = { agents: AgentSummary[]; runs: RunSummary[]; activeRun: RunSummary | null };
 
 const sections: Array<{ id: Section; number: string; label: string; description: string }> = [
-  { id: "participants", number: "01", label: "参与者", description: "身份与编号对应表" },
-  { id: "local-backups", number: "备份", label: "本地版备份", description: "学生机与教师机上传记录" },
-  { id: "limits", number: "02", label: "交互规则", description: "次数、字数与时长" },
-  { id: "ai", number: "03", label: "模型与入口", description: "DeepSeek 直连、智能体与分组" },
-  { id: "storage", number: "04", label: "数据保存", description: "数据库与人工备份" },
-  { id: "content", number: "05", label: "可选任务说明", description: "通常无需展示" },
+  { id: "local-backups", number: "01", label: "本地数据备份", description: "当前班级、测试与新实验" },
+  { id: "sql-study", number: "02", label: "当前实验控制", description: "课堂开放、分组、学徒与评分" },
+  { id: "science-archive", number: "归档", label: "科学教育归档", description: "已完成实验 · 查看与导出" },
 ];
 
 async function parseResponse(response: Response) {
@@ -50,7 +48,7 @@ async function parseResponse(response: Response) {
 }
 
 export function AdminWorkspace() {
-  const [section, setSection] = useState<Section>("participants");
+  const [section, setSection] = useState<Section>("local-backups");
   const [admin, setAdmin] = useState<Admin | null>(null);
   const [settings, setSettings] = useState<ExperimentSettings | null>(null);
   const [mode, setMode] = useState<"loading" | "login" | "ready">("loading");
@@ -193,15 +191,28 @@ export function AdminWorkspace() {
     <main className="admin-shell">
       <aside className="admin-sidebar">
         <div className="admin-brand"><span className="admin-brand-mark"><BrandLogo /></span><span>EduLab</span></div>
-        <div className="experiment-selector"><label htmlFor="admin-experiment">当前实验</label><select id="admin-experiment" value={settings.experiment.id} disabled={saving} onChange={(event) => void selectExperiment(event.target.value)}>{experiments.length === 0 ? <option value={settings.experiment.id}>{settings.experiment.title}</option> : experiments.map((study) => <option key={study.id} value={study.id}>{study.name}</option>)}</select><button disabled={saving} onClick={() => setCreatingExperiment((value) => !value)}>＋ 新增实验</button></div>
-        <nav className="admin-nav" aria-label="设置导航">{sections.map((item) => <button className={section === item.id ? "active" : ""} key={item.id} onClick={() => { setSection(item.id); if (item.id === "participants") void loadParticipants(); }}><span>{item.number}</span><div><strong>{item.label}</strong><small>{item.description}</small></div></button>)}</nav>
+        <div className="experiment-selector"><p>SQL 可教智能体实验</p><small>学生机学习 · EduLab统一控制</small></div>
+        <nav className="admin-nav" aria-label="设置导航">{sections.map((item) => <button className={section === item.id ? "active" : ""} key={item.id} onClick={() => { setSection(item.id); if (item.id === "participants") void loadParticipants(); if(item.id === "science-archive"){const science=experiments.find(e=>e.name.includes("科学教育"));if(science)void selectExperiment(science.id);} }}><span>{item.number}</span><div><strong>{item.label}</strong><small>{item.description}</small></div></button>)}</nav>
         <div className="admin-sidebar-footer"><div><span className="admin-online-dot" />{admin.displayName}</div><button onClick={logout}>退出</button></div>
       </aside>
 
       <section className="admin-main">
-        <header className="admin-header"><div><p className="admin-kicker">{section === "participants" || section === "local-backups" ? "研究数据" : "实验配置"}</p><h1>{sections.find((item) => item.id === section)?.label}</h1></div><div className="admin-header-actions">{section === "local-backups" ? <span className="save-state">汇总全部本地版的云端备份</span> : section === "participants" ? <><span className="save-state">身份信息与对话记录分开保存</span><button className="admin-refresh" onClick={() => void loadParticipants()} disabled={participantsLoading}>{participantsLoading ? "读取中…" : "刷新"}</button></> : section === "ai" ? <span className="save-state">各组链接固定对应智能体</span> : <><span className={error ? "save-state error" : "save-state"}>{error || status || "设置只影响新创建的会话"}</span><button className="admin-save" onClick={save} disabled={saving}>{saving ? "保存中…" : "保存设置"}</button></>}</div></header>
+        <header className="admin-header"><div><p className="admin-kicker">{section === "sql-study" ? "课堂控制" : "研究数据"}</p><h1>{sections.find(item=>item.id===section)?.label}</h1></div><span className="save-state">{section === "science-archive" ? "历史数据保留，归档查看" : "云端统一管理"}</span></header>
         <div className="admin-content">
-          {section === "local-backups" && <LocalBackupsPanel />}
+          {section === "local-backups" && <>
+            <LocalBackupsPanel scope="current" />
+            <details className="settings-card" onToggle={e=>{if(e.currentTarget.open){const oldTest=experiments.find(x=>!x.name.includes("科学教育"));if(oldTest)void selectExperiment(oldTest.id);}}}><summary>旧平台测试记录（在线来源）</summary><p>保留原在线记录的来源，不伪装为学生机备份。可在同一入口查看与导出。</p>
+              <label>测试实验<select value={settings.experiment.id} onChange={e=>void selectExperiment(e.target.value)}>{experiments.filter(x=>!x.name.includes("科学教育")).map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
+              {!settings.experiment.title.includes("科学教育")&&experiments.some(x=>x.id===settings.experiment.id&&!x.name.includes("科学教育"))&&<ParticipantDirectory key={settings.experiment.id} readOnly experimentId={settings.experiment.id} runId="" participants={participants} loading={participantsLoading} error={participantsError} onDeleted={()=>{}} onUpdated={()=>{}}/>}
+            </details>
+          </>}
+          {section === "sql-study" && <SqlStudyPanel />}
+          {section === "science-archive" && <>
+            <section className="settings-card"><h2>科学教育 · 在线实验归档</h2><p>已完成的科学教育实验记录保留在原数据库中，提供身份表、对话查看与导出。</p>
+              <label>归档实验<select value={settings.experiment.id} onChange={e=>void selectExperiment(e.target.value)}>{experiments.filter(e=>e.name.includes("科学教育")).map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</select></label>
+              {experiments.some(e=>e.id===settings.experiment.id&&e.name.includes("科学教育"))&&<ParticipantDirectory key={settings.experiment.id} readOnly experimentId={settings.experiment.id} runId="" participants={participants} loading={participantsLoading} error={participantsError} onDeleted={()=>{}} onUpdated={()=>{}}/>}
+            </section><LocalBackupsPanel scope="science-archive" />
+          </>}
           {creatingExperiment && <section className="settings-card"><h2>新增实验</h2><p>复制当前实验的任务、规则与智能体配置；新实验的修改和数据独立保存，不复制被试记录或场次。</p><form className="new-experiment-form" onSubmit={addExperiment}><label>实验名称<input value={newExperimentName} maxLength={120} required onChange={(event) => setNewExperimentName(event.target.value)} /></label><button className="admin-save" disabled={saving || !newExperimentName.trim()}>创建实验</button></form>{error && <p role="alert">{error}</p>}</section>}
           {section === "participants" && <label className="run-filter">查看分组入口<select value={runFilter} onChange={(event) => { setRunFilter(event.target.value); runFilterRef.current=event.target.value; setParticipants([]); void loadParticipants(); }}><option value="">全部分组</option>{runs.map((run) => <option key={run.id} value={run.id}>{run.name}{run.entryDeletedAt ? "（链接已删除）" : ""}</option>)}</select></label>}
           {section === "participants" && <ParticipantDirectory key={`${settings.experiment.id}:${runFilter}`} experimentId={settings.experiment.id} runId={runFilter} participants={participants} loading={participantsLoading} error={participantsError} onDeleted={(participantId) => setParticipants((current) => current.filter((participant) => participant.id !== participantId))} onUpdated={(id,profile)=>setParticipants(rows=>rows.map(row=>row.id===id?{...row,fullName:profile.fullName,studentNumber:profile.studentNumber,profileUpdatedAt:profile.updatedAt,profileRevision:profile.revision ?? 0}:row))} />}
@@ -258,7 +269,8 @@ function DangerConfirmation({ title, description, expectedValue, expectedLabel, 
   </div>;
 }
 
-function ParticipantDirectory({ participants, loading, error, onDeleted, onUpdated, experimentId, runId }: {
+function ParticipantDirectory({ participants, loading, error, onDeleted, onUpdated, experimentId, runId, readOnly=false }: {
+  readOnly?: boolean;
   experimentId: string; runId: string;
   participants: ParticipantDirectoryRow[]; loading: boolean; error: string; onDeleted: (participantId: string) => void;
   onUpdated: (participantId:string,profile:ParticipantProfile) => void;
@@ -348,7 +360,7 @@ function ParticipantDirectory({ participants, loading, error, onDeleted, onUpdat
           <td><code>{participant.participantCode}</code></td><td>{participant.fullName || <span className="missing-value">未填写</span>}</td><td>{participant.studentNumber || <span className="missing-value">未填写</span>}</td>
           <td className="directory-agent-cell">{participant.assignedAgents.length ? <div className="directory-agent-list">{Array.from(new Set(participant.assignedAgents.map(agent => agent.internalName))).map(name => <span key={name}>{name}</span>)}</div> : <span className="missing-value">暂无分配记录</span>}</td>
           <td>{participant.sessionCount}</td><td>{participant.turnCount}</td><td>{formatDate(participant.lastActivityAt)}</td>
-          <td><div className="participant-row-actions"><button className="admin-refresh" onClick={()=>setEditing(participant)}>编辑信息</button><button className="admin-refresh" onClick={()=>setViewing(participant)}>查看交互</button><button className="table-danger" disabled={Boolean(exporting) || Boolean(runId)} onClick={() => { setDeleteError(""); setPendingDelete(participant); }}>删除记录</button></div></td>
+          <td><div className="participant-row-actions">{!readOnly&&<button className="admin-refresh" onClick={()=>setEditing(participant)}>编辑信息</button>}<button className="admin-refresh" onClick={()=>setViewing(participant)}>查看交互</button>{!readOnly&&<button className="table-danger" disabled={Boolean(exporting) || Boolean(runId)} onClick={() => { setDeleteError(""); setPendingDelete(participant); }}>删除记录</button>}</div></td>
         </tr>)}</tbody>
       </table></div>}
     </section>

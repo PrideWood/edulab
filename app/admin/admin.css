@@ -375,3 +375,12 @@
 .comparison-result h4 { margin: 0 0 8px; overflow-wrap: anywhere; }
 .comparison-answer { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; font-size: 14px; margin-top: 14px; }
 @media (max-width: 800px) { .comparison-variants, .comparison-results { grid-template-columns: minmax(0, 1fr); } }
+
+/* Central SQL classroom workspace, preserving the admin palette. */
+.sql-study-panel label{display:block;margin:14px 0}.sql-study-panel :is(input,select,textarea){max-width:100%}.sql-study-panel textarea{display:block;width:100%;min-height:95px;margin-top:7px}.sql-control-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(215px,1fr));gap:18px;align-items:end}.sql-control-grid input[type=checkbox]{width:auto;margin-right:8px}.sql-save-bar{display:flex;gap:15px;justify-content:space-between;align-items:center;border:1px solid var(--admin-line,#dfe7e5);background:#f5f8f6;padding:16px;margin:20px 0;border-radius:10px}.sql-study-panel details{padding:18px 0;border-bottom:1px solid #dfe7e5}.sql-study-panel summary{font-weight:650;cursor:pointer}.sql-study-panel pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f6f4;padding:15px;border-radius:8px}.sql-study-panel .local-backup-table input{width:180px}.sql-study-panel .local-backup-table select{min-width:125px}.sql-debug-output{max-height:450px;overflow:auto}@media(max-width:760px){.sql-save-bar{align-items:stretch;flex-direction:column}}
+
+.sql-study-panel .checkpoint-input{resize:both;min-height:90px;max-width:100%;line-height:1.65;padding:10px;border:1px solid #ccdcd1;border-radius:8px}
+.sql-study-panel .sql-lesson-divider th{background:#edf4ef;color:#2c5d46;font-weight:700;padding-top:14px;padding-bottom:14px;border-top:1px solid #d2e2d8}
+.sql-study-panel .sql-version-history{margin:14px 0 24px;padding:14px 18px;border:1px solid #dde6df;border-radius:10px;background:#fafcfb}
+.sql-version-history>ol{padding-left:22px}.sql-version-history>ol>li{padding:12px 0;border-bottom:1px solid #e2eae4}.sql-version-history span,.sql-version-history ul{color:#627168;font-size:12px}.sql-version-history ul{padding-left:18px;margin-top:8px;line-height:1.8}
+.sql-test-assignment{margin:18px 0}.sql-test-assignment form{padding:14px 0;border-bottom:1px solid #dfe8e1}
