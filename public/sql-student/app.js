@@ -20,7 +20,7 @@ async function api(path, data) {
         headers['X-Participant'] = identity.id;
         headers['X-Participant-Session'] = identity.token;
     }
-    const response = await fetch(path, { method: data ? 'POST' : 'GET', headers: Object.assign(Object.assign({}, headers), (data ? { 'Content-Type': 'application/json' } : {})), body: data ? JSON.stringify(data) : undefined });
+    const response = await fetch(path, { method: data ? 'POST' : 'GET', mode: 'same-origin', referrerPolicy: 'same-origin', headers: Object.assign(Object.assign({}, headers), (data ? { 'Content-Type': 'application/json' } : {})), body: data ? JSON.stringify(data) : undefined });
     const out = await response.json();
     if (out.code === 'ACCESS_REQUIRED') {
         location.href = '/sql-student';

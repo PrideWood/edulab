@@ -1,4 +1,4 @@
-# EduLab SQL 0.13.1：当次任务版
+# EduLab SQL 0.13.2：当次任务版
 
 当前机房：Windows 7 64位、Chrome 69.0.3497.81。分发Win7 x64包；不需要学生安装Python或Node。数据库操作继续使用SSMS和真实SQL Server，不由平台模拟运行结果。
 
@@ -25,8 +25,12 @@
 
 线上入口：https://edulab.dacnote.com/sql-student。本机优先使用Start-Classroom.cmd；两种方式与排障边界详见docs/sql-dual-deployment.md。
 
-## 0.13.1 机房运行库修复
+## 0.13.2 机房运行库修复
 
 Win7 包内置微软 SDK 14393 的完整41个 UCRT DLL，与 Python 放在同一目录。无需安装 Python、系统 UCRT 补丁或重启电脑；不写入 System32。先关闭旧平台窗口，将新版完整解压到新文件夹后运行 Start-Classroom.cmd。机房真机仍需复测，其他缺失组件须根据具体报错排查。
 
 复现构建：prepare_ucrt.py 从校验过的官方 SDK 安装介质提取运行库；build_windows.py --win7 --arch x64 --ucrt-dir <提取后的x64目录>。构建会核对固定清单、每个文件的 SHA256、PE 架构和导出名称；缺文件或不匹配即失败。SDK 来源与许可随包保留。
+
+## 0.13.2 本机登录来源修复
+
+页面响应与API请求使用 same-origin 来源策略，防止 no-referrer 导致旧浏览器提交来源为null、被本机校验误拦截。保留严格的127.0.0.1端口、来源和本机随机令牌校验，不允许跨站或null来源直接通过。升级时关闭旧平台窗口和旧浏览器页签，完整解压新包并用新版启动器打开，无需重启电脑。

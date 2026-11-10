@@ -571,7 +571,7 @@ class Handler(BaseHTTPRequestHandler):
         blob=encode(data).encode() if ctype.startswith('application/json') else data
         self.send_response(status); self.send_header('Content-Type',ctype)
         self.send_header('Cache-Control','no-store'); self.send_header('X-Content-Type-Options','nosniff')
-        self.send_header('Referrer-Policy','no-referrer')
+        self.send_header('Referrer-Policy','same-origin')
         self.send_header('Content-Length',str(len(blob))); self.end_headers(); self.wfile.write(blob)
     def guard(self):
         host=f'127.0.0.1:{self.server.server_port}'
@@ -610,7 +610,7 @@ class Handler(BaseHTTPRequestHandler):
                     safe=[{k:v for k,v in q.items() if k!='answer'} if isinstance(q,dict) else q for q in bank]
                     if stage=='posttest':safe += [{'id':q['id'],'kind':'sql','text':q['text']} for q in self.store.quiz_sql_items(r)]
                     return self.respond(safe)
-                if path=='/api/health': return self.respond({'ok':True,'application':STUDY,'version':'0.13.1'})
+                if path=='/api/health': return self.respond({'ok':True,'application':STUDY,'version':'0.13.2'})
                 raise Problem('未找到接口。',404)
             filename={'/':'index.html','/app.js':'app.js','/compat.js':'compat.js','/style.css':'style.css'}.get(path)
             if not filename: raise Problem('未找到页面。',404)
@@ -686,7 +686,7 @@ def verified_launch_url(launch):
     if parsed.scheme!='http' or parsed.hostname!='127.0.0.1' or not parsed.port or not key:raise ValueError('invalid local launch')
     request=urllib.request.Request('http://127.0.0.1:'+str(parsed.port)+'/api/health',headers={'X-Local-Key':key})
     with urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect).open(request,timeout=2) as response:health=json.loads(response.read(1024))
-    if health.get('application')!=STUDY or health.get('version')!='0.13.1':raise ValueError('old service')
+    if health.get('application')!=STUDY or health.get('version')!='0.13.2':raise ValueError('old service')
     return url
 
 def main():
@@ -723,7 +723,7 @@ def main():
     threading.Thread(target=store.backup_loop,daemon=True).start()
     url=f'http://127.0.0.1:{server.server_port}/#key={store.token}'
     launch=args.data_dir/'launch.json'
-    launch.write_text(encode({'url':url,'admin_url':'https://edulab.dacnote.com/admin','version':'0.13.1','pid':os.getpid(),'created_epoch':time.time()}),encoding='utf-8'); launch.chmod(0o600)
+    launch.write_text(encode({'url':url,'admin_url':'https://edulab.dacnote.com/admin','version':'0.13.2','pid':os.getpid(),'created_epoch':time.time()}),encoding='utf-8'); launch.chmod(0o600)
     print('EduLab SQL 本地MVP已启动：'+url,flush=True)
     print('教师管理统一使用EduLab管理平台；本机数据目录：'+str(args.data_dir),flush=True)
     print('默认使用明确标注的演示学徒。真实AI需要网络；本机保存不依赖云端。',flush=True)

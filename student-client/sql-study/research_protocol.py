@@ -66,7 +66,7 @@ def install(Base,Problem,stamp):
                         db.execute('DELETE FROM students WHERE id=?',(old['id'],))
             result=super().enter(data);p=self.get(result['id'])
             if self.activate_research(p):self.save(p)
-            p['test_cleanup_epoch']=epoch;p['client_version']='0.13.1';self.save(p)
+            p['test_cleanup_epoch']=epoch;p['client_version']='0.13.2';self.save(p)
             return {**self.public(p),'session_token':result['session_token']}
 
         def research_snapshot(self,r):
@@ -102,7 +102,7 @@ def install(Base,Problem,stamp):
 
         def public(self,p):
             changed=self.upgrade_individual_windows(p)
-            if p.get('client_version')!='0.13.1' or p.get('access_policy')!=ACCESS_POLICY:p.update(client_version='0.13.1',access_policy=ACCESS_POLICY,delivery_mode='local',measurement_policy='required-no-prediction/1');changed=True
+            if p.get('client_version')!='0.13.2' or p.get('access_policy')!=ACCESS_POLICY:p.update(client_version='0.13.2',access_policy=ACCESS_POLICY,delivery_mode='local',measurement_policy='required-no-prediction/1');changed=True
             for r in p['rounds']:
                 if enabled(r['config']) and tick_clock(r,self.clock()):changed=True
                 if enabled(r['config']) and self.stage_started(r,'ai') and self.clock()>=r['teaching_deadline']:

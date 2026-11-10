@@ -407,6 +407,23 @@ class StudyTests(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError):local_open(urllib.request.Request(base+'/api/state',headers={**headers,'Origin':'http://evil.test'}))
         finally:server.shutdown();server.server_close()
 
+    def test_same_origin_browser_policy_and_login_keep_cross_site_guard(self):
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.store=self.s
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        base='http://127.0.0.1:'+str(server.server_port)
+        try:
+            with local_open(base+'/') as response:self.assertEqual(response.headers['Referrer-Policy'],'same-origin')
+            payload=encode({'class_code':'2531','name':'来源回归','confirmed':True}).encode()
+            headers={'X-Local-Key':self.s.token,'Content-Type':'application/json','Origin':base}
+            with local_open(urllib.request.Request(base+'/api/enter',data=payload,headers=headers)) as response:
+                participant=json.load(response);self.assertTrue(participant['id']);self.assertTrue(participant['session_token'])
+            for origin in ('null','http://evil.test',base+'0','https://'+base[7:]):
+                with self.assertRaises(urllib.error.HTTPError) as caught:local_open(urllib.request.Request(base+'/api/enter',data=payload,headers={**headers,'Origin':origin}))
+                self.assertEqual(caught.exception.code,403)
+            with self.assertRaises(urllib.error.HTTPError) as caught:local_open(urllib.request.Request(base+'/api/enter',data=payload,headers={**headers,'X-Local-Key':'wrong'}))
+            self.assertEqual(caught.exception.code,403)
+        finally:server.shutdown();server.server_close()
+
     def test_new_quiz_has_ten_single_choices_and_cannot_change_assignment(self):
         pid=self.prepared();p=self.s.get(pid);before=(p['pretest'],p['group'],p.get('assignment'),p['rounds'][0]['config'])
         self.practice(pid);self.s.act(pid,'submit_practice',{});self.s.act(pid,'start_quiz',{})
