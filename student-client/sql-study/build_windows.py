@@ -10,7 +10,7 @@ WIN7_SHA256={'x64':'abbe314e9b41603dde0a823b76f5bbbe17b3de3e5ac4ef06b759da546671
 def main():
     p=argparse.ArgumentParser();p.add_argument('--go',default='go');p.add_argument('--python-zip',type=Path);p.add_argument('--win7',action='store_true');p.add_argument('--arch',choices=['x64','x86'],default='x64');p.add_argument('--config',type=Path,default=ROOT/'.private/runtime.json');a=p.parse_args()
     if not a.win7 and a.arch!='x64':raise SystemExit('The modern runtime is x64 only; use --win7 for x86.')
-    version='0.12.0'
+    version='0.13.0'
     python_version='3.8.10' if a.win7 else PYTHON_VERSION
     python_sha=WIN7_SHA256[a.arch] if a.win7 else PYTHON_SHA256
     python_url=f'https://www.python.org/ftp/python/{python_version}/python-{python_version}-embed-'+('win32' if a.arch=='x86' else 'amd64')+'.zip'
@@ -48,9 +48,9 @@ def main():
     content=out.read_bytes();offset=int.from_bytes(content[60:64],'little')
     if content[:2]!=b'MZ' or content[offset:offset+6]!=(b'PE\x00\x00'+(b'\x4c\x01' if a.arch=='x86' else b'\x64\x86')):raise ValueError('Windows PE architecture mismatch')
     digest=hashlib.sha256(content).hexdigest();(release/'SHA256SUMS.txt').write_text(digest+'  EduLab-SQL.exe\n',encoding='ascii');(release/'THIRD_PARTY_LICENSES.txt').write_text(licenses,encoding='utf-8')
-    instructions='''EduLab SQL Windows 64位 MVP（0.12.0）\n\n1. 完整解压后优先双击 Start-Classroom.cmd；也可使用 EduLab-SQL.exe，无须安装Python、Node或SQL平台服务。\n2. 程序优先打开Chrome。CMD入口保留服务窗口；EXE在确认浏览器启动后才最小化。实验期间保留该窗口；关闭它会停止本机服务。\n3. 选择班级、输入姓名并确认。先完成前测与课前问卷，教师按基线完成L/T分组后进入准备课P0，随后四次正式业务工单跨课固定组别。P0最多6轮、正式最多12轮；到上限或个人计时结束后收束，不设最低字数。个人教学徒时段结束填写精神努力（可暂不答），再进入独立实操。前测与实操提交前填写预估分（可暂不答）。系统仅显示教师指定的当次任务，无日期或定时开放限制；每课按教学徒、独立SSMS实操、测评依次进行，教学时段结束后才能进入实操；实操开始后不能返回AI。旧方案记录完整保存在scheme_history，不混入新轮次。\n4. AI仅在对话界面处于前台时累计用时，离开或切换窗口暂停；晚进入不被共同窗口拒绝，按累计时长和轮次收束；实操与后测计时仍为建议，完成后请主动提交。实际用时持续记录。\n5. 模型交互与云端同步需要网络。本机先保存，联网后自动补传；密钥与连接已经内置，无须学生配置。\n6. 数据保存在 %LOCALAPPDATA%\\EduLab-SQL，升级程序不会清空此目录。升级前先关闭旧服务窗口；再次双击正在运行的程序会打开原页面。\n7. 此包内置受控课堂的模型连接，仅限本实验分发；不要上传到公开下载站或源码仓库。\n8. 目标为Windows 10/11 x64，需要系统已安装Chrome 69或更新版本（或相应版本Edge）。若EXE没有任何文字，使用CMD入口绕过EXE启动器；异常时保留startup-diagnostic.log。线上备选：https://edulab.dacnote.com/sql-student。本次已验证应用逻辑、启动器逻辑和PE结构；仍需在学生Windows电脑上进行端到端验收。\n'''
+    instructions='''EduLab SQL Windows 64位 MVP（0.13.0）\n\n1. 完整解压后优先双击 Start-Classroom.cmd；也可使用 EduLab-SQL.exe，无须安装Python、Node或SQL平台服务。\n2. 程序优先打开Chrome。CMD入口保留服务窗口；EXE在确认浏览器启动后才最小化。实验期间保留该窗口；关闭它会停止本机服务。\n3. 选择班级、输入姓名并确认。先完成前测与课前问卷，教师按基线完成L/T分组后进入准备课P0，随后四次正式业务工单跨课固定组别。P0最多6轮、正式最多12轮；到上限或个人计时结束后收束，不设最低字数。个人教学徒时段结束填写精神努力（必答），再进入独立实操。量表和测试题全部必答，不采集成绩估算。系统仅显示教师指定的当次任务，无日期或定时开放限制；每课按教学徒、独立SSMS实操、测评依次进行，教学时段结束后才能进入实操；实操开始后不能返回AI。旧方案记录完整保存在scheme_history，不混入新轮次。\n4. AI仅在对话界面处于前台时累计用时，离开或切换窗口暂停；晚进入不被共同窗口拒绝，按累计时长和轮次收束；实操与后测计时仍为建议，完成后请主动提交。实际用时持续记录。\n5. 模型交互与云端同步需要网络。本机先保存，联网后自动补传；密钥与连接已经内置，无须学生配置。\n6. 数据保存在 %LOCALAPPDATA%\\EduLab-SQL，升级程序不会清空此目录。升级前先关闭旧服务窗口；再次双击正在运行的程序会打开原页面。\n7. 此包内置受控课堂的模型连接，仅限本实验分发；不要上传到公开下载站或源码仓库。\n8. 目标为Windows 10/11 x64，需要系统已安装Chrome 69或更新版本（或相应版本Edge）。若EXE没有任何文字，使用CMD入口绕过EXE启动器；异常时保留startup-diagnostic.log。线上备选：https://edulab.dacnote.com/sql-student。本次已验证应用逻辑、启动器逻辑和PE结构；仍需在学生Windows电脑上进行端到端验收。\n'''
     if a.win7:
-        instructions=instructions.replace('64位 MVP（0.12.0）',('32位' if a.arch=='x86' else '64位')+' Win7兼容版（0.12.0）').replace('目标为Windows 10/11 x64','目标为Windows 7 SP1 '+a.arch)
+        instructions=instructions.replace('64位 MVP（0.13.0）',('32位' if a.arch=='x86' else '64位')+' Win7兼容版（0.13.0）').replace('目标为Windows 10/11 x64','目标为Windows 7 SP1 '+a.arch)
         instructions+='\nWin7环境要求：须安装SP1、Universal C Runtime（KB2999226或替代更新）及支持安全DLL加载的更新（KB2533623/KB3063858或替代更新）。由机房管理员按系统位数安装官方更新；程序不会自动修改系统。若提示缺少api-ms-win-crt等DLL，请先补齐运行库。本版机房浏览器目标为Chrome 69.0.3497.81；不支持IE。32位包可用于32/64位系统，64位包只能用于64位系统。\n未在真实Win7机器验收，首次部署请先在一台学生机完成登录、文字/图片交互、实操提交及云备份检查。\n'
     (release/'Windows使用说明.txt').write_text(instructions,encoding='utf-8-sig')
     portable=release/'runtime';portable.mkdir(exist_ok=True)

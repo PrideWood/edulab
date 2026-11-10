@@ -8,8 +8,9 @@ const text=z.string().trim().min(1).max(15000);
 const dateOnly=z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v=>{const d=new Date(v+'T00:00:00Z');return Number.isFinite(d.getTime())&&d.toISOString().slice(0,10)===v;},'日期无效');
 const rule=z.object({mode:z.enum(['closed','open','scheduled','auto']),open_at:z.number().positive().nullable(),close_at:z.number().positive().nullable()}).refine(r=>r.mode!=='scheduled'||r.open_at!==null,'定时开放需要开始时间').refine(r=>!r.close_at||!r.open_at||r.close_at>r.open_at,'截止须晚于开放');
 export const controlSchema=z.object({
+ measurement_policy:z.literal('required-no-prediction/1').default('required-no-prediction/1'),
  access_policy:z.literal('current-task/1').default('current-task/1'),current_lessons:z.record(z.string(),z.number().int().min(0).max(4)).default({}),test_cleanup_epoch:z.string().default('sql-clean-20261110-01'),
- research:z.object({version:z.literal('sql-lt/1.1'),formal_turns:z.literal(12),preparation_turns:z.literal(6),closing_seconds:z.literal(60),preparation_grouped:z.literal(true),effort_version:z.literal('mental-effort-sql/1'),prediction_version:z.literal('predicted-score/1'),d1_version:z.literal('SQL-LT-D1/v1.0'),d1_delay_days:z.literal(7),d1_window_days:z.literal(2)}),
+ research:z.object({version:z.literal('sql-lt/1.1'),formal_turns:z.literal(12),preparation_turns:z.literal(6),closing_seconds:z.literal(60),preparation_grouped:z.literal(true),effort_version:z.literal('mental-effort-sql/1'),d1_version:z.literal('SQL-LT-D1/v1.1'),d1_delay_days:z.literal(7),d1_window_days:z.literal(2)}),
  research_questions:z.array(z.array(text)).length(5).superRefine((qs,ctx)=>{qs.forEach((q,i)=>{if(q.length!==(i===4?6:12))ctx.addIssue({code:'custom',message:'P0须6项、正式须12项有限问题',path:[i]});});}),
  d1_schedule:z.record(z.string(),z.object({t4_date:dateOnly.nullable(),d1_date:dateOnly.nullable()})).default({}),
  classes_version:z.literal(1),

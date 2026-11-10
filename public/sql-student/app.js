@@ -135,18 +135,16 @@ async function questionnaire(kind) {
             return;
         const meta = kind !== 'pretest';
         const draftKey = `answers:${identity.id}:${kind}`, draft = ((_a = state.measurement_drafts) === null || _a === void 0 ? void 0 : _a[kind]) || JSON.parse(sessionStorage.getItem(draftKey) || '[]');
-        layout(`${back()}<div class="page-head"><div><h2>${meta ? '学习过程问卷' : 'SQL 基础知识前测'}</h2><p class="muted">${meta ? esc(state.meta_spec.instruction) + '<br>1＝非常不同意，2＝不同意，3＝既不同意也不反对，4＝同意，5＝非常同意。' : '共20题，每题5分。每题只有一个正确答案，请独立作答。'}</p></div></div><form id="question-form" class="card">${bank.map((q, i) => `<fieldset class="${meta ? 'likert-question' : 'mcq-question'}"><legend>${i + 1}. ${esc(meta ? q : q.text)}</legend><div class="${meta ? 'likert-options' : 'mcq-options'}">${(meta ? [1, 2, 3, 4, 5] : q.options).map((v, j) => { const value = meta ? v : 'ABCD'[j]; return `<label class="choice ${meta ? 'likert-choice' : ''}"><input type="radio" name="q${i}" value="${value}" ${String(draft[i]) === String(value) ? 'checked' : ''} ${meta && state.prediction_enabled ? '' : 'required'}> ${meta ? '<span class="likert-value">' + v + '</span><span class="likert-label">' + esc(state.meta_spec.options[j]) + '</span>' : 'ABCD'[j] + '. ' + esc(v)}</label>`; }).join('')}</div></fieldset>`).join('')}${meta && state.prediction_enabled ? '<p class="small muted">你可以留空不愿回答的项目；未答作为缺失记录，不计0分。</p>' : ''}${!meta && state.prediction_enabled ? predictionFields('pretest') : ''}<p class="small muted">确认提交后不能修改。</p>${btn('确认提交', 'type="submit"')}</form>`);
+        layout(`${back()}<div class="page-head"><div><h2>${meta ? '学习过程问卷' : 'SQL 基础知识前测'}</h2><p class="muted">${meta ? esc(state.meta_spec.instruction) + '<br>1＝非常不同意，2＝不同意，3＝既不同意也不反对，4＝同意，5＝非常同意。' : '共20题，每题5分。每题只有一个正确答案，请独立作答。'}</p></div></div><form id="question-form" class="card">${bank.map((q, i) => `<fieldset class="${meta ? 'likert-question' : 'mcq-question'}"><legend>${i + 1}. ${esc(meta ? q : q.text)}</legend><div class="${meta ? 'likert-options' : 'mcq-options'}">${(meta ? [1, 2, 3, 4, 5] : q.options).map((v, j) => { const value = meta ? v : 'ABCD'[j]; return `<label class="choice ${meta ? 'likert-choice' : ''}"><input type="radio" name="q${i}" value="${value}" ${String(draft[i]) === String(value) ? 'checked' : ''} required> ${meta ? '<span class="likert-value">' + v + '</span><span class="likert-label">' + esc(state.meta_spec.options[j]) + '</span>' : 'ABCD'[j] + '. ' + esc(v)}</label>`; }).join('')}</div></fieldset>`).join('')}<p class="small muted">确认提交后不能修改。</p>${btn('确认提交', 'type="submit"')}</form>`);
         $('#back').onclick = () => navigate('home');
         const f = $('#question-form');
-        f.oninput = () => { if (!meta)
-            storePrediction(f, 'pretest'); };
         f.onchange = () => { const answers = bank.map((_, i) => meta ? (f.elements['q' + i].value ? Number(f.elements['q' + i].value) : null) : f.elements['q' + i].value); sessionStorage.setItem(draftKey, JSON.stringify(answers)); if (meta) {
             saveChain = saveChain.catch(() => { }).then(() => action('measurement_draft', { kind, answers }));
             saveChain.catch(e => toast(e.message));
         } };
         f.onsubmit = async (e) => { e.preventDefault(); const b = f.querySelector('button[type=submit]'); b.disabled = true; try {
             await saveChain;
-            await action(kind, Object.assign(Object.assign({}, (!meta ? predictionBody(f) : {})), { answers: bank.map((_, i) => meta ? (f.elements['q' + i].value ? Number(f.elements['q' + i].value) : null) : f.elements['q' + i].value) }));
+            await action(kind, { answers: bank.map((_, i) => meta ? (f.elements['q' + i].value ? Number(f.elements['q' + i].value) : null) : f.elements['q' + i].value) });
             sessionStorage.removeItem(draftKey);
             toast(kind === 'pretest' ? '基础前测已保存，请接着完成13题学习过程问卷。' : '已提交并保存');
             navigate(kind === 'pretest' && gate('meta_pre').open ? 'meta_pre' : 'home');
@@ -251,14 +249,13 @@ async function lesson(type, i) {
             } };
             return;
         }
-        layout(`${back()}<div class="page-head"><div><h2>SQL Server 独立实操</h2><p>${formatBrief(r.task.brief)}</p></div><span class="timer" data-deadline="${r.practice_deadline}"></span></div><form id="practice-form" class="card" data-round-id="${r.id}"><p class="muted">在电脑上的 SQL Server 完成操作，再粘贴代码和结果。确认提交时停止计时；请按教师安排完成；超出建议时长的实际用时仍会记录。</p>${['sql', 'result', 'note'].map((k, j) => `<label>${['SQL 代码', '本人运行结果（请粘贴实际结果文本）', '核验说明（必填）'][j]}<textarea name="${k}" required ${k === 'sql' ? 'class="code-input"' : ''}>${esc(r.draft[k])}</textarea></label>`).join('')}${r.dialogue ? predictionFields('practice:' + r.id) : ''}<div class="actions"><span id="save-status" class="small muted">草稿已保存到本机</span>${btn('完成实操并提交', 'type="submit"')}</div></form>`);
+        layout(`${back()}<div class="page-head"><div><h2>SQL Server 独立实操</h2><p>${formatBrief(r.task.brief)}</p></div><span class="timer" data-deadline="${r.practice_deadline}"></span></div><form id="practice-form" class="card" data-round-id="${r.id}"><p class="muted">在电脑上的 SQL Server 完成操作，再粘贴代码和结果。确认提交时停止计时；请按教师安排完成；超出建议时长的实际用时仍会记录。</p>${['sql', 'result', 'note'].map((k, j) => `<label>${['SQL 代码', '本人运行结果（请粘贴实际结果文本）', '核验说明（必填）'][j]}<textarea name="${k}" required ${k === 'sql' ? 'class="code-input"' : ''}>${esc(r.draft[k])}</textarea></label>`).join('')}<div class="actions"><span id="save-status" class="small muted">草稿已保存到本机</span>${btn('完成实操并提交', 'type="submit"')}</div></form>`);
         $('#back').onclick = () => navigate('home');
-        $('#practice-form').oninput = () => { if (r.dialogue)
-            storePrediction($('#practice-form'), 'practice:' + r.id); clearTimeout(draftTimer); $('#save-status').textContent = '正在保存…'; draftTimer = setTimeout(savePractice, 500); };
+        $('#practice-form').oninput = () => { clearTimeout(draftTimer); $('#save-status').textContent = '正在保存…'; draftTimer = setTimeout(savePractice, 500); };
         $('#practice-form').onsubmit = async (e) => { e.preventDefault(); if (!confirm('确认已完成实操？提交后停止计时，不能再修改。'))
             return; try {
             await flushDraft();
-            await action('submit_practice', predictionBody($('#practice-form')));
+            await action('submit_practice');
             toast('实操已提交，完成时长已记录');
             navigate('home');
         }
@@ -465,16 +462,6 @@ else {
         toast(e.message);
     }
 } })();
-function predictionFields(key) { var _a; let draft = {}; try {
-    draft = JSON.parse(sessionStorage.getItem('prediction:' + identity.id + ':' + key) || '{}');
-}
-catch (_b) { } return `<fieldset class="prediction-field"><legend>提交前估计（不计入本次成绩）</legend><label>在看到评分前，你估计本次可以得到多少分？<input name="predicted_score" type="number" min="0" max="100" step="1" inputmode="numeric" value="${esc((_a = draft.value) !== null && _a !== void 0 ? _a : '')}" placeholder="0—100"/></label><label><input type="checkbox" name="prediction_skipped" ${draft.skipped ? 'checked' : ''}/>暂不回答预估分</label><p class="small muted">按实际感受填写，填高填低均不影响评分。</p></fieldset>`; }
-function predictionBody(form) { var _a; if (!state.prediction_enabled)
-    return {}; const input = form.elements.predicted_score, skip = !!((_a = form.elements.prediction_skipped) === null || _a === void 0 ? void 0 : _a.checked); if (skip && (input === null || input === void 0 ? void 0 : input.value) !== '')
-    throw Error('请清空预估分，或取消“暂不回答”。'); if (!skip && (!input || input.value === '' || !Number.isFinite(Number(input.value)) || Number(input.value) < 0 || Number(input.value) > 100))
-    throw Error('请填写0—100预估分，或选择暂不回答。'); return { predicted_score: skip ? null : Number(input.value), prediction_skipped: skip }; }
-function storePrediction(form, key) { var _a, _b, _c; if (!state.prediction_enabled)
-    return; sessionStorage.setItem('prediction:' + identity.id + ':' + key, JSON.stringify({ value: (_b = (_a = form.elements.predicted_score) === null || _a === void 0 ? void 0 : _a.value) !== null && _b !== void 0 ? _b : '', skipped: !!((_c = form.elements.prediction_skipped) === null || _c === void 0 ? void 0 : _c.checked) })); }
 function updateResearchControls(r) {
     const el = $('#research-controls'), d = r.dialogue;
     if (!el || !d)
@@ -483,7 +470,7 @@ function updateResearchControls(r) {
     if (el.dataset.signature === signature)
         return;
     el.dataset.signature = signature;
-    el.innerHTML = `<p>已完成 ${d.completed_turns} / ${d.max_turns} 轮 · 不要求凑满轮数</p>${!d.closed ? '<button id="finish-dialogue" class="secondary" type="button" ' + (d.pending ? 'disabled' : '') + '>结束对话并整理</button>' : ''}${d.closed && !d.window_ended ? '<p>对话已收束。请静默核对来源、条件、结果粒度与核验依据，等待本课个人教学时段结束。</p>' : ''}${d.effort_due ? `<form id="effort-form"><fieldset><legend>回顾刚才向虚拟学徒讲解SQL的过程，你投入了多少心力？</legend><p class="small muted">心力指理解、组织解释和思考所投入的脑力。没有好坏之分。</p><div class="effort-options">${Array.from({ length: 9 }, (_, i) => `<label class="choice"><input type="radio" name="effort" value="${i + 1}"/>${i + 1}</label>`).join('')}</div><p class="small muted">1＝非常非常低　5＝中等　9＝非常非常高</p></fieldset><div class="actions"><button type="submit">提交并继续</button><button id="skip-effort" class="secondary" type="button">暂不回答并继续</button></div></form>` : d.effort_done ? '<p>结束卡已保存，请按教师安排进入独立实操。</p>' : ''}`;
+    el.innerHTML = `<p>已完成 ${d.completed_turns} / ${d.max_turns} 轮 · 不要求凑满轮数</p>${!d.closed ? '<button id="finish-dialogue" class="secondary" type="button" ' + (d.pending ? 'disabled' : '') + '>结束对话并整理</button>' : ''}${d.closed && !d.window_ended ? '<p>对话已收束。请静默核对来源、条件、结果粒度与核验依据，等待本课个人教学时段结束。</p>' : ''}${d.effort_due ? `<form id="effort-form"><fieldset><legend>回顾刚才向虚拟学徒讲解SQL的过程，你投入了多少心力？</legend><p class="small muted">心力指理解、组织解释和思考所投入的脑力。没有好坏之分。</p><div class="effort-options">${Array.from({ length: 9 }, (_, i) => `<label class="choice"><input type="radio" name="effort" value="${i + 1}" required/>${i + 1}</label>`).join('')}</div><p class="small muted">1＝非常非常低　5＝中等　9＝非常非常高</p></fieldset><div class="actions"><button type="submit">提交并继续</button></div></form>` : d.effort_done ? '<p>结束卡已保存，请按教师安排进入独立实操。</p>' : ''}`;
     const finish = $('#finish-dialogue');
     if (finish)
         finish.onclick = async () => { if (!confirm('确认结束本课对话？之后将静默整理，等待本课个人教学时段结束。'))
@@ -497,9 +484,9 @@ function updateResearchControls(r) {
     const form = $('#effort-form');
     if (form) {
         let saving = false;
-        const send = async (value, skipped) => { if (saving)
+        const send = async (value) => { if (saving)
             return; saving = true; try {
-            await action('mental_effort', { value, skipped });
+            await action('mental_effort', { value });
             navigate('home');
         }
         catch (e) {
@@ -509,8 +496,7 @@ function updateResearchControls(r) {
             saving = false;
         } };
         form.onsubmit = e => { e.preventDefault(); const value = form.elements.effort.value; if (!value)
-            return toast('请选择1—9，或暂不回答。'); send(Number(value), false); };
-        $('#skip-effort').onclick = () => send(null, true);
+            return toast('请选择1—9，完成本题后继续。'); send(Number(value)); };
     }
 }
 // Presence is scoped to the visible, focused conversation page. No foreground lease survives a restart.

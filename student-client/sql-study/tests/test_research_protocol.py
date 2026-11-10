@@ -77,13 +77,12 @@ class ResearchProtocolTests(unittest.TestCase):
         self.s.act(pid,'start_practice',{});self.assertEqual(self.s.get(pid)['rounds'][0]['mental_effort']['value'],7)
         self.assertTrue(self.s.state(pid)['rounds'][0]['chat_locked'])
         self.assertEqual(self.s.state(pid)['rounds'][0]['messages'],[])
-    def test_optional_effort_skip_is_not_middle_score_and_cannot_overwrite(self):
+    def test_required_effort_rejects_skip_and_cannot_overwrite(self):
         pid=self.start();self.chat(pid,'one');self.advance(900)
-        for value in [0,10,True,5.5]:
-            with self.assertRaises(Problem):self.s.act(pid,'mental_effort',{'value':value})
-        self.s.act(pid,'mental_effort',{'skipped':True,'value':None})
-        self.assertIsNone(self.s.get(pid)['rounds'][0]['mental_effort']['value'])
-        with self.assertRaises(Problem):self.s.act(pid,'mental_effort',{'value':5})
+        for body in [{'value':v} for v in [0,10,True,5.5,None]]+[{'skipped':True}]:
+            with self.assertRaises(Problem):self.s.act(pid,'mental_effort',body)
+        self.s.act(pid,'mental_effort',{'value':5})
+        with self.assertRaises(Problem):self.s.act(pid,'mental_effort',{'value':6})
         self.s.act(pid,'start_practice',{})
     def test_last_minute_saves_answer_without_new_question_and_hard_deadline(self):
         pid=self.start();self.chat(pid,'one');self.advance(840);self.chat(pid,'closing','这里的理由是…')
@@ -91,19 +90,17 @@ class ResearchProtocolTests(unittest.TestCase):
         pid2=self.person('另一个');p=self.s.get(pid2);p['group']='L';self.s.save(p);self.s.act(pid2,'new_round',{'lesson':4});self.s.act(pid2,'start_teaching',{})
         self.advance(901,pid2)
         with self.assertRaises(Problem):self.s.chat(pid2,{'request_id':'late','text':'来不及'})
-    def test_prediction_before_grading_and_immutable_after_submission(self):
-        p=self.s.enter({'class_code':'2531','name':'预测','confirmed':True});pid=p['id'];self.open('pretest')
-        for value in [-1,101,True,float('nan')]:
-            with self.assertRaises(Problem):self.s.act(pid,'pretest',{'answers':['A']*20,'predicted_score':value})
-        self.s.act(pid,'pretest',{'answers':['A']*20,'prediction_skipped':True})
-        self.assertEqual(self.s.get(pid)['pretest']['prediction']['status'],'skipped')
-        with self.assertRaises(Problem):self.s.act(pid,'pretest',{'answers':['A']*20,'predicted_score':100})
-        pid=self.start();self.chat(pid,'one');self.advance(900);self.s.act(pid,'mental_effort',{'skipped':True});self.s.act(pid,'start_practice',{})
+    def test_no_prediction_required_and_submission_immutable(self):
+        p=self.s.enter({'class_code':'2531','name':'必答','confirmed':True});pid=p['id'];self.open('pretest')
+        with self.assertRaises(Problem):self.s.act(pid,'pretest',{'answers':['A']*19+[None]})
+        self.s.act(pid,'pretest',{'answers':['A']*20})
+        self.assertNotIn('prediction',self.s.get(pid)['pretest'])
+        with self.assertRaises(Problem):self.s.act(pid,'pretest',{'answers':['B']*20})
+        pid=self.start();self.chat(pid,'one');self.advance(900);self.s.act(pid,'mental_effort',{'value':5});self.s.act(pid,'start_practice',{})
         self.s.act(pid,'draft',{'sql':'SELECT 1','result':'1','note':'核对行列'})
+        self.s.act(pid,'submit_practice',{})
+        self.assertNotIn('prediction',self.s.get(pid)['rounds'][0]['submission'])
         with self.assertRaises(Problem):self.s.act(pid,'submit_practice',{})
-        self.s.act(pid,'submit_practice',{'predicted_score':60})
-        self.assertEqual(self.s.get(pid)['rounds'][0]['submission']['prediction']['value'],60)
-        with self.assertRaises(Problem):self.s.act(pid,'submit_practice',{'predicted_score':100})
     def test_restart_preserves_counts_and_old_protocol_is_archived_not_relabelled(self):
         pid=self.start();self.chat(pid,'one');before=copy.deepcopy(self.s.get(pid));self.s.stop.set()
         self.s=Store(self.tmp.name,clock=lambda:self.clock[0]);self.assertEqual(self.s.get(pid)['rounds'][0]['messages'],before['rounds'][0]['messages'])
@@ -133,11 +130,12 @@ class ResearchProtocolTests(unittest.TestCase):
         self.assertEqual(r['teaching_deadline'],1900);self.assertEqual(r['teaching_clock']['elapsed_seconds'],0);self.assertNotIn('dialogue_end',r);self.assertEqual(r['previous_teaching_window']['deadline'],900)
         r['practice_start']=1000;r.pop('teaching_window_policy');p=self.s.get(pid);p['rounds'][0]=r;self.s.save(p)
         before=copy.deepcopy(r);self.s.state(pid);self.assertEqual(self.s.get(pid)['rounds'][0],before)
-    def test_optional_meta_missingness_keeps_dimension_thresholds(self):
+    def test_meta_requires_every_item(self):
         p=self.s.enter({'class_code':'2531','name':'问卷','confirmed':True});pid=p['id'];self.open('pretest');self.open('meta_pre')
-        self.s.act(pid,'pretest',{'answers':['A']*20,'predicted_score':60})
-        self.s.act(pid,'meta_pre',{'answers':[4]*6+[None]+[3]*4+[None,None]})
-        q=self.s.get(pid)['meta_pre'];self.assertEqual(q['monitoring'],4);self.assertIsNone(q['evaluation']);self.assertEqual(q['evaluation_n'],4)
+        self.s.act(pid,'pretest',{'answers':['A']*20})
+        with self.assertRaises(Problem):self.s.act(pid,'meta_pre',{'answers':[4]*12+[None]})
+        self.s.act(pid,'meta_pre',{'answers':[4]*13})
+        self.assertEqual(self.s.get(pid)['meta_pre']['evaluation'],4)
         with self.assertRaises(Problem):self.s.act(pid,'meta_pre',{'answers':[5]*13})
     def test_inflight_reply_cannot_introduce_question_inside_closing_minute(self):
         pid=self.start();self.advance(835);ready=threading.Event();release=threading.Event();original=self.s.infer

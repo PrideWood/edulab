@@ -9,4 +9,10 @@ build
 **/data/**
 *.tsbuildinfo
 
-student-client
+work
+student-client/*
+!student-client/sql-study/
+student-client/sql-study/*
+!student-client/sql-study/compile_browser.mjs
+!student-client/sql-study/questions.json
+!student-client/sql-study/web/

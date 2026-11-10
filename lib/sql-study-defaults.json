@@ -356,8 +356,7 @@
     "closing_seconds": 60,
     "preparation_grouped": true,
     "effort_version": "mental-effort-sql/1",
-    "prediction_version": "predicted-score/1",
-    "d1_version": "SQL-LT-D1/v1.0",
+    "d1_version": "SQL-LT-D1/v1.1",
     "d1_delay_days": 7,
     "d1_window_days": 2
   },
@@ -433,5 +432,6 @@
     "2531": 4,
     "2532": 4
   },
-  "test_cleanup_epoch": "sql-clean-20261110-01"
+  "test_cleanup_epoch": "sql-clean-20261110-01",
+  "measurement_policy": "required-no-prediction/1"
 }

@@ -14,7 +14,7 @@ class Tee:
         logfile.flush()
         if self.original:self.original.flush()
 sys.stdout=Tee(sys.stdout);sys.stderr=Tee(sys.stderr)
-print('\n[1/4] EduLab SQL 0.12.0 portable startup '+time.strftime('%Y-%m-%d %H:%M:%S'),flush=True)
+print('\n[1/4] EduLab SQL 0.13.0 portable startup '+time.strftime('%Y-%m-%d %H:%M:%S'),flush=True)
 print('[INFO] Diagnostic log: '+str(folder/'startup-diagnostic.log'),flush=True)
 try:
     import sqlite3,ssl

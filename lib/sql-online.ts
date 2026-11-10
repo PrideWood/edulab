@@ -27,7 +27,7 @@ export async function onlineEnter(device:string,input:Data){const {config}=await
 export async function onlineCall(device:string,participant:string,token:string,kind:string,input:Data={}){
  if(!uuid(device)||!uuid(participant))throw new StudentError('本机身份失效，请重新登录。',401);
  const sync=(await query<{payload:Data}>('SELECT edulab_local_backup.sql_student_sync($1::uuid) AS payload',[device])).rows[0].payload;const config=sync.config as Awaited<ReturnType<typeof getSqlControl>>['config'];
- return transaction(async c=>{const row=(await c.query<OnlineRow>('SELECT device_id,participant_id,session_hash,state,revision::text FROM sql_online_students p WHERE device_id=$1 AND participant_id=$2 AND NOT EXISTS(SELECT 1 FROM local_backup_dispositions d WHERE d.device_id=p.device_id AND d.participant_id=p.participant_id AND d.is_trashed) FOR UPDATE',[device,participant])).rows[0];verify(row,token);const p=row.state;const at=now();
+ return transaction(async c=>{const row=(await c.query<OnlineRow>('SELECT device_id,participant_id,session_hash,state,revision::text FROM sql_online_students p WHERE device_id=$1 AND participant_id=$2 AND NOT EXISTS(SELECT 1 FROM local_backup_dispositions d WHERE d.device_id=p.device_id AND d.participant_id=p.participant_id AND d.is_trashed) FOR UPDATE',[device,participant])).rows[0];verify(row,token);const p=row.state;p.client_version='0.13.0';p.measurement_policy='required-no-prediction/1';const at=now();
 
  recoverInterrupted(p,at);const before=JSON.stringify([p.group,p.test_lesson_control]);applyCloudSync(p,sync,at);let archive=JSON.stringify([p.group,p.test_lesson_control])!==before;let result:unknown;
  if(kind==='questions')result=studentQuestions(p,config,input.kind,input.round_id,at);
