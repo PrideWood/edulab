@@ -427,5 +427,11 @@
       "独立操作后要提交哪些材料，怎样确认已提交？"
     ]
   ],
-  "d1_schedule": {}
+  "d1_schedule": {},
+  "access_policy": "current-task/1",
+  "current_lessons": {
+    "2531": 4,
+    "2532": 4
+  },
+  "test_cleanup_epoch": "sql-clean-20261110-01"
 }

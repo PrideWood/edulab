@@ -86,6 +86,7 @@ def install(Base, Problem, encode, stamp):
                 with self.db() as db:people=[json.loads(r[0]) for r in db.execute('SELECT data FROM students')]
                 for p in people:
                     changed=False
+                    if p['id'] in payload.get('retired_test_participant_ids',[]) and not p.get('retired_by_cloud'):p['test_identity']=True;p['retired_by_cloud']=True;changed=True
                     assignment=next((a for a in payload.get('assignments',[]) if a['class_code']==p['class_code'] and a['participant_name']==p.get('name')),None)
                     if assignment and assignment['group_code'] in ('L','T'):
                         g=assignment['group_code']
@@ -159,6 +160,9 @@ def install(Base, Problem, encode, stamp):
             return {**self.public(p),'session_token':session}
 
         def gate(self,p,key):
+            if self.config().get('access_policy')=='current-task/1':
+                from task_access import gate as current_task_gate
+                return current_task_gate(self,p,key)
             if p['class_code'] not in self.active_classes():return {'open':False,'reason':'班级已停用，请联系教师；已有记录保留'}
             if key=='meta_pre' and p['pretest'] is None:return {'open':False,'reason':'请先完成SQL基础前测'}
             if key=='meta_post' and (next_lesson(p) is not None or not p['rounds'] or any(r['phase']!='done' for r in p['rounds'])):return {'open':False,'reason':'请先完成全部课程任务和后测'}
@@ -181,7 +185,7 @@ def install(Base, Problem, encode, stamp):
                 if stage=='practice' and not (current and self.stage_started(current,'practice')):
                     if not current or not self.stage_started(current,'ai') or not any(m.get('role')=='user' for m in current['messages']):
                         return {'open':False,'reason':'请先完成本课教学徒环节并发送讲解'}
-                    if self.clock()<current.get('teaching_deadline',0):return {'open':False,'reason':'等待统一教学时段结束后进入独立实操'}
+                    if self.clock()<current.get('teaching_deadline',0):return {'open':False,'reason':'等待本课个人教学时段结束后进入独立实操'}
                 if stage=='posttest' and not (current and current.get('submission')):
                     return {'open':False,'reason':'请先提交本课独立实操'}
             if self.cloud_managed and (self.last_control_sync is None or time.monotonic()-self.last_control_sync>120): return {'open':False,'reason':'等待教师课堂安排同步'}

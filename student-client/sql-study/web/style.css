@@ -117,3 +117,23 @@ body:has(#teacher[open]) #toast{background:#193632;box-shadow:0 5px 20px #0002}
 #app .timer{font-size:18px;line-height:1.45;max-width:260px;white-space:normal}
 
 .effort-options{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:6px;margin:16px 0}.effort-options .choice{display:flex;justify-content:center;gap:5px;padding:12px 3px}.prediction-field{margin:20px 0;padding:16px;border:1px solid #d5e3ee;border-radius:12px}.prediction-field input[type=number]{max-width:180px}#research-controls:empty{display:none}@media(max-width:650px){.effort-options{grid-template-columns:repeat(3,1fr)}}
+
+/* Classroom Chrome 69 fallback: grid gap works, flex gap and newer selectors do not. */
+dialog{width:94vw;max-width:1080px}dialog:not(#teacher){max-width:480px}
+#app input:focus,#app textarea:focus,#app select:focus,dialog input:focus,dialog select:focus{outline:2px solid #62bde9;outline-offset:2px;border-color:#65b9e5}
+#app button:focus{outline:2px solid #55b5e6;outline-offset:3px}
+#app input::placeholder,#app textarea::placeholder{color:#829eb1}
+#app .login-intro::before{top:0;right:0;bottom:0;left:0}
+#app .message,#app pre,#app .bubble{overflow-wrap:break-word;word-wrap:break-word}
+#app .page-head{align-items:flex-start}
+.no-flex-gap #app .brandmark{margin-right:10px}
+.no-flex-gap #app .topbar-right>*{margin-left:10px}
+.no-flex-gap #app .entry-card>div{margin-right:12px}
+.no-flex-gap #app .lesson-card summary>*{margin-right:14px}
+.no-flex-gap #app .message-row>.chat-person{margin-right:12px}
+.no-flex-gap #app .message-row.user>.chat-person{margin-right:0;margin-left:12px}
+.no-flex-gap #app .chat-person>*+*{margin-top:5px}
+.no-flex-gap #app .actions>button{margin-right:10px;margin-top:6px}
+.no-flex-gap #app .choice input{margin-right:10px}
+.no-flex-gap #app .likert-choice input{margin-right:0;margin-bottom:6px}
+.no-flex-gap #app .image-preview>*+*{margin-left:12px}

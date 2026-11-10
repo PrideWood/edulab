@@ -31,3 +31,6 @@ test('compatible bootstrap precedes application and selection styling does not r
  assert.match(app,/app.onchange=.*syncChoices/);
  assert.match(app,/syncChoices\(\);\$\('#nav-home'\)/);
 });
+
+test('Chrome69 bootstrap restores fromEntries without prototype mutation',()=>{function Form(){}const context=vm.createContext({window:{},HTMLFormElement:Form,document:{}});vm.runInContext('delete Object.fromEntries;',context);vm.runInContext(compat,context);assert.equal(vm.runInContext('Object.fromEntries([["score",1],["score",2]]).score',context),2);assert.equal(vm.runInContext('Object.prototype.hasOwnProperty.call(Object.fromEntries([["__proto__",7]]),"__proto__")',context),true);assert.equal(vm.runInContext('window.globalThis===window',context),true);});
+test('entire packaged student script parses at ES2017 language level',async()=>{const {compileChrome69}=await import('../compile_browser.mjs');const script=compileChrome69(await readFile(new URL('../web/app.js',import.meta.url),'utf8'));assert.match(script,/Chrome 69, ES2017/);new vm.Script(script);});

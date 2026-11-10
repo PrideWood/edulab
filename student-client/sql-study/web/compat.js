@@ -1,6 +1,27 @@
 /* Loaded before app.js. Keep this bootstrap compatible with older browsers. */
 (function () {
   'use strict';
+  if (!window.globalThis) window.globalThis = window;
+  if (!Object.fromEntries) {
+    Object.defineProperty(Object, 'fromEntries', {configurable:true,writable:true,value:function (iterable) {
+      var object = {};
+      var iterator = iterable[Symbol.iterator]();
+      var step;
+      while (!(step = iterator.next()).done) {
+        var entry = step.value;
+        Object.defineProperty(object, entry[0], {value:entry[1],writable:true,enumerable:true,configurable:true});
+      }
+      return object;
+    }});
+  }
+  if (document.documentElement && document.body) {
+    var probe = document.createElement('div');
+    probe.style.cssText = 'display:flex;flex-direction:column;row-gap:1px;position:absolute;visibility:hidden';
+    for (var i=0;i<2;i++) { var child=document.createElement('div'); child.style.height='1px'; probe.appendChild(child); }
+    document.body.appendChild(probe);
+    if (probe.scrollHeight !== 3) document.documentElement.classList.add('no-flex-gap');
+    probe.remove();
+  }
   if (!Array.prototype.at) {
     Object.defineProperty(Array.prototype, 'at', {
       configurable: true, writable: true,

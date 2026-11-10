@@ -39,7 +39,7 @@ test('preparation uses the assigned L/T policy from its first interaction',()=>{
  assert.equal(p.controlSchema.safeParse(altered).success,false);
 });
 
-test('browser admin reads lesson numbers from the dependency-free display module',async()=>{const panel=await readFile('app/admin/sql-study-panel.tsx','utf8');assert.match(panel,/import type \{SqlControl\} from '@\/lib\/sql-study-policy'/);assert.match(panel,/import \{classroomScheduleGroups,SQL_LESSON_ORDER,sqlLessonNumber[^}]*\} from '@\/lib\/sql-study-display'/);});
+test('browser admin reads lesson numbers from the dependency-free display module',async()=>{const panel=await readFile('app/admin/sql-study-panel.tsx','utf8');assert.match(panel,/import type \{SqlControl\} from '@\/lib\/sql-study-policy'/);assert.match(panel,/import \{SQL_LESSON_ORDER,[^}]*\} from '@\/lib\/sql-study-display'/);});
 
 test('version history compares legacy three-lesson revisions and transitions without throwing',()=>{
  const old=structuredClone(cfg);old.tasks.pop();old.prompts.lessons.pop();delete old.prompts.preparation;delete old.preparation_timing;

@@ -18,7 +18,11 @@ class Store(CurrentStore.__bases__[0]):
     def __init__(self,*args,**kwargs):
         super().__init__(*args,**kwargs)
         from course_layout import PREPARATION_POLICY
-        cfg=self.config();cfg.pop('research',None);cfg.pop('research_questions',None);cfg['prompts']['preparation']=PREPARATION_POLICY;self.put_config(cfg)
+        cfg=self.config();cfg.pop('research',None);cfg.pop('research_questions',None);cfg.pop('access_policy',None);cfg.pop('current_lessons',None);cfg.pop('test_cleanup_epoch',None);cfg['prompts']['preparation']=PREPARATION_POLICY;self.put_config(cfg)
+    def put_config(self,cfg):
+        cfg=dict(cfg)
+        for key in ('research','research_questions','access_policy','current_lessons','test_cleanup_epoch'):cfg.pop(key,None)
+        super().put_config(cfg)
 from study_control import CLASSES
 
 class StudyTests(unittest.TestCase):

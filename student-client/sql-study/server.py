@@ -677,7 +677,7 @@ def open_student_browser(url):
                 subprocess.Popen([path,url],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
                 return True
             except OSError:pass
-    print('未找到Chrome或Edge。请使用Chrome95或更新版本打开上方本机地址；不支持Internet Explorer。',flush=True)
+    print('未找到Chrome或Edge。请使用Chrome69或更新版本打开上方本机地址；不支持Internet Explorer。',flush=True)
     return False
 
 def main():
