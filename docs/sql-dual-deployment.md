@@ -1,4 +1,4 @@
-# 0.13.0：Win7本机版与Vercel线上版
+# 0.13.1：Win7本机版与Vercel线上版
 
 机房目标为Windows 7 64位、Chrome 69.0.3497.81。保留当次任务、固定L/T、6/12轮、前台累计计时、精神努力、独立实操、测评和研究导出规则。
 
@@ -14,7 +14,7 @@ https://edulab.dacnote.com/sql-student
 
 ## 本机包
 
-完整解压0.13.0 Win7 x64包，先关闭旧服务窗口。
+完整解压0.13.1 Win7 x64包，先关闭旧服务窗口。
 
 1. 优先双击`Start-Classroom.cmd`。它直接运行包内Python，绕过EXE启动器，并先显示ASCII启动信息和运行库检查结果。
 2. 也可使用`EduLab-SQL.exe`。新版先显示启动阶段，确认Python已启动浏览器后才最小化，启动错误会保留在窗口中。
@@ -36,3 +36,5 @@ https://edulab.dacnote.com/sql-student
 自动化测试覆盖流程、当前任务、暂停计时、轮次、量表必答、移除成绩估算、重试、答案隐藏和云端会话隔离。另做真实模型、浏览器和持久化联调。Chrome69语法检查不能替代实际Win7机器验收；新版先在一台机房电脑验证，再统一发放。
 
 技术依据：[Vercel函数文件系统与运行时](https://vercel.com/docs/functions/runtimes)、[Next路由处理器](https://nextjs.org/docs/app/getting-started/route-handlers)。
+
+0.13.1 将 SDK 14393 UCRT 的41个DLL内置到两个入口的Python目录中，解决机房截图中的 api-ms-win-crt-runtime-l1-1-0.dll 缺失。无需安装MSU、修改System32或重启电脑。Windows端实际运行仍需机房复测。

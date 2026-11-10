@@ -187,7 +187,7 @@ func runtimeExitHint(code uint32) string {
 }
 
 func launch() error {
-	fmt.Println("[1/4] EduLab SQL 0.13.0 starting. If this never appears, use Start-Classroom.cmd.")
+	fmt.Println("[1/4] EduLab SQL 0.13.1 starting. If this never appears, use Start-Classroom.cmd.")
 	prepareConsole()
 	fmt.Println("EduLab SQL · Windows 轻量版")
 	fmt.Println("首次启动会在本机展开运行文件，无需安装 Python，无需下载浏览器。")
