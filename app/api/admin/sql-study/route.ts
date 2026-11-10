@@ -1,13 +1,15 @@
 import { z } from 'zod';
+import {saveResearchAssessment,exportEnaMessages,exportResearchMeasures,getPaperMaterial} from '@/lib/sql-study-research';
 import {getAuthenticatedAdmin,assertSameOrigin} from '@/lib/admin-auth';
 import {ApiError,errorResponse} from '@/lib/http';
 import {getSqlDashboard,getSqlControl,saveSqlControl,assignSqlClass,gradeSql,assignSqlTest,selectSqlTestLesson} from '@/lib/sql-study-control';
-import {composeSqlPrompt,toCsv,SQL_LESSON_ORDER,sqlLessonNumber,sqlLessonLabel,sqlRoundLabel,sqlRoundPhase,sqlRecordOrder,SQL_PREPARATION_LESSON} from '@/lib/sql-study-policy';
+import {composeSqlPrompt,boundedSqlReply,toCsv,SQL_LESSON_ORDER,sqlLessonLabel,sqlRoundLabel,sqlRoundPhase,sqlRecordOrder,SQL_PREPARATION_LESSON} from '@/lib/sql-study-policy';
 import {getSharedModelConnection,getSharedModelSummary} from '@/lib/shared-model';
 import {runDeepSeekChat,DeepSeekError} from '@/lib/deepseek';
 export const runtime='nodejs';export const maxDuration=120;
 const headers={'Cache-Control':'private, no-store'};
 const input=z.discriminatedUnion('action',[
+ z.object({action:z.literal('research_grade'),data:z.unknown()}),
  z.object({action:z.literal('save'),revision:z.number().int().positive(),config:z.unknown()}),
  z.object({action:z.literal('select_test_lesson'),deviceId:z.uuid(),participantId:z.uuid(),lesson:z.number().int().min(0).max(4)}),
  z.object({action:z.literal('assign_test'),classCode:z.string(),name:z.string().trim().min(1).max(100),group:z.enum(['L','T'])}),
@@ -17,7 +19,11 @@ const input=z.discriminatedUnion('action',[
 ]);
 export async function GET(request:Request){try{
  if(!await getAuthenticatedAdmin())throw new ApiError(401,'ADMIN_REQUIRED','请先登录EduLab管理后台。');
+ const formatRequested=new URL(request.url).searchParams.get('format');
+ if(formatRequested==='d1_student'||formatRequested==='d1_teacher')return new Response(await getPaperMaterial(formatRequested==='d1_student'?'student':'teacher'),{headers:{...headers,'Content-Type':'text/markdown; charset=utf-8','Content-Disposition':`attachment; filename="SQL-D1-${formatRequested==='d1_student'?'student':'teacher'}.md"`}});
  const data=await getSqlDashboard();const format=new URL(request.url).searchParams.get('format');
+ if(format==='ena')return csv(exportEnaMessages(data.records,new URL(request.url).searchParams.get('include_tests')==='1'),'SQL-ENA-messages-pseudonymized.csv');
+ if(format==='research')return csv(exportResearchMeasures(data.records,data.researchAssessments,new URL(request.url).searchParams.get('include_tests')==='1'),'SQL-research-measures.csv');
  if(format==='full')return new Response(JSON.stringify({study:'sql-teachable-mvp/1',exported_at:new Date().toISOString(),...data},null,2),{headers:{...headers,'Content-Type':'application/json; charset=utf-8','Content-Disposition':'attachment; filename="SQL-study-complete.json"'}});
  if(format==='posttests'){
   const rows:unknown[][]=[['设备编号','学生UUID','班级','姓名','测试身份','课次','研究阶段','状态','题型','版本','题数','答对数','选择题得分','满分','用时秒',...Array.from({length:10},(_,i)=>`Q${i+1}`),'题目快照JSON']];
@@ -75,6 +81,7 @@ function csv(text:string,name:string){return new Response(text,{headers:{...head
 export async function POST(request:Request){try{
  assertSameOrigin(request);const admin=await getAuthenticatedAdmin();if(!admin)throw new ApiError(401,'ADMIN_REQUIRED','请先登录EduLab管理后台。');
  const parsed=input.safeParse(await request.json());if(!parsed.success)throw new ApiError(400,'INVALID_SQL_ACTION','请检查课堂设置或作答评分。');const body=parsed.data;
+ if(body.action==='research_grade')return Response.json(await saveResearchAssessment(body.data,(await getSqlControl()).config,admin.id),{headers});
  if(body.action==='save')return Response.json(await saveSqlControl(body.config,body.revision,admin.id),{headers});
  if(body.action==='assign')return Response.json(await assignSqlClass(body.classCode,body.includeTests,admin.id),{headers});
  if(body.action==='select_test_lesson')return Response.json(await selectSqlTestLesson(body,admin.id),{headers});
@@ -82,9 +89,9 @@ export async function POST(request:Request){try{
  if(body.action==='grade')return Response.json(await gradeSql(body,admin.id),{headers});
  const {config}=await getSqlControl();const shared=config.mode==='real'?await getSharedModelConnection():null;
  const results=await Promise.all((['L','T'] as const).map(async group=>{
-  if(!shared)return {group,reply:'演示学徒：'+config.tasks[body.lesson].checks[body.lesson===SQL_PREPARATION_LESSON?0:group==='L'?1:0],source:'demo',reason:body.lesson===SQL_PREPARATION_LESSON?'准备课共同训练规则':group==='L'?'演示规则：按解释选问':'演示规则：按固定检查点推进'};
+  if(!shared)return {group,reply:'演示学徒：'+config.research_questions[body.lesson][group==='L'?1:0],source:'demo',reason:group==='L'?'演示规则：按解释选问':'演示规则：按固定检查点推进'};
   try{const reply=await runDeepSeekChat({token:shared.token,baseUrl:shared.baseUrl,directModel:{...shared.config,thinking:false,maxTokens:1600,systemPrompt:''},messages:[{role:'system',content:composeSqlPrompt(config,body.lesson,group)},{role:'user',content:body.text}],jsonOutput:true,signal:AbortSignal.timeout(75000)});
-   const result=JSON.parse(reply.answer);if(typeof result.reply!=='string'||!Number.isInteger(result.target)||result.target<0||result.target>5||(group==='T'&&body.lesson!==SQL_PREPARATION_LESSON&&result.target!==0))throw Error('invalid');return {group,...result,source:'deepseek'};
+   const result=JSON.parse(reply.answer);if(typeof result.reply!=='string'||!Number.isInteger(result.target)||result.target<0||result.target>5)throw Error('invalid');return {group,...result,target:group==='T'?0:result.target,reply:boundedSqlReply(config,body.lesson,group,1,result),source:'deepseek'};
   }catch(e){return {group,error:e instanceof DeepSeekError?e.message:'回复结构不完整或连接超时。'};}
  }));return Response.json({results,version:config.prompt_version,mode:config.mode},{headers});
 }catch(e){return errorResponse(e);}}

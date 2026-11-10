@@ -162,7 +162,8 @@ def upgrade_config(config):
         for c in cfg['classes']:
             cfg['schedules'].setdefault(c['code'], {k:{'mode':'auto' if k.startswith('practice') else 'closed','open_at':None,'close_at':None}
                 for k in ['pretest','meta_pre','meta_post'] + [s+str(i) for i in COURSE_ORDER for s in ('ai','practice','posttest')]})
-    return cfg
+    from research_protocol import upgrade_config as upgrade_research_config
+    return upgrade_research_config(cfg)
 
 def upgrade_participant(p, at):
     if p.get('scheme_version') == SCHEME_VERSION:

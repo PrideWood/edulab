@@ -12,7 +12,13 @@ from http.server import ThreadingHTTPServer
 _http_open=urllib.request.build_opener(urllib.request.ProxyHandler({})).open
 def local_open(req):return _http_open(req,timeout=5)
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from server import Store,Problem,Handler,encode
+from server import Store as CurrentStore,Problem,Handler,encode
+# Regression harness for immutable pre-research snapshots; new protocol is covered separately.
+class Store(CurrentStore.__bases__[0]):
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs)
+        from course_layout import PREPARATION_POLICY
+        cfg=self.config();cfg.pop('research',None);cfg.pop('research_questions',None);cfg['prompts']['preparation']=PREPARATION_POLICY;self.put_config(cfg)
 from study_control import CLASSES
 
 class StudyTests(unittest.TestCase):
@@ -479,7 +485,7 @@ class StudyTests(unittest.TestCase):
         previous=json.loads(encode(p['rounds']));measurements=(p['pretest'],p['meta_pre'],p['group'],p.get('assignment'))
         # Simulate a pre-four-course archive with its second displayed class active.
         p.pop('course_order');self.s.save(p)
-        command={'id':'switch-one','scheme_version':'business-workorders/1','device_id':self.s.setting('device'),'participant_id':pid,'lesson':3,'test_identity_verified':True}
+        command={'id':'switch-one','scheme_version':'business-workorders/1','research_version':'sql-lt/1.1','device_id':self.s.setting('device'),'participant_id':pid,'lesson':3,'test_identity_verified':True}
         cfg=self.s.config()
         for rule in cfg['schedules'][CLASSES[0]].values():rule['mode']='closed'
         payload={'config':cfg,'revision':12,'assignments':[],'grades':[],'test_lesson_commands':[command]}
@@ -505,7 +511,7 @@ class StudyTests(unittest.TestCase):
 
     def test_test_switch_is_device_scoped_verified_and_defers_running_model(self):
         pid=self.prepared();p=self.s.get(pid)
-        cmd={'id':'switch','scheme_version':'business-workorders/1','device_id':self.s.setting('device'),'participant_id':pid,'lesson':3,'test_identity_verified':True}
+        cmd={'id':'switch','scheme_version':'business-workorders/1','research_version':'sql-lt/1.1','device_id':self.s.setting('device'),'participant_id':pid,'lesson':3,'test_identity_verified':True}
         for bad in [{**cmd,'scheme_version':'old/1'},{**cmd,'device_id':'other-device'},{**cmd,'participant_id':'other-student'},{**cmd,'test_identity_verified':False},{**cmd,'lesson':True}]:
             self.assertFalse(self.s.apply_test_lesson_command(p,bad))
         self.s.active.add(pid);self.assertFalse(self.s.apply_test_lesson_command(p,cmd));self.s.active.remove(pid)

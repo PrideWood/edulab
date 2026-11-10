@@ -1,4 +1,5 @@
 import 'server-only';
+import type {ResearchAssessment} from './sql-study-research';
 import { randomUUID } from 'node:crypto';
 import { query,transaction } from '@/db';
 import { ApiError } from '@/lib/http';
@@ -14,6 +15,8 @@ export function upgradeSqlControl(config:SqlControl):SqlControl {
  }
 
  if(!next.classes){next.classes=structuredClone(defaults.classes);next.classes_version=1;for(const cls of next.classes)next.schedules[cls.code]??=structuredClone(defaults.schedules['2531']) as SqlControl['schedules'][string];}
+ if(!next.research){next.research=structuredClone(defaults.research) as SqlControl['research'];next.research_questions=structuredClone(defaults.research_questions);next.prompts=structuredClone(defaults.prompts);next.max_questions=12;}
+ next.d1_schedule??={};
  return next;
 }
 export async function getSqlControl(){
@@ -27,7 +30,8 @@ export async function saveSqlControl(config:unknown,revision:number,adminId:stri
  const old=(await c.query<{revision:number;config:SqlControl}>('SELECT revision,config FROM sql_study_control WHERE id=$1 FOR UPDATE',[SQL_STUDY])).rows[0];
  if(!old||old.revision!==revision)throw new ApiError(409,'CONTROL_CHANGED','设置已由其他窗口更新，请刷新后再保存。');
  const before=structuredClone(old);const previous=upgradeSqlControl(old.config);
- const next=parsed.data;next.prompt_version=previous.prompt_version+(JSON.stringify(previous.prompts)!==JSON.stringify(next.prompts)||JSON.stringify(previous.tasks)!==JSON.stringify(next.tasks)?1:0);
+ const next=parsed.data;for(const cls of activeSqlClasses(next))for(const [key,rule] of Object.entries(next.schedules[cls]))if(/^ai[0-4]$/.test(key)&&rule.mode==='open'){const prior=previous.schedules[cls]?.[key];rule.open_at=prior?.mode==='open'&&prior.open_at?prior.open_at:Math.floor(Date.now()/1000);if(rule.close_at&&rule.close_at<=rule.open_at)throw new ApiError(400,'INVALID_WINDOW','截止时间须晚于共同教学徒起点。');}
+ next.prompt_version=previous.prompt_version+(JSON.stringify(previous.prompts)!==JSON.stringify(next.prompts)||JSON.stringify(previous.tasks)!==JSON.stringify(next.tasks)||JSON.stringify(previous.research_questions)!==JSON.stringify(next.research_questions)?1:0);
  await c.query('INSERT INTO sql_study_versions(revision,prompt_version,config,summary) VALUES($1,$2,$3::jsonb,$4::jsonb) ON CONFLICT DO NOTHING',[before.revision,before.config.prompt_version,JSON.stringify(before.config),JSON.stringify(['保存时保留升级前原始配置；旧更新时间未记录'])]);
  await c.query('UPDATE sql_study_control SET config=$2::jsonb,revision=revision+1,updated_by=$3,updated_at=now() WHERE id=$1',[SQL_STUDY,JSON.stringify(next),adminId]);
  const summary=before.config.scheme_version!==next.scheme_version||before.config.dataset_version!==next.dataset_version?['切换为准备课P0与四次业务工单，使用已核对的脚本数据范围',...summarizeSqlChanges(previous,next)]:summarizeSqlChanges(previous,next);
@@ -46,6 +50,8 @@ export async function assignSqlClass(classCode:string,includeTests:boolean,admin
  const rows=(await c.query<CloudRow>(`SELECT p.* FROM edulab_local_backup.latest_participants p WHERE class_code=$1 AND archive->>'study_schema'=$2 AND ($3::boolean OR NOT is_test)
  AND NOT EXISTS(SELECT 1 FROM local_backup_dispositions d WHERE d.device_id=p.device_id AND d.participant_id=p.participant_id AND d.is_trashed) ORDER BY received_at DESC`,[classCode,SQL_STUDY,includeTests])).rows;
  const seen=new Set<string>();const unique=rows.filter(r=>{if(seen.has(r.participant_name))return false;seen.add(r.participant_name);return true;});
+ if(unique.some(r=>r.archive.study.research_version!=='sql-lt/1.1'))throw new ApiError(409,'CLIENT_UPGRADE_REQUIRED','名单含旧研究协议，请先升级0.10.0并同步。');
+ if(unique.some(r=>!r.archive.study.meta_pre))throw new ApiError(409,'BASELINE_PENDING','请先完成基础前测和课前问卷再分组。');
  const ready=unique.filter(r=>r.archive.study.pretest&&Number.isFinite(r.archive.study.pretest.score));
  if(unique.some(r=>!r.archive.study.pretest))throw new ApiError(409,'PRETEST_PENDING','该范围还有学生未完成前测，请先核对名单。');
  const old=(await c.query("SELECT 1 FROM sql_study_assignments WHERE class_code=$1 AND method<>'single_test_manual' LIMIT 1",[classCode])).rows;
@@ -59,7 +65,7 @@ export async function assignSqlClass(classCode:string,includeTests:boolean,admin
  await c.query('INSERT INTO sql_study_assignments(class_code,participant_name,group_code,pretest_score,pair_no,batch_id,method) VALUES($1,$2,$3,$4,$5,$6,$7)',[classCode,p.name,started&&existing?existing:p.group,p.score,p.pair,batch,started&&existing?'preserved_started_local_assignment':'class_adjacent_pair_constrained_random_1500']);}
  await c.query('INSERT INTO sql_study_audit(id,admin_id,action,payload) VALUES($1,$2,$3,$4::jsonb)',[randomUUID(),adminId,'class.assign',JSON.stringify({classCode,includeTests,batch,n:assigned.length})]);return {assigned:assigned.length,batch};});
 }
-export async function getSqlDashboard(){const [control,records,assignments,grades,versions,testLessonControls]=await Promise.all([getSqlControl(),sqlRoster(),getSqlAssignments(),query('SELECT device_id,participant_id,lesson,scores,updated_at FROM sql_study_grades'),getSqlVersions(),getSqlTestLessonCommands()]);
+export async function getSqlDashboard(){const [control,records,assignments,grades,versions,testLessonControls,researchAssessments]=await Promise.all([getSqlControl(),sqlRoster(),getSqlAssignments(),query('SELECT device_id,participant_id,lesson,scores,updated_at FROM sql_study_grades'),getSqlVersions(),getSqlTestLessonCommands(),query<ResearchAssessment>('SELECT device_id,participant_id,protocol_version,assessment,revision,payload,updated_at FROM sql_study_research_assessments ORDER BY updated_at DESC')]);
  const seen=new Set<string>();const people=records.filter(r=>{const key=r.class_code+':'+r.participant_name;if(seen.has(key))return false;seen.add(key);return true;});
  const balance=activeSqlClasses(control.config).flatMap(cls=>(['L','T'] as const).map(g=>{
    const scores=people.filter(p=>{
@@ -68,14 +74,14 @@ export async function getSqlDashboard(){const [control,records,assignments,grade
    }).map(p=>p.archive.study.pretest!.score);
    return {class_code:cls,group:g,...groupStats(scores)};
  }));
- return {...control,records,assignments,grades:grades.rows,balance,versions,testLessonControls,server_now:Date.now()/1000};}
+ return {...control,records,assignments,grades:grades.rows,balance,versions,testLessonControls,researchAssessments:researchAssessments.rows,server_now:Date.now()/1000};}
 export async function gradeSql(input:{deviceId:string;participantId:string;lesson:number;scores:number[]},adminId:string){
  const row=(await query<{archive:CloudArchive}>("SELECT archive FROM edulab_local_backup.latest_participants WHERE device_id=$1 AND participant_id=$2 AND archive->>'study_schema'=$3",[input.deviceId,input.participantId,SQL_STUDY])).rows[0];
  if(!row||!row.archive.study.rounds.find(r=>r.index===input.lesson)?.quiz)throw new ApiError(409,'QUIZ_NOT_READY','该课后测尚未提交。');
  if((row.archive.study.rounds.find(r=>r.index===input.lesson)!.quiz as {format?:string}).format==='single_choice')throw new ApiError(409,'AUTOMATIC_QUIZ','单选后测自动计分，不接受SQL题评分。');
  return transaction(async c=>{await c.query('INSERT INTO sql_study_grades(device_id,participant_id,lesson,scores,updated_by) VALUES($1,$2,$3,$4::jsonb,$5) ON CONFLICT(device_id,participant_id,lesson) DO UPDATE SET scores=EXCLUDED.scores,updated_by=EXCLUDED.updated_by,updated_at=now()',[input.deviceId,input.participantId,input.lesson,JSON.stringify(input.scores),adminId]);await c.query('INSERT INTO sql_study_audit(id,admin_id,action,payload) VALUES($1,$2,$3,$4::jsonb)',[randomUUID(),adminId,'quiz.grade',JSON.stringify(input)]);return {ok:true};});
 }
-export async function sqlClientSync(deviceId:string){const control=await getSqlControl();const [assignmentRows,grades,testCommands]=await Promise.all([query("SELECT a.* FROM sql_study_assignments a WHERE EXISTS(SELECT 1 FROM edulab_local_backup.latest_participants p WHERE p.device_id=$1 AND p.class_code=a.class_code AND p.participant_name=a.participant_name AND p.archive->>'study_schema'=$2)",[deviceId,SQL_STUDY]),query('SELECT participant_id,lesson,scores,updated_at FROM sql_study_grades WHERE device_id=$1',[deviceId]),getSqlTestLessonCommands(deviceId)]);return {...control,assignments:assignmentRows.rows,grades:grades.rows,test_lesson_commands:testCommands.map(c=>({id:c.id,device_id:c.payload.deviceId,participant_id:c.payload.participantId,lesson:c.payload.lesson,scheme_version:'business-workorders/1',test_identity_verified:true})),server_now:Date.now()/1000};}
+export async function sqlClientSync(deviceId:string){const control=await getSqlControl();const [assignmentRows,grades,testCommands,researchAssessments]=await Promise.all([query("SELECT a.* FROM sql_study_assignments a WHERE EXISTS(SELECT 1 FROM edulab_local_backup.latest_participants p WHERE p.device_id=$1 AND p.class_code=a.class_code AND p.participant_name=a.participant_name AND p.archive->>'study_schema'=$2)",[deviceId,SQL_STUDY]),query('SELECT participant_id,lesson,scores,updated_at FROM sql_study_grades WHERE device_id=$1',[deviceId]),getSqlTestLessonCommands(deviceId),query('SELECT participant_id,protocol_version,assessment,payload,revision FROM sql_study_research_assessments WHERE device_id=$1',[deviceId])]);return {...control,assignments:assignmentRows.rows,grades:grades.rows,research_assessments:researchAssessments.rows,test_lesson_commands:testCommands.map(c=>({id:c.id,device_id:c.payload.deviceId,participant_id:c.payload.participantId,lesson:c.payload.lesson,scheme_version:'business-workorders/1',research_version:'sql-lt/1.1',test_identity_verified:true})),server_now:Date.now()/1000};}
 
 export type SqlVersion={revision:number;prompt_version:number;updated_at:string|null;summary:string[]};
 export async function getSqlVersions(){
@@ -102,7 +108,7 @@ export async function assignSqlTest(classCode:string,name:string,group:'L'|'T',a
 export type SqlTestLessonCommand={id:string;payload:{deviceId:string;participantId:string;lesson:number};created_at:string};
 export async function getSqlTestLessonCommands(deviceId:string|null=null){
  return (await query<SqlTestLessonCommand>(`SELECT DISTINCT ON (payload->>'deviceId',payload->>'participantId') id,payload,created_at
-  FROM sql_study_audit WHERE action='test.lesson.select' AND ($1::text IS NULL OR payload->>'deviceId'=$1)
+  FROM sql_study_audit WHERE action='test.lesson.select' AND payload->>'research_version'='sql-lt/1.1' AND ($1::text IS NULL OR payload->>'deviceId'=$1)
   ORDER BY payload->>'deviceId',payload->>'participantId',created_at DESC,id DESC`,[deviceId])).rows;
 }
 export async function selectSqlTestLesson(input:{deviceId:string;participantId:string;lesson:number},adminId:string){
@@ -112,6 +118,6 @@ export async function selectSqlTestLesson(input:{deviceId:string;participantId:s
   AND NOT EXISTS(SELECT 1 FROM local_backup_dispositions d WHERE d.device_id=p.device_id AND d.participant_id=p.participant_id AND d.is_trashed)`,[input.deviceId,input.participantId,SQL_STUDY])).rows[0];
  if(!record)throw new ApiError(403,'TEST_IDENTITY_REQUIRED','切换课堂仅适用于已确认的测试身份。');
  const id=randomUUID();
- await query('INSERT INTO sql_study_audit(id,admin_id,action,payload) VALUES($1,$2,$3,$4::jsonb)',[id,adminId,'test.lesson.select',JSON.stringify({...input,scheme_version:'business-workorders/1'})]);
+ await query('INSERT INTO sql_study_audit(id,admin_id,action,payload) VALUES($1,$2,$3,$4::jsonb)',[id,adminId,'test.lesson.select',JSON.stringify({...input,scheme_version:'business-workorders/1',research_version:'sql-lt/1.1'})]);
  return {ok:true,id,lesson:input.lesson};
 }

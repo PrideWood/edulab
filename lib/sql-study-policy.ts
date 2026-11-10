@@ -1,12 +1,16 @@
 import { randomInt } from 'node:crypto';
 import { z } from 'zod';
 export const SQL_CLASSES = ['2531','2532'] as const;
-import {SQL_LESSON_ORDER,sqlLessonLabel,SQL_PREPARATION_LESSON} from './sql-study-display';
+import {SQL_LESSON_ORDER,sqlLessonLabel} from './sql-study-display';
 export {SQL_LESSON_ORDER,sqlLessonNumber,sqlLessonLabel,sqlRoundLabel,sqlRoundPhase,sqlRecordOrder,SQL_SCHEME_VERSION,SQL_PREPARATION_LESSON} from './sql-study-display';
 export const SQL_STUDY = 'sql-teachable-mvp/1';
 const text=z.string().trim().min(1).max(15000);
+const dateOnly=z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v=>{const d=new Date(v+'T00:00:00Z');return Number.isFinite(d.getTime())&&d.toISOString().slice(0,10)===v;},'日期无效');
 const rule=z.object({mode:z.enum(['closed','open','scheduled','auto']),open_at:z.number().positive().nullable(),close_at:z.number().positive().nullable()}).refine(r=>r.mode!=='scheduled'||r.open_at!==null,'定时开放需要开始时间').refine(r=>!r.close_at||!r.open_at||r.close_at>r.open_at,'截止须晚于开放');
 export const controlSchema=z.object({
+ research:z.object({version:z.literal('sql-lt/1.1'),formal_turns:z.literal(12),preparation_turns:z.literal(6),closing_seconds:z.literal(60),preparation_grouped:z.literal(true),effort_version:z.literal('mental-effort-sql/1'),prediction_version:z.literal('predicted-score/1'),d1_version:z.literal('SQL-LT-D1/v1.0'),d1_delay_days:z.literal(7),d1_window_days:z.literal(2)}),
+ research_questions:z.array(z.array(text)).length(5).superRefine((qs,ctx)=>{qs.forEach((q,i)=>{if(q.length!==(i===4?6:12))ctx.addIssue({code:'custom',message:'P0须6项、正式须12项有限问题',path:[i]});});}),
+ d1_schedule:z.record(z.string(),z.object({t4_date:dateOnly.nullable(),d1_date:dateOnly.nullable()})).default({}),
  classes_version:z.literal(1),
  classes:z.array(z.object({code:z.string().regex(/^[\p{L}\p{N}_-]{1,30}$/u).refine(c=>!['__proto__','prototype','constructor'].includes(c)),label:z.string().trim().min(1).max(60),planned_size:z.number().int().min(0).max(10000).nullable(),enabled:z.boolean()})).min(1).max(100),
  scheme_version:z.literal('business-workorders/1'),dataset_version:z.literal('script-sql-20261110'),
@@ -14,7 +18,7 @@ export const controlSchema=z.object({
  preparation_timing:z.object({demonstration_minutes:z.number().int().min(1).max(77),reading_minutes:z.number().int().min(1),reflection_minutes:z.number().int().min(1),baseline_minutes:z.number().int().min(1),teaching_seconds:z.number().int().min(60).multipleOf(60),practice_seconds:z.number().int().min(60).multipleOf(60),quiz_seconds:z.number().int().min(60).multipleOf(60)}),
  demonstration_minutes:z.number().int().min(1).max(77),reading_minutes:z.number().int().min(1),reflection_minutes:z.number().int().min(1),
  teaching_seconds:z.number().int().min(60).max(4800).multipleOf(60),practice_seconds:z.number().int().min(60).max(4800).multipleOf(60),quiz_seconds:z.number().int().min(60).max(4800).multipleOf(60),
- max_questions:z.number().int().min(0).max(20).transform(()=>0).default(0),mode:z.enum(['demo','real']),backup_enabled:z.literal(true),prompt_version:z.number().int().positive(),
+ max_questions:z.number().int().min(0).max(20).transform(()=>12).default(12),mode:z.enum(['demo','real']),backup_enabled:z.literal(true),prompt_version:z.number().int().positive(),
  tasks:z.array(z.object({id:text,title:text,pages:text,brief:text,points:z.array(text).length(6),checks:z.array(text).length(6)})).length(5),
  prompts:z.object({common:text,preparation:text.default('全班共同学徒：依次询问学生讲过的查询目标、方法和核对依据，不提供SQL答案。'),policies:z.object({L:text,T:text}),lessons:z.array(text).length(5)}),
  schedules:z.record(z.string(),z.record(z.string(),rule))
@@ -34,7 +38,12 @@ export function matchedAssignment(people:Candidate[],pick:(max:number)=>number=r
  }
  return members.map((p,i)=>({...p,group:best!.groups[i],pair:Math.floor(i/2)+1}));
 }
-export function composeSqlPrompt(c:SqlControl,lesson:number,group:'L'|'T',turn=1){const preparation=lesson===SQL_PREPARATION_LESSON;return c.prompts.common+'\n组别策略：'+(preparation?c.prompts.preparation:c.prompts.policies[group])+(group==='T'&&!preparation?` 本次下一问target必须为${(turn-1)%6}。`:'')+'\n当课范围：'+c.prompts.lessons[lesson]+'\n任务及检查点：'+JSON.stringify(c.tasks[lesson])+'；已有状态：{}';}
+export function composeSqlPrompt(c:SqlControl,lesson:number,group:'L'|'T',turn=1){const bank=c.research_questions[lesson],target=(turn-1)%6;return c.prompts.common+'\n组别策略：'+c.prompts.policies[group]+(group==='T'?` 本次下一问target必须为${target}；固定内容：${bank[turn-1]??'收束，不再提问'}。`:'')+'\n当课范围：'+c.prompts.lessons[lesson]+(lesson===4?'\n准备课范围：'+c.prompts.preparation:'')+'\n有限问题范围：'+JSON.stringify(bank)+'\n任务及检查点：'+JSON.stringify(c.tasks[lesson])+'；已有状态：{}';}
+export function boundedSqlReply(c:SqlControl,lesson:number,group:'L'|'T',turn:number,result:{reply:string;knowledge?:Record<string,unknown>}){
+ const complete=Array.from({length:6},(_,i)=>result.knowledge?.[String(i)]).every(v=>typeof v==='object'&&v!==null&&(v as {status?:string}).status==='explained');
+ if(complete)return '这些讲解已经记录。可以继续补充尚未说明的内容，或结束对话并整理核对表。';
+ return group==='T'?c.research_questions[lesson][turn-1]:result.reply;
+}
 export function csvCell(v:unknown){let s=String(v??'');if(/^[=+@\-\t\r]/.test(s))s="'"+s;return '"'+s.replaceAll('"','""')+'"';}
 export function toCsv(rows:unknown[][]){return '\ufeff'+rows.map(r=>r.map(csvCell).join(',')).join('\r\n');}
 
@@ -44,6 +53,9 @@ export function summarizeSqlChanges(old:SqlControl|undefined,next:SqlControl){
  for(const [key,label,unit] of timing)if(old[key]!==next[key])changes.push(`${label}：${(old[key]??40)/unit}→${next[key]/unit}分钟`);
  if(old.mode!==next.mode)changes.push(`学徒模式：${next.mode==='real'?'DeepSeek真实模型':'演示规则'}`);
  if(JSON.stringify(old.preparation_timing)!==JSON.stringify(next.preparation_timing))changes.push('调整准备课各阶段时长');
+ if(JSON.stringify(old.research)!==JSON.stringify(next.research))changes.push('更新有限对话、准备课分组与研究测量协议');
+ if(JSON.stringify(old.research_questions)!==JSON.stringify(next.research_questions))changes.push('更新有限问题序列');
+ if(JSON.stringify(old.d1_schedule)!==JSON.stringify(next.d1_schedule))changes.push('更新纸笔延时后测安排');
  if(old.prompts.preparation!==next.prompts.preparation)changes.push('更新准备课共同学徒规则');
  if(old.prompts.common!==next.prompts.common)changes.push('更新通用学徒规则与表达方式');
  for(const g of ['L','T'] as const)if(old.prompts.policies[g]!==next.prompts.policies[g])changes.push(`更新${g}组推进策略`);

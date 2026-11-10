@@ -100,6 +100,13 @@ def install(Base, Problem, encode, stamp):
                         q=round_record.get('quiz') if round_record else None
                         if not q or q.get('format')=='single_choice' or 'sql_answers' not in q or q.get('cloud_graded_at')==grade['updated_at'] or q.get('mcq_score') is None:continue
                         scores=grade['scores'];q.update(sql_scores=scores,sql_score=sum(scores),score=round(q['mcq_score']+sum(scores),2),grading='teacher_graded',graded_at=grade['updated_at'],cloud_graded_at=grade['updated_at']);changed=True
+                    for assessment in payload.get('research_assessments',[]):
+                        if assessment.get('participant_id')!=p['id'] or assessment.get('protocol_version')!=p.get('research_version'):continue
+                        if assessment.get('assessment')=='d1':
+                            if p.get('paper_d1')!=assessment:p['paper_d1']=assessment;changed=True
+                        else:
+                            record=next((r for r in p['rounds'] if 'practice'+str(r['index'])==assessment.get('assessment') and r.get('id')==assessment.get('payload',{}).get('round_id')),None)
+                            if record is not None and record.get('teacher_assessment')!=assessment:record['teacher_assessment']=assessment;changed=True
                     for command in payload.get('test_lesson_commands',[]):
                         if self.apply_test_lesson_command(p,command):changed=True
                     if changed:p['control_revision']=revision;self.save(p)
@@ -108,6 +115,7 @@ def install(Base, Problem, encode, stamp):
             return True
 
         def apply_test_lesson_command(self,p,command):
+            if self.config().get('research',{}).get('version')=='sql-lt/1.1' and command.get('research_version')!='sql-lt/1.1':return False
             if command.get('scheme_version') != SCHEME_VERSION:return False
             if command.get('test_identity_verified') is not True or command.get('device_id')!=self.setting('device') or command.get('participant_id')!=p['id']:
                 return False

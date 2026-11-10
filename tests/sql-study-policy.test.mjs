@@ -27,12 +27,12 @@ test('backup is always on, minute values fit an 80-minute class, and only practi
 test('version summaries describe changed lesson content instead of only showing counters',()=>{const next=structuredClone(cfg);next.tasks[0].checks[0]+=' 新检查';next.prompts.common+=' 自然学生语气';const summary=Array.from(p.summarizeSqlChanges(cfg,next));assert.ok(summary.includes('正式第1课检查点'));assert.ok(summary.includes('更新通用学徒规则与表达方式'));});
 test('classroom controls are ordered by measurement and lesson, with each lesson kept together',async()=>{const exports={};vm.runInNewContext(ts.transpileModule(await readFile('lib/sql-study-display.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports});const groups=exports.classroomScheduleGroups();assert.deepEqual(Array.from(groups[1].keys),['ai4','practice4','posttest4']);assert.deepEqual(Array.from(groups[2].keys),['ai0','practice0','posttest0']);assert.equal(groups.flatMap(x=>x.keys).length,18);});
 
-test('legacy question-count settings normalize to unlimited without rejecting old controls',()=>{const legacy=structuredClone(cfg);legacy.max_questions=6;assert.equal(p.controlSchema.parse(legacy).max_questions,0);const missing=structuredClone(cfg);delete missing.max_questions;assert.equal(p.controlSchema.parse(missing).max_questions,0);});
+test('legacy count settings normalize to the bounded research protocol',()=>{const legacy=structuredClone(cfg);legacy.max_questions=6;assert.equal(p.controlSchema.parse(legacy).max_questions,12);const missing=structuredClone(cfg);delete missing.max_questions;assert.equal(p.controlSchema.parse(missing).max_questions,12);});
 
-test('preparation uses one shared policy regardless of assigned treatment',()=>{
+test('preparation uses the assigned L/T policy from its first interaction',()=>{
  const left=p.composeSqlPrompt(cfg,4,'L',3),right=p.composeSqlPrompt(cfg,4,'T',3);
- assert.equal(left,right);assert.ok(left.includes(cfg.prompts.preparation));
- assert.ok(!right.includes('target必须为2'));
+ assert.notEqual(left,right);assert.ok(left.includes(cfg.prompts.policies.L));
+ assert.ok(right.includes('target必须为2'));
  const formalLeft=p.composeSqlPrompt(cfg,0,'L',3),formalRight=p.composeSqlPrompt(cfg,0,'T',3);
  assert.notEqual(formalLeft,formalRight);assert.ok(formalRight.includes('target必须为2'));
  const altered=structuredClone(cfg);altered.preparation_timing.teaching_seconds=2400;
