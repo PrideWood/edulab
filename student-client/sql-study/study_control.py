@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from course_layout import PREPARATION_LESSON, COURSE_ORDER, TASKS, course_order, next_lesson, upgrade_config, upgrade_participant, SCHEME_VERSION, lesson_label
 
-CLASSES = ['计网2541', '计网2542', '计网2543']
+CLASSES = ['2531', '2532'] # Fresh-install defaults only; cloud configuration owns the active list.
 COMMON = ('你是学生教导的SQL虚拟学徒，不是教师。不直接提供SQL答案，不主动补充学生尚未教的知识。'
           '回应老师刚教的内容，并围绕一个知识点自然提问，请学生解释理由或检查你的理解；不宣称执行过SQL或决定提前结束课堂。'
           '对学生解释的判断仅是可见解释的估计，不是真实掌握结论。'
@@ -126,10 +126,16 @@ def install(Base, Problem, encode, stamp):
             cfg['backup_enabled']=True
             with self.db() as db: db.execute('UPDATE settings SET value=? WHERE id=?',(encode(cfg),'config'))
 
+        def active_classes(self):
+            return [c['code'] for c in self.config().get('classes',[]) if c.get('enabled')]
+
+        def class_options(self):
+            return {'classes':[{'code':c['code'],'label':c['label']} for c in self.config().get('classes',[]) if c.get('enabled')]}
+
         def enter(self,data):
             name=unicodedata.normalize('NFKC',str(data.get('name',''))).strip()
             cls=data.get('class_code')
-            if cls not in CLASSES or not 1<=len(name)<=30 or any(ord(c)<32 for c in name): raise Problem('请选择班级并填写真实姓名（最多30字）。')
+            if cls not in self.active_classes() or not 1<=len(name)<=30 or any(ord(c)<32 for c in name): raise Problem('请选择班级并填写真实姓名（最多30字）。')
             if data.get('confirmed') is not True: raise Problem('请先确认班级和姓名。')
             with self.lock,self.db() as db:
                 row=db.execute('SELECT data FROM students WHERE class_code=? AND login_name=?',(cls,name)).fetchone()
@@ -145,6 +151,7 @@ def install(Base, Problem, encode, stamp):
             return {**self.public(p),'session_token':session}
 
         def gate(self,p,key):
+            if p['class_code'] not in self.active_classes():return {'open':False,'reason':'班级已停用，请联系教师；已有记录保留'}
             if key=='meta_pre' and p['pretest'] is None:return {'open':False,'reason':'请先完成SQL基础前测'}
             if key=='meta_post' and (next_lesson(p) is not None or not p['rounds'] or any(r['phase']!='done' for r in p['rounds'])):return {'open':False,'reason':'请先完成全部课程任务和后测'}
             # The agreed scheme uses one shared preparation, then the same stage sequence.
@@ -319,7 +326,7 @@ def install(Base, Problem, encode, stamp):
         def balance(self):
             with self.db() as db: people=[json.loads(r[0]) for r in db.execute('SELECT data FROM students')]
             rows=[]
-            for cls in CLASSES:
+            for cls in self.active_classes():
                 for g in ('L','T'):
                     scores=[p['pretest']['score'] for p in people if p['class_code']==cls and p['group']==g and p['pretest']]
                     rows.append({'class_code':cls,'group':g,'n':len(scores),'mean':round(statistics.mean(scores),3) if scores else None,'sd':round(statistics.stdev(scores),3) if len(scores)>1 else None})
@@ -330,13 +337,13 @@ def install(Base, Problem, encode, stamp):
                 with self.db() as db: people=[json.loads(r[0]) for r in db.execute('SELECT data FROM students')]
                 total=0;random=secrets.SystemRandom()
                 batch=str(uuid.uuid4())
-                for cls in CLASSES:
+                for cls in self.active_classes():
                     members=[p for p in people if p['class_code']==cls and p['pretest'] is not None and p['group'] is None]
                     if not members: continue
                     # Assign a class once to keep matched strata auditable; late students need a separate protocol.
                     if any(p['class_code']==cls and p['group'] for p in people): raise Problem('该班已有固定分组。请先处理漏测名单，不能通过重复分组改变原分组。',409)
                     if len(members)<2: raise Problem('每班至少两名学生完成前测后才能分组。',409)
-                for cls in CLASSES:
+                for cls in self.active_classes():
                     members=[p for p in people if p['class_code']==cls and p['pretest'] is not None and p['group'] is None]
                     if not members: continue
                     random.shuffle(members);members.sort(key=lambda p:p['pretest']['score'],reverse=True)
@@ -364,7 +371,6 @@ def install(Base, Problem, encode, stamp):
                 text=str(v if v is not None else '')
                 return "'"+text if text.startswith(('=','+','-','@','\t','\r')) else text
             for p in people:
-                if p['class_code'] not in CLASSES: continue
                 a=p.get('assignment',{})
                 writer.writerow([cell(v) for v in [p['id'],p['class_code'],p.get('name',p['code']),p['pretest']['score'] if p['pretest'] else '',a.get('pair',''),p['group'],'按学生解释调整' if p['group']=='L' else '按任务步骤推进' if p['group']=='T' else '',a.get('batch',''),a.get('method','')]])
             writer.writerow([]);writer.writerow(['班级','组别','人数','前测均分','前测标准差（样本）'])
@@ -384,7 +390,6 @@ def install(Base, Problem, encode, stamp):
                 values=[p['id'],p['class_code'],p.get('name',p['code']),p.get('group') or '',lesson,stage,iso(start),iso(end),elapsed if elapsed is not None else '',status,note,'准备阶段' if lesson=='准备课P0' else '正式干预' if isinstance(lesson,str) and lesson.startswith('正式第') else '测量']
                 writer.writerow(["'"+v if isinstance(v,str) and v.startswith(('=','+','-','@','\t','\r')) else v for v in values])
             for p in people:
-                if p['class_code'] not in CLASSES:continue
                 for k,label in [('pretest','基础前测'),('meta_pre','课前问卷'),('meta_post','课后问卷')]:
                     q=p.get(k);start=p.get('measurement_starts',{}).get(k)
                     if q or start is not None:
@@ -405,7 +410,7 @@ def install(Base, Problem, encode, stamp):
             out=super().teacher()
             for row in out['students']:
                 p=self.get(row['id']);row['name']=p.get('name',p['code']);row['quizzes']=[{'index':r['index'],'quiz':r.get('quiz')} for r in p['rounds'] if r.get('quiz')]
-            out['classes']=CLASSES;out['balance']=self.balance()
+            out['classes']=self.active_classes();out['balance']=self.balance()
             return out
 
         def configure(self,body):
@@ -442,7 +447,7 @@ def install(Base, Problem, encode, stamp):
             cls,key,rule=body.get('class_code'),body.get('key'),body.get('rule',{})
             with self.lock:
                 cfg=self.config()
-                if cls not in CLASSES or key not in cfg['schedules'][cls] or rule.get('mode') not in ('closed','open','scheduled','auto'): raise Problem('班级、入口或开放方式无效。')
+                if cls not in self.active_classes() or key not in cfg['schedules'][cls] or rule.get('mode') not in ('closed','open','scheduled','auto'): raise Problem('班级、入口或开放方式无效。')
                 if rule['mode']=='auto' and not key.startswith('practice'):raise Problem('自动解锁仅适用于独立实操。')
                 for k in ('open_at','close_at'):
                     v=rule.get(k)

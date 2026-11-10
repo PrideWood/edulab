@@ -156,6 +156,12 @@ def upgrade_config(config):
         for cls in cfg['schedules']:
             cfg['schedules'][cls] = {k: {'mode':'auto' if k.startswith('practice') else 'closed','open_at':None,'close_at':None}
                 for k in ['pretest','meta_pre','meta_post'] + [s+str(i) for i in COURSE_ORDER for s in ('ai','practice','posttest')]}
+    if 'classes' not in cfg:
+        cfg['classes_version'] = 1
+        cfg['classes'] = [{'code':'2531','label':'2531','planned_size':31,'enabled':True}, {'code':'2532','label':'2532','planned_size':38,'enabled':True}]
+        for c in cfg['classes']:
+            cfg['schedules'].setdefault(c['code'], {k:{'mode':'auto' if k.startswith('practice') else 'closed','open_at':None,'close_at':None}
+                for k in ['pretest','meta_pre','meta_post'] + [s+str(i) for i in COURSE_ORDER for s in ('ai','practice','posttest')]})
     return cfg
 
 def upgrade_participant(p, at):

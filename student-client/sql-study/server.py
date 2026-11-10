@@ -575,6 +575,7 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith('/api/'):
                 self.guard()
                 if path.startswith('/api/teacher') or path=='/api/export': raise Problem('教师管理已迁移至EduLab管理平台。',410)
+                if path=='/api/classes': return self.respond(self.store.class_options())
                 if path=='/api/state': return self.respond(self.store.state(self.participant()))
                 if path=='/api/questions':
                     stage=urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get('kind',['pretest'])[0]

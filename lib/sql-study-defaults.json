@@ -134,7 +134,7 @@
     "preparation": "全班共同训练学徒：仅围绕学生表的SELECT选列、FROM来源、结果列顺序、本人执行及提交流程，按共同练习点追问并请学生核对复述。准备课不采用L/T差异化策略，不扩展WHERE、聚合、分组或子查询，不提供独立任务完整答案。"
   },
   "schedules": {
-    "计网2541": {
+    "2531": {
       "pretest": {
         "mode": "closed",
         "open_at": null,
@@ -226,99 +226,7 @@
         "close_at": null
       }
     },
-    "计网2542": {
-      "pretest": {
-        "mode": "closed",
-        "open_at": null,
-        "close_at": null
-      },
-      "meta_pre": {
-        "mode": "closed",
-        "open_at": null,
-        "close_at": null
-      },
-      "meta_post": {
-        "mode": "closed",
-        "open_at": null,
-        "close_at": null
-      },
-      "ai0": {
-        "mode": "closed",
-        "open_at": null,
-        "close_at": null
-      },
-      "practice0": {
-        "mode": "auto",
-        "open_at": null,
-        "close_at": null
-      },
-      "posttest0": {
-        "mode": "closed",
-        "open_at": null,
-        "close_at": null
-      },
-      "ai1": {
-        "mode": "closed",
-        "open_at": null,
-        "close_at": null
-      },
-      "practice1": {
-        "mode": "auto",
-        "open_at": null,
-        "close_at": null
-      },
-      "posttest1": {
-        "mode": "closed",
-        "open_at": null,
-        "close_at": null
-      },
-      "ai2": {
-        "mode": "closed",
-        "open_at": null,
-        "close_at": null
-      },
-      "practice2": {
-        "mode": "auto",
-        "open_at": null,
-        "close_at": null
-      },
-      "posttest2": {
-        "mode": "closed",
-        "open_at": null,
-        "close_at": null
-      },
-      "ai3": {
-        "mode": "closed",
-        "open_at": null,
-        "close_at": null
-      },
-      "practice3": {
-        "mode": "auto",
-        "open_at": null,
-        "close_at": null
-      },
-      "posttest3": {
-        "mode": "closed",
-        "open_at": null,
-        "close_at": null
-      },
-      "ai4": {
-        "mode": "closed",
-        "open_at": null,
-        "close_at": null
-      },
-      "practice4": {
-        "mode": "auto",
-        "open_at": null,
-        "close_at": null
-      },
-      "posttest4": {
-        "mode": "closed",
-        "open_at": null,
-        "close_at": null
-      }
-    },
-    "计网2543": {
+    "2532": {
       "pretest": {
         "mode": "closed",
         "open_at": null,
@@ -425,5 +333,20 @@
   "sequence_policy": "teaching-practice-quiz",
   "reading_minutes": 5,
   "reflection_minutes": 5,
-  "dataset_version": "script-sql-20261110"
+  "dataset_version": "script-sql-20261110",
+  "classes": [
+    {
+      "code": "2531",
+      "label": "2531",
+      "planned_size": 31,
+      "enabled": true
+    },
+    {
+      "code": "2532",
+      "label": "2532",
+      "planned_size": 38,
+      "enabled": true
+    }
+  ],
+  "classes_version": 1
 }

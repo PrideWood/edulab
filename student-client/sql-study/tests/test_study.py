@@ -20,6 +20,23 @@ class StudyTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.clock=[1000.0]
         self.s=Store(self.tmp.name,clock=lambda:self.clock[0])
     def tearDown(self):self.s.stop.set();self.tmp.cleanup()
+    def test_cloud_classes_control_login_without_rewriting_history(self):
+        self.assertEqual(self.s.active_classes(), ['2531','2532'])
+        old=self.student('保留记录')
+        cfg=self.s.config()
+        cfg['classes'].append({'code':'2533','label':'新增班级','planned_size':None,'enabled':True})
+        cfg['schedules']['2533']=json.loads(json.dumps(cfg['schedules']['2531']))
+        self.s.put_config(cfg)
+        new=self.student('新同学', '2533')
+        self.assertEqual(new['class_code'], '2533')
+        self.assertIn({'code':'2533','label':'新增班级'}, self.s.class_options()['classes'])
+        cfg['classes'][0]['enabled']=False
+        self.s.put_config(cfg)
+        with self.assertRaises(Problem):self.student('新同学', '2531')
+        self.assertEqual(self.s.get(old['id'])['name'], '保留记录')
+        self.assertIn('保留记录', self.s.groups_export()['csv'])
+        self.assertFalse(self.s.gate(self.s.get(old['id']), 'pretest')['open'])
+
     def student(self,name='测试',cls=CLASSES[0]):
         return self.s.enter({'class_code':cls,'name':name,'confirmed':True})
     def open(self,key,mode='open',**extra):
@@ -369,6 +386,10 @@ class StudyTests(unittest.TestCase):
         headers={'X-Local-Key':self.s.token,'X-Participant':p['id'],'X-Participant-Session':p['session_token']}
         try:
             with self.assertRaises(urllib.error.HTTPError):local_open(base+'/api/health')
+            with self.assertRaises(urllib.error.HTTPError):local_open(base+'/api/classes')
+            options=json.load(local_open(urllib.request.Request(base+'/api/classes',headers={'X-Local-Key':self.s.token})))
+            self.assertEqual(options, {'classes':[{'code':'2531','label':'2531'},{'code':'2532','label':'2532'}]})
+            self.assertEqual(set(options['classes'][0]), {'code','label'})
             bank=json.load(local_open(urllib.request.Request(base+'/api/questions?kind=pretest',headers=headers)))
             self.assertTrue(all('answer' not in q for q in bank))
             for path in ('/api/export','/api/teacher/groups','/api/teacher/timings'):

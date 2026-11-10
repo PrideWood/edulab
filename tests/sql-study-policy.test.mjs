@@ -10,7 +10,7 @@ test('SQL classes use nearby pretest pairs with balanced group counts and disper
 });
 test('odd class conserves every student and differs by only one member',()=>{const r=p.matchedAssignment(Array.from({length:9},(_,i)=>({name:'S'+i,score:i*10})));assert.equal(r.length,9);assert.equal(Math.abs(r.filter(x=>x.group==='L').length-r.filter(x=>x.group==='T').length),1);});
 test('invalid schedules cannot be saved; fixed group policy and common lesson scope compose together',()=>{
- assert.equal(p.controlSchema.safeParse(cfg).success,true);const c=structuredClone(cfg);c.schedules['计网2541'].posttest0={mode:'scheduled',open_at:100,close_at:99};assert.equal(p.controlSchema.safeParse(c).success,false);
+ assert.equal(p.controlSchema.safeParse(cfg).success,true);const c=structuredClone(cfg);c.schedules['2531'].posttest0={mode:'scheduled',open_at:100,close_at:99};assert.equal(p.controlSchema.safeParse(c).success,false);
  const fixed=p.composeSqlPrompt(cfg,1,'T',3),adaptive=p.composeSqlPrompt(cfg,1,'L',3);assert.ok(fixed.includes('target必须为2'));assert.ok(fixed.includes(cfg.prompts.lessons[1]));assert.ok(adaptive.includes(cfg.prompts.policies.L));assert.ok(!adaptive.includes('target必须为2'));
 });
 test('group exports escape formula names and preserve quoted CSV contents',()=>{assert.equal(p.csvCell('=SUM(1)'),`"'=SUM(1)"`);assert.equal(p.csvCell('张"三'),`"张""三"`);assert.ok(p.toCsv([['姓名'],['测试']]).startsWith('\ufeff'));});
@@ -20,8 +20,8 @@ test('backup is always on, minute values fit an 80-minute class, and only practi
  const off=structuredClone(cfg);off.backup_enabled=false;assert.equal(p.controlSchema.safeParse(off).success,false);
  const tooLong=structuredClone(cfg);tooLong.teaching_seconds=1800;assert.equal(p.controlSchema.safeParse(tooLong).success,false);
  const seconds=structuredClone(cfg);seconds.quiz_seconds=61;assert.equal(p.controlSchema.safeParse(seconds).success,false);
- const badAuto=structuredClone(cfg);badAuto.schedules['计网2541'].posttest0.mode='auto';assert.equal(p.controlSchema.safeParse(badAuto).success,false);
- const good=structuredClone(cfg);good.schedules['计网2541'].practice0.mode='auto';assert.equal(p.controlSchema.safeParse(good).success,true);
+ const badAuto=structuredClone(cfg);badAuto.schedules['2531'].posttest0.mode='auto';assert.equal(p.controlSchema.safeParse(badAuto).success,false);
+ const good=structuredClone(cfg);good.schedules['2531'].practice0.mode='auto';assert.equal(p.controlSchema.safeParse(good).success,true);
 });
 
 test('version summaries describe changed lesson content instead of only showing counters',()=>{const next=structuredClone(cfg);next.tasks[0].checks[0]+=' 新检查';next.prompts.common+=' 自然学生语气';const summary=Array.from(p.summarizeSqlChanges(cfg,next));assert.ok(summary.includes('正式第1课检查点'));assert.ok(summary.includes('更新通用学徒规则与表达方式'));});
@@ -47,4 +47,12 @@ test('version history compares legacy three-lesson revisions and transitions wit
  assert.ok(Array.from(p.summarizeSqlChanges(old,next)).includes('正式第1课名称或实操题干'));
  assert.ok(Array.from(p.summarizeSqlChanges(next,cfg)).some(x=>x.startsWith('新增准备课P0')));
  assert.ok(Array.from(p.summarizeSqlChanges(cfg,next)).some(x=>x.startsWith('移除准备课P0')));
+});
+
+test('dynamic classes validate uniqueness, reserved codes and complete gates',()=>{
+ const next=structuredClone(cfg);next.classes.push({code:'2533',label:'新增班级',planned_size:null,enabled:true});next.schedules['2533']=structuredClone(next.schedules['2531']);assert.equal(p.controlSchema.safeParse(next).success,true);assert.ok(p.activeSqlClasses(next).includes('2533'));
+ delete next.schedules['2533'].pretest;assert.equal(p.controlSchema.safeParse(next).success,false);
+ const duplicate=structuredClone(cfg);duplicate.classes.push({...duplicate.classes[0]});assert.equal(p.controlSchema.safeParse(duplicate).success,false);
+ for(const code of ['__proto__','constructor','<script>']){const bad=structuredClone(cfg);bad.classes[0].code=code;assert.equal(p.controlSchema.safeParse(bad).success,false);}
+ const disabled=structuredClone(cfg);disabled.classes.forEach(c=>c.enabled=false);assert.equal(p.controlSchema.safeParse(disabled).success,false);
 });
