@@ -8,17 +8,11 @@ export interface CloudArchive {participant:{id:string;name:string;class_code:str
 export type CloudRow = {device_id:string;participant_id:string;participant_name:string;class_code:string;is_test:boolean;received_at:string;archive:CloudArchive};
 export function upgradeSqlControl(config:SqlControl):SqlControl {
  const next=structuredClone(config);
- next.preparation_timing??=structuredClone(defaults.preparation_timing);
- next.prompts.preparation??=defaults.prompts.preparation;
- if(next.tasks.length===3){
-  next.tasks.push(structuredClone(defaults.tasks[3]));
-  next.prompts.lessons.push(defaults.prompts.lessons[3]);
-  for(const rules of Object.values(next.schedules))for(const stage of ['ai','practice','posttest'])rules[stage+'3']={mode:stage==='practice'?'auto':'closed',open_at:null,close_at:null};
+ if(next.scheme_version!==defaults.scheme_version||next.dataset_version!==defaults.dataset_version){
+  // Immutable round snapshots and audit history retain the old study; active switches do not carry over.
+  Object.assign(next,structuredClone(defaults),{mode:config.mode,prompt_version:(config.prompt_version??0)+1});
  }
- for(let i=0;i<3;i++){
-  if(next.tasks[i].brief.startsWith('试运行'))next.tasks[i]=structuredClone(defaults.tasks[i]);
-  if(next.prompts.lessons[i].startsWith('试运行'))next.prompts.lessons[i]=defaults.prompts.lessons[i];
- }
+
  return next;
 }
 export async function getSqlControl(){
@@ -31,12 +25,13 @@ export async function saveSqlControl(config:unknown,revision:number,adminId:stri
  return transaction(async c=>{
  const old=(await c.query<{revision:number;config:SqlControl}>('SELECT revision,config FROM sql_study_control WHERE id=$1 FOR UPDATE',[SQL_STUDY])).rows[0];
  if(!old||old.revision!==revision)throw new ApiError(409,'CONTROL_CHANGED','设置已由其他窗口更新，请刷新后再保存。');
- old.config=upgradeSqlControl(old.config);
- const next=parsed.data;next.prompt_version=old.config.prompt_version+(JSON.stringify(old.config.prompts)!==JSON.stringify(next.prompts)||JSON.stringify(old.config.tasks)!==JSON.stringify(next.tasks)?1:0);
+ const before=structuredClone(old);const previous=upgradeSqlControl(old.config);
+ const next=parsed.data;next.prompt_version=previous.prompt_version+(JSON.stringify(previous.prompts)!==JSON.stringify(next.prompts)||JSON.stringify(previous.tasks)!==JSON.stringify(next.tasks)?1:0);
+ await c.query('INSERT INTO sql_study_versions(revision,prompt_version,config,summary) VALUES($1,$2,$3::jsonb,$4::jsonb) ON CONFLICT DO NOTHING',[before.revision,before.config.prompt_version,JSON.stringify(before.config),JSON.stringify(['保存时保留升级前原始配置；旧更新时间未记录'])]);
  await c.query('UPDATE sql_study_control SET config=$2::jsonb,revision=revision+1,updated_by=$3,updated_at=now() WHERE id=$1',[SQL_STUDY,JSON.stringify(next),adminId]);
- const summary=summarizeSqlChanges(old.config,next);
+ const summary=before.config.scheme_version!==next.scheme_version||before.config.dataset_version!==next.dataset_version?['切换为准备课P0与四次业务工单，使用已核对的脚本数据范围',...summarizeSqlChanges(previous,next)]:summarizeSqlChanges(previous,next);
  const version=(await c.query<SqlVersion>('INSERT INTO sql_study_versions(revision,prompt_version,config,updated_at,summary,created_by) VALUES($1,$2,$3::jsonb,now(),$4::jsonb,$5) RETURNING revision,prompt_version,updated_at,summary',[revision+1,next.prompt_version,JSON.stringify(next),JSON.stringify(summary),adminId])).rows[0];
- await c.query('INSERT INTO sql_study_audit(id,admin_id,action,payload) VALUES($1,$2,$3,$4::jsonb)',[randomUUID(),adminId,'control.save',JSON.stringify({before:old,after:next,summary})]);
+ await c.query('INSERT INTO sql_study_audit(id,admin_id,action,payload) VALUES($1,$2,$3,$4::jsonb)',[randomUUID(),adminId,'control.save',JSON.stringify({before,after:next,summary})]);
  return {revision:revision+1,config:next,version};});
 }
 export async function sqlRoster(){return (await query<CloudRow>(`SELECT p.device_id,p.participant_id,p.participant_name,p.class_code,p.is_test,p.received_at,p.archive FROM edulab_local_backup.latest_participants p
@@ -79,7 +74,7 @@ export async function gradeSql(input:{deviceId:string;participantId:string;lesso
  if((row.archive.study.rounds.find(r=>r.index===input.lesson)!.quiz as {format?:string}).format==='single_choice')throw new ApiError(409,'AUTOMATIC_QUIZ','单选后测自动计分，不接受SQL题评分。');
  return transaction(async c=>{await c.query('INSERT INTO sql_study_grades(device_id,participant_id,lesson,scores,updated_by) VALUES($1,$2,$3,$4::jsonb,$5) ON CONFLICT(device_id,participant_id,lesson) DO UPDATE SET scores=EXCLUDED.scores,updated_by=EXCLUDED.updated_by,updated_at=now()',[input.deviceId,input.participantId,input.lesson,JSON.stringify(input.scores),adminId]);await c.query('INSERT INTO sql_study_audit(id,admin_id,action,payload) VALUES($1,$2,$3,$4::jsonb)',[randomUUID(),adminId,'quiz.grade',JSON.stringify(input)]);return {ok:true};});
 }
-export async function sqlClientSync(deviceId:string){const control=await getSqlControl();const [assignmentRows,grades,testCommands]=await Promise.all([query("SELECT a.* FROM sql_study_assignments a WHERE EXISTS(SELECT 1 FROM edulab_local_backup.latest_participants p WHERE p.device_id=$1 AND p.class_code=a.class_code AND p.participant_name=a.participant_name AND p.archive->>'study_schema'=$2)",[deviceId,SQL_STUDY]),query('SELECT participant_id,lesson,scores,updated_at FROM sql_study_grades WHERE device_id=$1',[deviceId]),getSqlTestLessonCommands(deviceId)]);return {...control,assignments:assignmentRows.rows,grades:grades.rows,test_lesson_commands:testCommands.map(c=>({id:c.id,device_id:c.payload.deviceId,participant_id:c.payload.participantId,lesson:c.payload.lesson,test_identity_verified:true})),server_now:Date.now()/1000};}
+export async function sqlClientSync(deviceId:string){const control=await getSqlControl();const [assignmentRows,grades,testCommands]=await Promise.all([query("SELECT a.* FROM sql_study_assignments a WHERE EXISTS(SELECT 1 FROM edulab_local_backup.latest_participants p WHERE p.device_id=$1 AND p.class_code=a.class_code AND p.participant_name=a.participant_name AND p.archive->>'study_schema'=$2)",[deviceId,SQL_STUDY]),query('SELECT participant_id,lesson,scores,updated_at FROM sql_study_grades WHERE device_id=$1',[deviceId]),getSqlTestLessonCommands(deviceId)]);return {...control,assignments:assignmentRows.rows,grades:grades.rows,test_lesson_commands:testCommands.map(c=>({id:c.id,device_id:c.payload.deviceId,participant_id:c.payload.participantId,lesson:c.payload.lesson,scheme_version:'business-workorders/1',test_identity_verified:true})),server_now:Date.now()/1000};}
 
 export type SqlVersion={revision:number;prompt_version:number;updated_at:string|null;summary:string[]};
 export async function getSqlVersions(){
@@ -94,7 +89,8 @@ export async function assignSqlTest(classCode:string,name:string,group:'L'|'T',a
  if(!p)throw new ApiError(403,'TEST_IDENTITY_REQUIRED','此功能仅用于数据库明确标记的测试身份。');
  if(!p.archive.study.pretest)throw new ApiError(409,'PRETEST_PENDING','请先完成这个测试身份的基础前测。');
  const old=(await c.query<{group_code:string;method:string}>('SELECT group_code,method FROM sql_study_assignments WHERE class_code=$1 AND participant_name=$2 FOR UPDATE',[classCode,name])).rows[0];
- if(p.archive.study.rounds.some(r=>r.index!==3)&&((old?.group_code??p.archive.study.group)!==group))throw new ApiError(409,'TEST_ALREADY_STARTED','该身份已经开始课堂，不能事后更改学徒组别。');
+ const startedGroup=p.archive.study.rounds.find(r=>r.group==='L'||r.group==='T')?.group??old?.group_code??p.archive.study.group;
+ if(p.archive.study.rounds.some(r=>r.index!==3||r.group==='L'||r.group==='T')&&startedGroup!==group)throw new ApiError(409,'TEST_ALREADY_STARTED','该身份已经开始课堂，不能事后更改学徒组别。');
  if(old?.group_code===group)return {ok:true,group};
  if(old&&old.method!=='single_test_manual')throw new ApiError(409,'FORMAL_ALLOCATION_LOCKED','已有配对分组不能用单人试测覆盖。');
  const batch=randomUUID();await c.query("INSERT INTO sql_study_assignments(class_code,participant_name,group_code,pretest_score,pair_no,batch_id,method) VALUES($1,$2,$3,$4,NULL,$5,'single_test_manual') ON CONFLICT(class_code,participant_name) DO UPDATE SET group_code=EXCLUDED.group_code,batch_id=EXCLUDED.batch_id,assigned_at=now()",[classCode,name,group,p.archive.study.pretest.score,batch]);
@@ -109,12 +105,12 @@ export async function getSqlTestLessonCommands(deviceId:string|null=null){
   ORDER BY payload->>'deviceId',payload->>'participantId',created_at DESC,id DESC`,[deviceId])).rows;
 }
 export async function selectSqlTestLesson(input:{deviceId:string;participantId:string;lesson:number},adminId:string){
- if(!Number.isInteger(input.lesson)||input.lesson<0||input.lesson>3)throw new ApiError(400,'INVALID_LESSON','请选择第1至4课。');
+ if(!Number.isInteger(input.lesson)||input.lesson<0||input.lesson>4)throw new ApiError(400,'INVALID_LESSON','请选择准备课或正式第1至4课。');
  const record=(await query<CloudRow>(`SELECT p.* FROM edulab_local_backup.latest_participants p
   WHERE p.device_id=$1 AND p.participant_id=$2 AND p.archive->>'study_schema'=$3 AND p.is_test
   AND NOT EXISTS(SELECT 1 FROM local_backup_dispositions d WHERE d.device_id=p.device_id AND d.participant_id=p.participant_id AND d.is_trashed)`,[input.deviceId,input.participantId,SQL_STUDY])).rows[0];
  if(!record)throw new ApiError(403,'TEST_IDENTITY_REQUIRED','切换课堂仅适用于已确认的测试身份。');
  const id=randomUUID();
- await query('INSERT INTO sql_study_audit(id,admin_id,action,payload) VALUES($1,$2,$3,$4::jsonb)',[id,adminId,'test.lesson.select',JSON.stringify(input)]);
+ await query('INSERT INTO sql_study_audit(id,admin_id,action,payload) VALUES($1,$2,$3,$4::jsonb)',[id,adminId,'test.lesson.select',JSON.stringify({...input,scheme_version:'business-workorders/1'})]);
  return {ok:true,id,lesson:input.lesson};
 }

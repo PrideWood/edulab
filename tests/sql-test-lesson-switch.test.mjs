@@ -7,8 +7,8 @@ test('test lesson selection requires verified non-trashed test identity and neve
  const denied=setup(false);await assert.rejects(denied.api.selectSqlTestLesson(input,'admin'),e=>e.status===403);assert.equal(denied.calls.length,1);
  const h=setup();const result=await h.api.selectSqlTestLesson(input,'admin');assert.equal(result.ok,true);assert.equal(result.lesson,3);
  assert.match(h.calls[0].sql,/p\.is_test/);assert.match(h.calls[0].sql,/is_trashed/);
- assert.equal(h.calls[1].params[2],'test.lesson.select');assert.deepEqual(JSON.parse(h.calls[1].params[3]),input);
+ assert.equal(h.calls[1].params[2],'test.lesson.select');assert.deepEqual(JSON.parse(h.calls[1].params[3]),{...input,scheme_version:'business-workorders/1'});
  assert.ok(h.calls.every(c=>!c.sql.includes('UPDATE')&&!c.sql.includes('sql_study_assignments')));
- await assert.rejects(h.api.selectSqlTestLesson({...input,lesson:4},'admin'),e=>e.status===400);
+ await assert.rejects(h.api.selectSqlTestLesson({...input,lesson:5},'admin'),e=>e.status===400);
 });
 test('client receives only latest commands for its exact device',async()=>{const h=setup();await h.api.getSqlTestLessonCommands('device');assert.match(h.calls[0].sql,/DISTINCT ON/);assert.match(h.calls[0].sql,/created_at DESC/);assert.deepEqual(Array.from(h.calls[0].params),['device']);});

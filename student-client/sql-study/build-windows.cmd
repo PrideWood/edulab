@@ -1,14 +1,12 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-py -3 -m PyInstaller --noconfirm --clean --onedir --name EduLab-SQL --add-data "web;web" --add-data "questions.json;." server.py
+py -3 build_windows.py %*
 if errorlevel 1 goto failed
-echo.
-echo Build complete: dist\EduLab-SQL\EduLab-SQL.exe
-echo Teacher configuration stays outside the public package. Read README.md before distribution.
+echo Built release\EduLab-SQL.exe
 pause
 exit /b 0
 :failed
-echo Build failed. Install Python and PyInstaller on the Windows build machine first.
+echo Build failed. Check Python, Go and the restricted .private\runtime.json configuration.
 pause
 exit /b 1

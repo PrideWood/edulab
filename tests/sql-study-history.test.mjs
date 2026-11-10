@@ -18,11 +18,29 @@ test('dashboard version loader handles historical three-course revisions alongsi
  const rows=[legacy,changed,defaults].map((config,i)=>({revision:i+1,prompt_version:i+1,config,summary:i?['历史配置更新']:['初始配置'],updated_at:null}));
  const h=setup(rows);const result=await h.api.getSqlVersions();
  assert.equal(result.length,3);assert.equal(result[0].revision,3);
- assert.ok(result[0].summary.some(s=>s.startsWith('新增第1课')));
- assert.ok(result[1].summary.includes('第2课名称或实操题干'));assert.equal(h.writes(),0);
+ assert.ok(result[0].summary.some(s=>s.startsWith('新增准备课P0')));
+ assert.ok(result[1].summary.includes('正式第1课名称或实操题干'));assert.equal(h.writes(),0);
 });
 test('automatic choice assessments cannot be overwritten by historical SQL grades',async()=>{
  const h=setup([{archive:{study:{rounds:[{index:3,quiz:{format:'single_choice',score:70}}]}}}]);
  await assert.rejects(h.api.gradeSql({deviceId:'device',participantId:'student',lesson:3,scores:[20,20]},'admin'),e=>e.code==='AUTOMATIC_QUIZ');
  assert.equal(h.writes(),0);
+});
+
+test('saving the new scheme preserves the raw prior control before upgrading its active defaults',async()=>{
+ const old=structuredClone(defaults);delete old.scheme_version;delete old.dataset_version;old.tasks=old.tasks.slice(0,4);old.tasks[0].brief='原始旧任务';
+ const before=structuredClone(old),calls=[],api={};
+ const query=async(sql,params)=>{
+  if(sql.includes('FOR UPDATE'))return {rows:[{revision:9,config:structuredClone(old)}]};
+  calls.push({sql,params});
+  if(sql.includes('RETURNING'))return {rows:[{revision:10,summary:[]}]};
+  return {rows:[]};
+ };
+ vm.runInNewContext(code,{exports:api,structuredClone,require:n=>({'server-only':{},'node:crypto':crypto,'@/db':{transaction:fn=>fn({query})},'@/lib/http':{ApiError},'./sql-study-defaults.json':{default:defaults},'./sql-study-policy':policy})[n]});
+ const result=await api.saveSqlControl(structuredClone(defaults),9,'admin');assert.equal(result.revision,10);
+ const audit=JSON.parse(calls.find(c=>c.sql.includes('sql_study_audit')).params[3]);
+ assert.deepEqual(audit.before.config,before);assert.equal(audit.after.scheme_version,'business-workorders/1');
+ const savedPrior=calls.find(c=>c.sql.includes('ON CONFLICT DO NOTHING'));
+ assert.deepEqual(JSON.parse(savedPrior.params[2]),before);
+ assert.ok(!calls.some(c=>/sql_study_assignments|DELETE/.test(c.sql)));
 });

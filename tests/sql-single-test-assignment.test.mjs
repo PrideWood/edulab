@@ -2,18 +2,22 @@ import test from 'node:test';import assert from 'node:assert/strict';import vm f
 const defaults=JSON.parse(await readFile('lib/sql-study-defaults.json','utf8'));
 const code=ts.transpileModule(await readFile('lib/sql-study-control.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
 class ApiError extends Error{constructor(status,code,message){super(message);this.status=status;this.code=code;}}
-function setup({record=true,started=false,old=null}={}){const writes=[];const query=async(sql,params)=>{if(sql.includes('pg_advisory'))return {rows:[]};if(sql.includes('latest_participants'))return {rows:record?[{archive:{study:{pretest:{score:100},group:'L',rounds:started?[{}]:[]}}}]:[]};if(sql.includes('FOR UPDATE'))return {rows:old?[old]:[]};writes.push({sql,params});return {rows:[]};};const exports={};vm.runInNewContext(code,{exports,structuredClone,require:n=>n==='server-only'?{}:n==='node:crypto'?crypto:n==='@/db'?{transaction:fn=>fn({query})}:n==='@/lib/http'?{ApiError}:n.endsWith('json')?{default:defaults}:n.endsWith('policy')?{SQL_CLASSES:['计网2543'],SQL_STUDY:'sql-teachable-mvp/1'}:(()=>{throw Error(n);})()});return {upgrade:exports.upgradeSqlControl,assign:group=>exports.assignSqlTest('计网2543','test',group,'admin'),writes};}
+function setup({record=true,started=false,old=null,rounds=null}={}){const writes=[];const query=async(sql,params)=>{if(sql.includes('pg_advisory'))return {rows:[]};if(sql.includes('latest_participants'))return {rows:record?[{archive:{study:{pretest:{score:100},group:'L',rounds:rounds??(started?[{}]:[])}}}]:[]};if(sql.includes('FOR UPDATE'))return {rows:old?[old]:[]};writes.push({sql,params});return {rows:[]};};const exports={};vm.runInNewContext(code,{exports,structuredClone,require:n=>n==='server-only'?{}:n==='node:crypto'?crypto:n==='@/db'?{transaction:fn=>fn({query})}:n==='@/lib/http'?{ApiError}:n.endsWith('json')?{default:defaults}:n.endsWith('policy')?{SQL_CLASSES:['计网2543'],SQL_STUDY:'sql-teachable-mvp/1'}:(()=>{throw Error(n);})()});return {upgrade:exports.upgradeSqlControl,assign:group=>exports.assignSqlTest('计网2543','test',group,'admin'),writes};}
 test('single test assignment requires a confirmed test record, and rejects normal identities',async()=>{const h=setup({record:false});await assert.rejects(()=>h.assign('L'),e=>e.status===403);assert.equal(h.writes.length,0);});
 test('test allocation persists a separately marked group and audit; active lessons cannot switch groups',async()=>{let h=setup();await h.assign('L');assert.match(h.writes[0].sql,/single_test_manual/);assert.equal(h.writes[1].params[2],'test.assign');h=setup({started:true});await assert.rejects(()=>h.assign('T'),e=>e.status===409);assert.equal(h.writes.length,0);});
 test('single test controls cannot overwrite a prior paired allocation',async()=>{const h=setup({old:{group_code:'L',method:'class_adjacent_pair_constrained_random_1500'}});await assert.rejects(()=>h.assign('T'),e=>e.code==='FORMAL_ALLOCATION_LOCKED');assert.equal(h.writes.length,0);});
 
-test('three-lesson controls upgrade additively and preserve custom lessons and original input',()=>{
- const old=structuredClone(defaults);old.tasks.pop();old.prompts.lessons.pop();delete old.preparation_timing;delete old.prompts.preparation;
- old.tasks[0].brief='教师自定义正文任务';old.prompts.lessons[0]='教师自定义教学范围';
- for(const rules of Object.values(old.schedules))for(const key of ['ai3','practice3','posttest3'])delete rules[key];
+test('old controls are replaced by the agreed scheme without mutating input or reusing switches',()=>{
+ const old=structuredClone(defaults);delete old.scheme_version;
+ old.tasks=old.tasks.slice(0,4);old.prompts.lessons=old.prompts.lessons.slice(0,4);
+ old.tasks[0].brief='旧性别映射';old.schedules['计网2543'].ai0.mode='open';
  const upgraded=setup().upgrade(old);
- assert.equal(upgraded.tasks.length,4);assert.equal(old.tasks.length,3);
- assert.equal(upgraded.tasks[0].brief,'教师自定义正文任务');assert.equal(upgraded.prompts.lessons[0],'教师自定义教学范围');
- assert.equal(upgraded.tasks[3].id,'P0');assert.equal(upgraded.schedules['计网2543'].practice3.mode,'auto');
+ assert.equal(upgraded.tasks.length,5);assert.equal(old.tasks.length,4);
+ assert.equal(upgraded.tasks[0].id,'T1');assert.equal(upgraded.tasks[4].id,'P0');
+ assert.equal(upgraded.schedules['计网2543'].ai0.mode,'closed');
  assert.equal(upgraded.preparation_timing.teaching_seconds,900);
+ assert.equal(old.tasks[0].brief,'旧性别映射');
+ assert.deepEqual(setup().upgrade(upgraded),upgraded);
 });
+
+test('first L/T trial locks treatment while legacy common trial can receive a group',async()=>{let h=setup({rounds:[{index:3,group:'L'}]});await assert.rejects(()=>h.assign('T'),e=>e.code==='TEST_ALREADY_STARTED');assert.equal(h.writes.length,0);h=setup({rounds:[{index:3,group:'P'}]});await h.assign('T');assert.equal(h.writes.length,2);});

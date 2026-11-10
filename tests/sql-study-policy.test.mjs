@@ -24,24 +24,27 @@ test('backup is always on, minute values fit an 80-minute class, and only practi
  const good=structuredClone(cfg);good.schedules['计网2541'].practice0.mode='auto';assert.equal(p.controlSchema.safeParse(good).success,true);
 });
 
-test('version summaries describe changed lesson content instead of only showing counters',()=>{const next=structuredClone(cfg);next.tasks[0].checks[0]+=' 新检查';next.prompts.common+=' 自然学生语气';const summary=Array.from(p.summarizeSqlChanges(cfg,next));assert.ok(summary.includes('第2课检查点'));assert.ok(summary.includes('更新通用学徒规则与表达方式'));});
-test('classroom controls are ordered by measurement and lesson, with each lesson kept together',async()=>{const exports={};vm.runInNewContext(ts.transpileModule(await readFile('lib/sql-study-display.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports});const groups=exports.classroomScheduleGroups();assert.deepEqual(Array.from(groups[1].keys),['ai3','practice3','posttest3']);assert.deepEqual(Array.from(groups[2].keys),['ai0','practice0','posttest0']);assert.equal(groups.flatMap(x=>x.keys).length,15);});
+test('version summaries describe changed lesson content instead of only showing counters',()=>{const next=structuredClone(cfg);next.tasks[0].checks[0]+=' 新检查';next.prompts.common+=' 自然学生语气';const summary=Array.from(p.summarizeSqlChanges(cfg,next));assert.ok(summary.includes('正式第1课检查点'));assert.ok(summary.includes('更新通用学徒规则与表达方式'));});
+test('classroom controls are ordered by measurement and lesson, with each lesson kept together',async()=>{const exports={};vm.runInNewContext(ts.transpileModule(await readFile('lib/sql-study-display.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports});const groups=exports.classroomScheduleGroups();assert.deepEqual(Array.from(groups[1].keys),['ai4','practice4','posttest4']);assert.deepEqual(Array.from(groups[2].keys),['ai0','practice0','posttest0']);assert.equal(groups.flatMap(x=>x.keys).length,18);});
 
 test('legacy question-count settings normalize to unlimited without rejecting old controls',()=>{const legacy=structuredClone(cfg);legacy.max_questions=6;assert.equal(p.controlSchema.parse(legacy).max_questions,0);const missing=structuredClone(cfg);delete missing.max_questions;assert.equal(p.controlSchema.parse(missing).max_questions,0);});
 
-test('preparation has a shared prompt regardless of later group and keeps original formal targets',()=>{
- const left=p.composeSqlPrompt(cfg,3,'L',3),right=p.composeSqlPrompt(cfg,3,'T',3);
- assert.equal(left,right);assert.ok(left.includes(cfg.prompts.preparation));assert.ok(!right.includes('target必须为'));
+test('preparation uses one shared policy regardless of assigned treatment',()=>{
+ const left=p.composeSqlPrompt(cfg,4,'L',3),right=p.composeSqlPrompt(cfg,4,'T',3);
+ assert.equal(left,right);assert.ok(left.includes(cfg.prompts.preparation));
+ assert.ok(!right.includes('target必须为2'));
+ const formalLeft=p.composeSqlPrompt(cfg,0,'L',3),formalRight=p.composeSqlPrompt(cfg,0,'T',3);
+ assert.notEqual(formalLeft,formalRight);assert.ok(formalRight.includes('target必须为2'));
  const altered=structuredClone(cfg);altered.preparation_timing.teaching_seconds=2400;
  assert.equal(p.controlSchema.safeParse(altered).success,false);
 });
 
-test('browser admin reads lesson numbers from the dependency-free display module',async()=>{const panel=await readFile('app/admin/sql-study-panel.tsx','utf8');assert.match(panel,/import type \{SqlControl\} from '@\/lib\/sql-study-policy'/);assert.match(panel,/import \{classroomScheduleGroups,SQL_LESSON_ORDER,sqlLessonNumber\} from '@\/lib\/sql-study-display'/);});
+test('browser admin reads lesson numbers from the dependency-free display module',async()=>{const panel=await readFile('app/admin/sql-study-panel.tsx','utf8');assert.match(panel,/import type \{SqlControl\} from '@\/lib\/sql-study-policy'/);assert.match(panel,/import \{classroomScheduleGroups,SQL_LESSON_ORDER,sqlLessonNumber[^}]*\} from '@\/lib\/sql-study-display'/);});
 
 test('version history compares legacy three-lesson revisions and transitions without throwing',()=>{
  const old=structuredClone(cfg);old.tasks.pop();old.prompts.lessons.pop();delete old.prompts.preparation;delete old.preparation_timing;
  const next=structuredClone(old);next.tasks[0].brief+=' 历史调整';
- assert.ok(Array.from(p.summarizeSqlChanges(old,next)).includes('第2课名称或实操题干'));
- assert.ok(Array.from(p.summarizeSqlChanges(next,cfg)).some(x=>x.startsWith('新增第1课')));
- assert.ok(Array.from(p.summarizeSqlChanges(cfg,next)).some(x=>x.startsWith('移除第1课')));
+ assert.ok(Array.from(p.summarizeSqlChanges(old,next)).includes('正式第1课名称或实操题干'));
+ assert.ok(Array.from(p.summarizeSqlChanges(next,cfg)).some(x=>x.startsWith('新增准备课P0')));
+ assert.ok(Array.from(p.summarizeSqlChanges(cfg,next)).some(x=>x.startsWith('移除准备课P0')));
 });

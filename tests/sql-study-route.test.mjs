@@ -21,20 +21,20 @@ test('questionnaire and combined exports retain composite IDs, missing states an
 });
 
 test('choice posttest exports keep ten answers, question snapshots and automatic totals separate from grading',async()=>{
- const record={device_id:'device',participant_id:'student',participant_name:'测试',class_code:'计网2543',is_test:true,archive:{participant:{id:'student'},study:{id:'student',pretest:{score:50},rounds:[{index:0,phase:'done',quiz:{format:'single_choice',version:'textbook-single-choice/1',score:80,mcq_score:80,question_count:10,correct:8,max_score:100,answers:Array(10).fill('B'),elapsed_seconds:120,items:[{id:'L2Q01',text:'题目快照'}]}}]}}};
+ const record={device_id:'device',participant_id:'student',participant_name:'测试',class_code:'计网2543',is_test:true,archive:{participant:{id:'student'},study:{scheme_version:'business-workorders/1',id:'student',pretest:{score:50},rounds:[{scheme_version:'business-workorders/1',index:0,phase:'done',quiz:{format:'single_choice',version:'textbook-single-choice/1',score:80,mcq_score:80,question_count:10,correct:8,max_score:100,answers:Array(10).fill('B'),elapsed_seconds:120,items:[{id:'L2Q01',text:'题目快照'}]}}]}}};
  const h=setup(true,[record],[{device_id:'device',participant_id:'student',lesson:0,scores:[20,20]}]);
  const response=await h.route.GET(new Request('http://localhost/api/admin/sql-study?format=posttests'));
  assert.equal(response.status,200);const csv=await response.text();assert.match(csv,/Q10/);assert.match(csv,/题目快照/);assert.match(csv,/textbook-single-choice\/1/);
  const combined=await (await h.route.GET(new Request('http://localhost/api/admin/sql-study?format=combined'))).text();
  const parse=line=>Array.from(line.matchAll(/"((?:[^"]|"")*)"(?:,|$)/g),m=>m[1].replaceAll('""','"'));
  const [headers,row]=combined.trim().replace(/^\uFEFF/,'').split('\r\n').map(parse);
- assert.equal(row[headers.indexOf('第2课_后测总分')],'80');
- assert.equal(row[headers.indexOf('第2课_SQL题1得分')],'');assert.equal(h.writes(),0);
+ assert.equal(row[headers.indexOf('正式第1课_后测总分')],'80');
+ assert.equal(row[headers.indexOf('正式第1课_SQL题1得分')],'');assert.equal(h.writes(),0);
 });
 
 test('test lesson commands require admin, same origin and a valid four-lesson identity payload',async()=>{
  const body={action:'select_test_lesson',deviceId:'7ee99094-b337-4a64-9c61-acd3ba784321',participantId:'46ec9456-d3c6-4a24-b931-5229027d6211',lesson:3};
  const denied=setup(false);assert.equal((await denied.post(body)).status,401);assert.equal(denied.writes(),0);
- const h=setup();assert.equal((await h.post(body,'http://other.test')).status,403);assert.equal((await h.post({...body,lesson:4})).status,400);assert.equal(h.writes(),0);
+ const h=setup();assert.equal((await h.post(body,'http://other.test')).status,403);assert.equal((await h.post({...body,lesson:5})).status,400);assert.equal(h.writes(),0);
  assert.equal((await h.post(body)).status,200);assert.equal(h.writes(),1);
 });

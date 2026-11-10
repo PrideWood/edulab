@@ -1,13 +1,13 @@
 import test from 'node:test';import assert from 'node:assert/strict';import vm from 'node:vm';import {readFile} from 'node:fs/promises';
 const source=await readFile(new URL('../web/app.js',import.meta.url),'utf8');
 async function setup(extra={}){
- const nodes=new Map();const node=k=>{if(!nodes.has(k))nodes.set(k,{innerHTML:'',textContent:'',value:'',disabled:false,dataset:{},querySelectorAll:()=>[],querySelector:s=>node('#chat-form '+s),requestSubmit:()=>node('#chat-form').onsubmit({preventDefault(){}}),classList:{add(){},remove(){}}});return nodes.get(k);};
+ const nodes=new Map();const node=k=>{if(!nodes.has(k))nodes.set(k,{insertAdjacentHTML:(position,html)=>{node('#app').innerHTML+=html;},innerHTML:'',textContent:'',value:'',disabled:false,dataset:{},querySelectorAll:()=>[],querySelector:s=>node('#chat-form '+s),requestSubmit:()=>node('#chat-form').onsubmit({preventDefault(){}}),classList:{add(){},remove(){}}});return nodes.get(k);};
  const store=new Map([['sql-identity',JSON.stringify({id:'test',token:'fake-session'})],['local-key','fake-local']]);const timers=[],calls=[];
  let state={id:'test',name:'测试',class_code:'计网2543',server_now:Date.now()/1000,mode:'demo',tasks:[],rounds:[],meta_spec:{instruction:'请按实际情况作答',options:['非常不同意','不同意','既不同意也不反对','同意','非常同意']},gates:{pretest:{open:false,reason:'教师暂未开放'},meta_pre:{open:false,reason:'教师暂未开放'}}};
  state={...state,...extra};
  const context={document:{querySelector:node,querySelectorAll:()=>[]},location:{hash:'',pathname:'/'},history:{replaceState(){}},sessionStorage:{getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,v)},URLSearchParams,Date,JSON,Promise,console,setInterval:(fn,ms)=>timers.push({fn,ms}),setTimeout(){},requestAnimationFrame:fn=>fn(),clearTimeout(){},fetch:async(path,opts)=>{calls.push({path,opts});return {ok:true,json:async()=>path.includes('/api/questions?kind=posttest')?Array.from({length:10},(_,i)=>({text:'单选题'+(i+1),options:['甲','乙','丙','丁']})):path.includes('/api/questions?kind=meta')?Array.from({length:13},(_,i)=>'问卷题'+(i+1)):JSON.parse(JSON.stringify(state))};}};
  vm.runInNewContext(source,context);await new Promise(resolve=>setImmediate(resolve));
- return {node,calls,change:next=>{state={...state,...next};},openQuiz:()=>context.navigate('quiz0'),quizBody:()=>context.quizBody(),saveQuiz:()=>context.saveQuiz(),openPretest:()=>context.navigate('pretest'),openMeta:()=>context.navigate('meta_pre'),openAI:()=>context.navigate('ai0'),poll:()=>timers.find(t=>t.ms===3000).fn(),open:()=>{state.gates.pretest={open:true,reason:'已开放'};}};
+ return {node,calls,change:next=>{state={...state,...next};},openQuiz:()=>context.navigate('quiz0'),quizBody:()=>context.quizBody(),saveQuiz:()=>context.saveQuiz(),openPretest:()=>context.navigate('pretest'),openMeta:()=>context.navigate('meta_pre'),openPractice:(i=0)=>context.navigate('practice'+i),openAI:(i=0)=>context.navigate('ai'+i),action:(...args)=>context.action(...args),poll:()=>timers.find(t=>t.ms===3000).fn(),open:()=>{state.gates.pretest={open:true,reason:'已开放'};}};
 }
 test('an already logged-in student sees a newly opened pretest without reloading',async()=>{const h=await setup();assert.match(h.node('#app').innerHTML,/data-go="pretest" disabled/);h.open();await h.poll();assert.doesNotMatch(h.node('#app').innerHTML,/data-go="pretest" disabled/);assert.match(h.node('#app').innerHTML,/已开放/);});
 test('manual refresh synchronizes classroom state through the authenticated endpoint',async()=>{const h=await setup();h.open();await h.node('#refresh-classroom').onclick();assert.ok(h.calls.some(c=>c.path==='/api/refresh'&&c.opts.method==='POST'));assert.doesNotMatch(h.node('#app').innerHTML,/data-go="pretest" disabled/);assert.equal(h.node('#toast').textContent,'课堂安排已同步');});
@@ -20,18 +20,15 @@ test('Enter sends once while Shift+Enter and IME composition preserve text',asyn
 
 test('legacy count limits never disable sending during the teaching window',async()=>{const h=await setup({mode:'real',tasks:[task],rounds:[{task,phase:'teaching',teaching_deadline:Date.now()/1000+900,messages:[],requests:Array.from({length:25},()=>({status:'completed'})),limits:{max_questions:6}}]});await h.openAI();assert.equal(h.node('#chat-form button[type=submit]').disabled,false);});
 
-test('four lessons display preparation first with identical student-facing stages before assignment',async()=>{
- const tasks=[{...task,title:'查询中的常用处理'},{...task,title:'聚合与分组'},{...task,title:'子查询比较'},{...task,title:'简单查询'}];
- const h=await setup({tasks,course_order:[3,0,1,2],next_lesson:3,has_pretest:true,has_meta_pre:true,group_assigned:false,gates:{ai3:{open:true,reason:'已开放'}}});
+test('shared preparation and four formal entries render before group assignment',async()=>{
+ const tasks=Array.from({length:5},(_,i)=>({...task,title:'任务'+i}));
+ const h=await setup({tasks,course_order:[4,0,1,2,3],next_lesson:4,has_pretest:true,has_meta_pre:true,group_assigned:false,gates:{ai4:{open:true,reason:'已开放'},ai0:{open:true}}});
  const html=h.node('#app').innerHTML;
- assert.equal((html.match(/data-lesson=/g)||[]).length,4);
- assert.ok(html.indexOf('data-lesson="3"')<html.indexOf('data-lesson="0"'));
- assert.match(html,/data-go="ai3"\s*>进入/);
- assert.doesNotMatch(html,/准备阶段|正式干预|正式第|等待分组/);
- assert.match(html,/第 1 课/);assert.match(html,/第 4 课/);
- assert.equal((html.match(/教虚拟学徒/g)||[]).length,4);
- assert.equal((html.match(/SQL Server 独立实操/g)||[]).length,4);
- assert.equal((html.match(/当节课后测/g)||[]).length,4);
+ assert.equal((html.match(/data-lesson=/g)||[]).length,5);
+ assert.ok(html.indexOf('data-lesson="4"')<html.indexOf('data-lesson="0"'));
+ assert.doesNotMatch(html,/data-go="ai4" disabled/);assert.match(html,/data-go="ai0" disabled/);
+ assert.match(html,/准备课P0/);assert.match(html,/正式第4课/);
+ assert.doesNotMatch(html,/性别代码映射|三轮正式干预|分组试运行/);
 });
 
 test('immediate posttest uses ten independent four-option questions and submits without SQL fields',async()=>{
@@ -61,4 +58,36 @@ test('a teacher test-lesson switch leaves stale chat and highlights the newly se
  assert.doesNotMatch(html,/id="chat-form"/);
  const first=html.slice(html.indexOf('data-lesson="3"'),html.indexOf('data-lesson="0"'));
  assert.match(first,/当前课堂/);
+});
+
+test('suggested teaching time does not disable the composer or retry button',async()=>{const h=await setup({mode:'real',tasks:[task],rounds:[{index:0,task,phase:'teaching',teaching_deadline:Date.now()/1000-200,messages:[],requests:[{status:'failed'}],limits:{}}]});await h.openAI();assert.equal(h.node('#chat-form button[type=submit]').disabled,false);assert.equal(h.node('#chat-text').disabled,false);assert.equal(h.node('#retry-chat').disabled,false);assert.doesNotMatch(h.node('#chat-status').textContent,/时段已结束/);});
+
+
+test('teacher opens a later lesson while an earlier lesson is unfinished',async()=>{
+ const h=await setup({tasks:[task,task,task,task],course_order:[3,0,1,2],has_pretest:true,has_meta_pre:true,group_assigned:true,next_lesson:0,gates:{ai1:{open:true},ai2:{open:false}},rounds:[{id:'earlier',index:3,task,phase:'teaching',messages:[],requests:[]}]});
+ assert.match(h.node('#app').innerHTML,/data-go="ai1"\s*>进入/);
+ assert.match(h.node('#app').innerHTML,/data-go="ai2" disabled/);
+ assert.doesNotMatch(h.node('#app').innerHTML,/请先完成当前课堂/);
+});
+
+test('actions and polling stay bound to displayed lesson rather than newest record',async()=>{
+ const rounds=[{id:'chosen',index:0,task,phase:'teaching',messages:[],requests:[]},{id:'newest',index:1,task,phase:'teaching',messages:[],requests:[]}];
+ const h=await setup({tasks:[task,task],rounds});await h.openAI(0);await h.action('draft',{sql:'SELECT 1'});
+ const call=h.calls.find(c=>c.path==='/api/action');assert.equal(JSON.parse(call.opts.body).round_id,'chosen');
+ h.change({rounds:[rounds[0],{...rounds[1],phase:'done'}]});await h.poll();
+ assert.match(h.node('#app').innerHTML,/id="chat-form"/);
+});
+
+
+test('teacher may open practice and posttest without an AI round',async()=>{
+ const h=await setup({tasks:[task],rounds:[],has_pretest:true,has_meta_pre:true,group_assigned:true,gates:{ai0:{open:false},practice0:{open:true},posttest0:{open:true}}});
+ const html=h.node('#app').innerHTML;assert.match(html,/data-go="practice0"\s*>进入/);assert.match(html,/data-go="quiz0"\s*>进入/);assert.match(html,/data-go="ai0" disabled/);
+ await h.openPractice();assert.match(h.node('#app').innerHTML,/开始计时并实操/);assert.doesNotMatch(h.node('#app').innerHTML,/请先完成本课/);
+ await h.openQuiz();assert.match(h.node('#app').innerHTML,/id="start-quiz"/);
+});
+
+test('submitted quiz remains complete when other stages change the lesson phase',async()=>{
+ const h=await setup({tasks:[task],has_pretest:true,has_meta_pre:true,group_assigned:true,gates:{ai0:{open:true},posttest0:{open:true}},rounds:[{id:'mixed',index:0,task,phase:'practice',teaching_started:true,teaching_deadline:1,practice_started:true,quiz_started:true,quiz_completed:true,messages:[],requests:[]}]});
+ assert.match(h.node('#app').innerHTML,/data-go="quiz0" disabled>已完成/);
+ await h.openAI();assert.match(h.node('#app').innerHTML,/id="chat-form"/);
 });

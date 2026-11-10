@@ -1,0 +1,23 @@
+{
+  "validation": "MDF not attached; SQL export schema and INSERT literals independently checked",
+  "files": [
+    {
+      "name": "教学管理数据库.mdf",
+      "size": 3145728,
+      "sha256": "140bf60c29613f32ae7134f45e7eb8b5abfffd6d15d719c9c4d8353c1174f960"
+    },
+    {
+      "name": "教学管理数据库_log.ldf",
+      "size": 1048576,
+      "sha256": "e018ff7ae74e6ae70a0f65c027b4f25fd71ce4db604b8396b4dbf9f16156dea3"
+    }
+  ],
+  "sql_export": {
+    "name": "script.sql",
+    "sha256": "a18e035660061684a7e94624e0ec5df0a013b166543fcf98c77624c7d5435952",
+    "encoding": "UTF-16LE",
+    "tables": 6,
+    "inserted_rows": 68,
+    "not_asserted_identical_to_mdf": true
+  }
+}

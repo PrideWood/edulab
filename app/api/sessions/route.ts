@@ -43,7 +43,7 @@ const inputSchema = z.object({
   }
 });
 
-export async function GET(request?: Request) {
+export async function GET(request: Request) {
   try {
     const entry = await getStudentEntry(request);
     const session = await getAuthenticatedSession(entry);

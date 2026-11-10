@@ -37,7 +37,7 @@ const inputSchema = z.object({
   }),
 });
 
-export async function GET(request?: Request) {
+export async function GET(request: Request) {
   try {
     const admin = await getAuthenticatedAdmin();
     if (!admin) throw new ApiError(401, "ADMIN_REQUIRED", "请先登录管理后台。");

@@ -46,7 +46,7 @@ body{background:#f2f8fd}
 #app .login-panel{background:radial-gradient(ellipse at 95% 0,#e4f5ff,transparent 65%),#f5faff}
 #app .login-panel .card{box-shadow:0 16px 55px #1c7bac0c}
 #app .choice,#app .scale label{background:#f0f8fe;border:1px solid #e2f0fa}
-#app .choice:has(input:checked){background:#e1f2ff;border-color:#89c9ee;color:#155d8d}
+#app .choice.selected{background:#e1f2ff;border-color:#89c9ee;color:#155d8d}
 #app .choice:hover,#app .option:hover{background:#e8f5ff}
 #app .message,#app .bubble{background:#edf7ff;border:1px solid #d9ecfa}
 #app .message.user,#app .bubble.user{background:#dcf0ff;border-color:#c0e3f9}
@@ -113,3 +113,5 @@ body:has(#teacher[open]) #toast{background:#193632;box-shadow:0 5px 20px #0002}
 @media(max-width:650px){#app .chat-person{flex-basis:44px;min-width:44px}#app .chat-person .chat-avatar{flex-basis:30px}#app .message-row .message{max-width:calc(100% - 51px)}}
 
 #app .topbar{height:auto;min-height:78px}
+
+#app .timer{font-size:18px;line-height:1.45;max-width:260px;white-space:normal}

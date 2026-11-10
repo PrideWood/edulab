@@ -7,3 +7,6 @@ build/
 dist/
 *.spec
 .preview/
+
+release/
+windows-launcher/payload.zip

@@ -19,7 +19,7 @@ function noStoreJson(body: unknown) {
   return NextResponse.json(body, { headers: { "Cache-Control": "private, no-store" } });
 }
 
-export async function GET(request?: Request) {
+export async function GET(request: Request) {
   try {
     const session = await getAuthenticatedSession(await getStudentEntry(request));
     if (!session) throw new ApiError(401, "SESSION_REQUIRED", "实验会话已失效。");

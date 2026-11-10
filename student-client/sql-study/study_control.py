@@ -13,7 +13,7 @@ import urllib.request
 import urllib.parse
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
-from course_layout import PREPARATION_LESSON, COURSE_ORDER, TASKS, course_order, next_lesson, upgrade_config
+from course_layout import PREPARATION_LESSON, COURSE_ORDER, TASKS, course_order, next_lesson, upgrade_config, upgrade_participant, SCHEME_VERSION, lesson_label
 
 CLASSES = ['计网2541', '计网2542', '计网2543']
 COMMON = ('你是学生教导的SQL虚拟学徒，不是教师。不直接提供SQL答案，不主动补充学生尚未教的知识。'
@@ -48,9 +48,14 @@ def install(Base, Problem, encode, stamp):
             if not cfg.get('backup_enabled'): cfg['backup_enabled']=True;self.put_config(cfg)
             if 'prompts' not in cfg:
                 cfg.update(backup_enabled=True, prompt_version=1, prompts={'common':COMMON,'policies':POLICIES.copy(),'lessons':[t['brief'] for t in cfg['tasks']]},
-                           schedules={c:{k:{'mode':'closed','open_at':None,'close_at':None} for k in ['pretest','meta_pre','meta_post']+[f'{s}{i}' for i in range(4) for s in ['ai','practice','posttest']]} for c in CLASSES})
+                           schedules={c:{k:{'mode':'closed','open_at':None,'close_at':None} for k in ['pretest','meta_pre','meta_post']+[f'{s}{i}' for i in range(len(TASKS)) for s in ['ai','practice','posttest']]} for c in CLASSES})
                 self.put_config(cfg)
             self.put_config(upgrade_config(cfg))
+            with self.db() as db:
+                for row in db.execute('SELECT data FROM students').fetchall():
+                    person=json.loads(row[0])
+                    if upgrade_participant(person,stamp()):
+                        db.execute('UPDATE students SET data=?,revision=revision+1 WHERE id=?',(encode(person),person['id']))
 
         def control_loop(self):
             while not self.stop.is_set():
@@ -61,17 +66,22 @@ def install(Base, Problem, encode, stamp):
         def sync_cloud_control(self):
             connection=self.connection();url=connection.get('base_url','')
             parsed=urllib.parse.urlsplit(url)
-            if connection.get('source')!='edulab-local-bridge' or parsed.hostname!='127.0.0.1' or parsed.scheme!='http':return False
+            if connection.get('source')=='windows-direct':
+                from cloud_connection import CloudConnection
+                payload=CloudConnection(connection).sync(self.setting('device'))
+            elif connection.get('source')!='edulab-local-bridge' or parsed.hostname!='127.0.0.1' or parsed.scheme!='http':return False
+            else:payload=None
             class NoRedirect(urllib.request.HTTPRedirectHandler):
                 def redirect_request(self,*a,**kw):return None
-            request=urllib.request.Request(url,data=encode({'action':'study_sync','device_id':self.setting('device')}).encode(),headers={'Authorization':'Bearer '+connection['token'],'Content-Type':'application/json'})
-            with urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect).open(request,timeout=15) as response:payload=json.loads(response.read(2000000))
+            if payload is None:
+                request=urllib.request.Request(url,data=encode({'action':'study_sync','device_id':self.setting('device')}).encode(),headers={'Authorization':'Bearer '+connection['token'],'Content-Type':'application/json'})
+                with urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect).open(request,timeout=15) as response:payload=json.loads(response.read(2000000))
             cfg=payload.get('config');revision=payload.get('revision')
             if not isinstance(cfg,dict) or not isinstance(revision,int) or not all(k in cfg for k in ('schedules','prompts','tasks','teaching_seconds','practice_seconds','quiz_seconds')):raise Problem('云端设置格式不完整。')
             cfg=upgrade_config(cfg)
             with self.lock:
                 old=self.config()
-                if old.get('cloud_revision')!=revision or len(old['tasks'])!=len(cfg['tasks']):
+                if old.get('cloud_revision')!=revision or old.get('scheme_version')!=cfg.get('scheme_version') or len(old['tasks'])!=len(cfg['tasks']):
                     self.put_config({**cfg,'cloud_revision':revision});self.audit('cloud_control_synced',{'revision':revision})
                 with self.db() as db:people=[json.loads(r[0]) for r in db.execute('SELECT data FROM students')]
                 for p in people:
@@ -79,7 +89,8 @@ def install(Base, Problem, encode, stamp):
                     assignment=next((a for a in payload.get('assignments',[]) if a['class_code']==p['class_code'] and a['participant_name']==p.get('name')),None)
                     if assignment and assignment['group_code'] in ('L','T'):
                         g=assignment['group_code']
-                        if p['group'] is None or p['group']==g or not any(r['index']!=PREPARATION_LESSON for r in p['rounds']):
+                        started_group=next((r.get('group') for r in p['rounds'] if r.get('group') in ('L','T')),None)
+                        if started_group is None or started_group==g:
                             new={'batch':assignment['batch_id'],'pair':assignment['pair_no'],'method':assignment['method'],'pretest_score':float(assignment['pretest_score']),'source':'edulab-cloud'}
                             if p['group']!=g or p.get('assignment')!=new:
                                 p['group']=g;p['assignment']=new;self.event(p,'cloud_group_synced',group=g,batch=assignment['batch_id']);changed=True
@@ -97,6 +108,7 @@ def install(Base, Problem, encode, stamp):
             return True
 
         def apply_test_lesson_command(self,p,command):
+            if command.get('scheme_version') != SCHEME_VERSION:return False
             if command.get('test_identity_verified') is not True or command.get('device_id')!=self.setting('device') or command.get('participant_id')!=p['id']:
                 return False
             lesson=command.get('lesson')
@@ -124,8 +136,9 @@ def install(Base, Problem, encode, stamp):
                 if row: p=json.loads(row[0])
                 else:
                     p={'id':str(uuid.uuid4()),'class_code':cls,'code':'SQL-'+secrets.token_hex(8),'name':name,'created_at':stamp(),
-                       'group':None,'pretest':None,'meta_pre':None,'meta_post':None,'rounds':[],'course_order':COURSE_ORDER.copy(),'events':[{'at':stamp(),'type':'entered'}]}
+                       'group':None,'pretest':None,'meta_pre':None,'meta_post':None,'rounds':[],'scheme_version':SCHEME_VERSION,'course_order':COURSE_ORDER.copy(),'events':[{'at':stamp(),'type':'entered'}]}
                     db.execute('INSERT INTO students(id,class_code,code,login_name,data) VALUES (?,?,?,?,?)',(p['id'],cls,p['code'],name,encode(p)))
+                upgrade_participant(p,stamp())
                 session=secrets.token_urlsafe(32)
                 p['session_hash']=hashlib.sha256(session.encode()).hexdigest()
                 db.execute('UPDATE students SET data=? WHERE id=?',(encode(p),p['id']))
@@ -133,7 +146,29 @@ def install(Base, Problem, encode, stamp):
 
         def gate(self,p,key):
             if key=='meta_pre' and p['pretest'] is None:return {'open':False,'reason':'请先完成SQL基础前测'}
-            if key=='meta_post' and (next_lesson(p) is not None or not p['rounds'] or p['rounds'][-1]['phase']!='done'):return {'open':False,'reason':'请先完成全部课程任务和后测'}
+            if key=='meta_post' and (next_lesson(p) is not None or not p['rounds'] or any(r['phase']!='done' for r in p['rounds'])):return {'open':False,'reason':'请先完成全部课程任务和后测'}
+            # The agreed scheme uses one shared preparation, then the same stage sequence.
+            import re
+            match=re.fullmatch(r'(ai|practice|posttest)([0-4])',key)
+            if match and p.get('scheme_version')==SCHEME_VERSION:
+                stage,i=match.group(1),int(match.group(2))
+                if p.get('pretest') is None:return {'open':False,'reason':'请先完成SQL基础前测'}
+                if p.get('meta_pre') is None:return {'open':False,'reason':'请先完成13题课前问卷'}
+                training=i==PREPARATION_LESSON
+                if not training and p.get('group') not in ('L','T'):return {'open':False,'reason':'请等待教师完成前测分组'}
+                is_selected_test=p.get('test_lesson_control',{}).get('lesson')==i
+                prep=next((r for r in p['rounds'] if r['index']==PREPARATION_LESSON),None)
+                if not training and not is_selected_test and not (prep and prep.get('submission') and prep.get('quiz')):
+                    return {'open':False,'reason':'请先完成共同准备课的实操与流程测评'}
+                current=next((r for r in p['rounds'] if r['index']==i),None)
+                if stage=='ai' and current and self.stage_started(current,'practice'):
+                    return {'open':False,'reason':'独立实操已开始，学徒入口已关闭'}
+                if stage=='practice' and not (current and self.stage_started(current,'practice')):
+                    if not current or not self.stage_started(current,'ai') or not any(m.get('role')=='user' for m in current['messages']):
+                        return {'open':False,'reason':'请先完成本课教学徒环节并发送讲解'}
+                    if self.clock()<current.get('teaching_deadline',0):return {'open':False,'reason':'等待统一教学时段结束后进入独立实操'}
+                if stage=='posttest' and not (current and current.get('submission')):
+                    return {'open':False,'reason':'请先提交本课独立实操'}
             if self.cloud_managed and (self.last_control_sync is None or time.monotonic()-self.last_control_sync>120): return {'open':False,'reason':'等待教师课堂安排同步'}
             rule=self.config()['schedules'].get(p['class_code'],{}).get(key,{'mode':'closed'})
             selection=p.get('test_lesson_control')
@@ -143,10 +178,10 @@ def install(Base, Problem, encode, stamp):
             if mode=='auto' and key.startswith('practice'):
                 i=int(key[-1]);r=next((r for r in p['rounds'] if r['index']==i),None)
                 if not r:return {'open':False,'reason':'完成本课AI交互后自动解锁'}
-                if r['phase'] in ('practice','quiz','done'):return {'open':True,'reason':'实操已解锁'}
-                if r['phase']=='teaching' and self.clock()>=r.get('teaching_deadline',float('inf')) and any(m.get('role')=='user' and m.get('request_id') for m in r['messages']):return {'open':True,'reason':'教学结束，实操已自动解锁'}
-                if self.clock()>=r.get('teaching_deadline',float('inf')):return {'open':False,'reason':'教学时间已结束，但尚未发送讲解，请联系教师'}
-                return {'open':False,'reason':'发送讲解且教学时段结束后自动解锁'}
+                if self.stage_started(r,'practice') or r.get('submission') is not None:return {'open':True,'reason':'实操已解锁'}
+                if self.stage_started(r,'ai') and any(m.get('role')=='user' and m.get('request_id') for m in r['messages']):return {'open':True,'reason':'可继续交流，准备好后进入实操'}
+                if self.clock()>=r.get('teaching_deadline',float('inf')):return {'open':False,'reason':'建议时间已到，请先向学徒发送讲解'}
+                return {'open':False,'reason':'发送讲解后可进入实操，时长仅作建议'}
             if mode=='open': return {'open':True,'reason':'已开放'}
             if mode=='scheduled':
                 start,end=rule.get('open_at'),rule.get('close_at')
@@ -169,7 +204,7 @@ def install(Base, Problem, encode, stamp):
             questions=self.quiz_questions(r)
             correct=sum(a==q['answer'] for a,q in zip(answers,questions))
             score=round(correct*100/len(questions),2)
-            return {'format':'single_choice','answers':answers,'items':copy.deepcopy(questions),
+            return {'assessment_type':r['quiz_spec'].get('assessment_type','lesson'),'scheme_version':r.get('scheme_version'),'format':'single_choice','answers':answers,'items':copy.deepcopy(questions),
                     'correct':correct,'question_count':len(questions),'max_score':100,'mcq_score':score,'score':score,
                     'grading':'automatic','assessment_only':True,'status':status,'at':stamp(),
                     'finished_epoch':finished,'elapsed_seconds':round(finished-r['quiz_start'],3),
@@ -182,6 +217,7 @@ def install(Base, Problem, encode, stamp):
             out['test_lesson_revision']=p.get('test_lesson_control',{}).get('id')
             out['measurement_drafts']=p.get('measurement_drafts',{})
             out['meta_spec']=self.bank['meta_spec']
+            out['history_count']=len(p.get('scheme_history',[]))
             out['gates']={k:self.gate(p,k) for k in self.config()['schedules'].get(p['class_code'],{})}
             for r in out['rounds']:
                 # Do not reveal answer keys, research assessments or group/prompt settings to students.
@@ -195,7 +231,7 @@ def install(Base, Problem, encode, stamp):
         def act(self,pid,action,data):
             with self.lock:
                 p=self.get(pid)
-                if data.get('round_id') and (not p['rounds'] or p['rounds'][-1]['id']!=data['round_id']):raise Problem('课堂已切换，请返回课堂任务。',409)
+                if data.get('round_id'):self.round_for(p,data['round_id'])
                 if action=='measurement_draft':
                     kind=data.get('kind');values=data.get('answers')
                     if kind not in ('meta_pre','meta_post'):raise Problem('问卷类型无效。')
@@ -214,24 +250,25 @@ def install(Base, Problem, encode, stamp):
                         starts[kind]=self.clock();self.event(p,'measurement_started',measurement_kind=kind);self.save(p)
                     return self.public(p)
                 if action in ('pretest','meta_pre','meta_post'): self.require_gate(p,action)
-                elif action=='new_round': self.require_gate(p,'ai'+str(next_lesson(p)))
+                elif action=='new_round':
+                    stage=data.get('stage','ai')
+                    if stage not in ('ai','practice','posttest'):raise Problem('无效课堂环节。')
+                    self.require_gate(p,stage+str(self.requested_lesson(p,data)))
                 elif p['rounds']:
-                    r=p['rounds'][-1]; i=r['index']
+                    r=self.round_for(p,data.get('round_id')); i=r['index']
                     key=('ai' if action=='start_teaching' else 'practice' if action in ('start_practice','draft','submit_practice') else 'posttest')+str(i)
-                    active_submission=(action in ('draft','submit_practice') and r['phase']=='practice') or (action in ('quiz_draft','quiz') and r['phase']=='quiz' and r.get('quiz_start') is not None)
+                    active_submission=(action in ('draft','submit_practice') and self.stage_started(r,'practice') and r.get('submission') is None) or (action in ('quiz_draft','quiz') and self.stage_started(r,'posttest') and r.get('quiz') is None)
                     if not active_submission:self.require_gate(p,key)
-                    if action=='start_practice':
-                        if not any(m.get('role')=='user' and m.get('request_id') for m in r['messages']):raise Problem('请先向学徒发送讲解。',409)
                     if action=='quiz_draft':
                         self.expire(p,r)
-                        if r['phase']!='quiz' or not r.get('quiz_start'): raise Problem('后测已结束或未开始。',409)
+                        if not self.stage_started(r,'posttest') or r.get('quiz') is not None: raise Problem('后测已结束或未开始。',409)
                         answers=data.get('answers',[]);sql=data.get('sql_answers',[])
                         if not isinstance(answers,list) or len(answers)!=len(self.quiz_questions(r)) or any(a not in ('','A','B','C','D') for a in answers): raise Problem('选择题草稿格式有误。')
                         if not isinstance(sql,list) or len(sql)!=len(self.quiz_sql_items(r)) or any(not isinstance(a,str) or len(a)>10000 for a in sql): raise Problem('SQL作答格式有误。')
                         r['draft_quiz']={'answers':answers,**({'sql_answers':sql} if self.quiz_sql_items(r) else {})};self.save(p);return self.public(p)
                     if action=='quiz':
                         self.expire(p,r)
-                        if r['phase']!='quiz' or not r.get('quiz_start'): raise Problem('后测已截止或未开始。',409)
+                        if not self.stage_started(r,'posttest') or r.get('quiz') is not None: raise Problem('后测已截止或未开始。',409)
                         raw=self.score(data.get('answers'),self.quiz_questions(r));sql=data.get('sql_answers')
                         if not self.quiz_sql_items(r):
                             if sql not in (None,[]):raise Problem('本课后测仅包含单选题。')
@@ -243,7 +280,7 @@ def install(Base, Problem, encode, stamp):
                         self.event(p,action);self.save(p);return self.public(p)
                 result=super().act(pid,action,data)
                 if action=='start_practice':
-                    p=self.get(pid);r=p['rounds'][-1]
+                    p=self.get(pid);r=self.round_for(p,data.get('round_id'))
                     if not any(q.get('status')=='completed' for q in r['requests']):
                         self.event(p,'practice_without_completed_ai_reply',lesson=r['index'],statuses=[q.get('status') for q in r['requests']])
                         self.save(p)
@@ -270,8 +307,8 @@ def install(Base, Problem, encode, stamp):
         def chat(self,pid,body):
             with self.lock:
                 p=self.get(pid)
-                if body.get('round_id') and (not p['rounds'] or p['rounds'][-1]['id']!=body['round_id']):raise Problem('课堂已切换，请返回课堂任务。',409)
-                if p['rounds']: self.require_gate(p,'ai'+str(p['rounds'][-1]['index']))
+                if p['rounds'] or body.get('round_id'):
+                    r=self.round_for(p,body.get('round_id'));self.require_gate(p,'ai'+str(r['index']))
                 return super().chat(pid,body)
 
         def archive(self,pid):
@@ -344,7 +381,7 @@ def install(Base, Problem, encode, stamp):
                 except (ValueError,TypeError):return None
             def row(p,lesson,stage,start,end,status,note='',elapsed=None):
                 if elapsed is None and start is not None and end is not None:elapsed=round(max(0,end-start),3)
-                values=[p['id'],p['class_code'],p.get('name',p['code']),p.get('group') or '',lesson,stage,iso(start),iso(end),elapsed if elapsed is not None else '',status,note,'准备阶段' if lesson==1 else '正式干预' if isinstance(lesson,int) else '测量']
+                values=[p['id'],p['class_code'],p.get('name',p['code']),p.get('group') or '',lesson,stage,iso(start),iso(end),elapsed if elapsed is not None else '',status,note,'准备阶段' if lesson=='准备课P0' else '正式干预' if isinstance(lesson,str) and lesson.startswith('正式第') else '测量']
                 writer.writerow(["'"+v if isinstance(v,str) and v.startswith(('=','+','-','@','\t','\r')) else v for v in values])
             for p in people:
                 if p['class_code'] not in CLASSES:continue
@@ -354,14 +391,14 @@ def install(Base, Problem, encode, stamp):
                         row(p,'课前' if k!='meta_post' else '课后',label,start,q.get('finished_epoch') or parse(q.get('submitted_at',q.get('at'))) if q else None,'已提交' if q else '进行中','历史记录缺少开始时间时留空，不推算' if start is None else '首次打开至提交，包含离开页面的时间',q.get('elapsed_seconds') if q else None)
                 for r in p['rounds']:
                     if r.get('teaching_start') is not None:
-                        end=r['teaching_deadline'] if self.clock()>=r['teaching_deadline'] else None
-                        row(p,(1 if r['index']==PREPARATION_LESSON else r['index']+2),'AI教学时段',r['teaching_start'],end,'时段结束' if end is not None else '进行中','固定教学窗口，非连续打字时间')
+                        end=r.get('teaching_end')
+                        row(p,lesson_label(r['index']),'AI教学时段',r['teaching_start'],end,'已结束' if end is not None else '进行中','交互跨度：开始至切换实操/后测；若之后继续交互延长至最后讲解，包含离开页面时间')
                     if r.get('practice_start') is not None:
-                        q=r.get('submission');end=r['practice_start']+q['elapsed_seconds'] if q else r['practice_deadline'] if self.clock()>=r['practice_deadline'] else None
-                        row(p,(1 if r['index']==PREPARATION_LESSON else r['index']+2),'独立实操',r['practice_start'],end,q['status'] if q else 'timeout' if end is not None else '进行中','点击开始至确认提交；超时按上限计；非SQL Server前台活跃时间',q['elapsed_seconds'] if q else None)
+                        q=r.get('submission');end=r['practice_start']+q['elapsed_seconds'] if q else None
+                        row(p,lesson_label(r['index']),'独立实操',r['practice_start'],end,q['status'] if q else '进行中','点击开始至确认提交的实际用时；建议时长不截断；非SQL Server前台活跃时间',q['elapsed_seconds'] if q else None)
                     if r.get('quiz_start') is not None:
-                        q=r.get('quiz');end=(q.get('finished_epoch') or (r['quiz_deadline'] if q.get('status')=='timeout' else parse(q.get('at')))) if q else r['quiz_deadline'] if self.clock()>=r['quiz_deadline'] else None
-                        row(p,(1 if r['index']==PREPARATION_LESSON else r['index']+2),'当课后测',r['quiz_start'],end,q['status'] if q else 'timeout' if end is not None else '进行中','从开始后测计时，不含等待开放的时间',q.get('elapsed_seconds') if q else None)
+                        q=r.get('quiz');end=(q.get('finished_epoch') or (r['quiz_deadline'] if q.get('status')=='timeout' else parse(q.get('at')))) if q else None
+                        row(p,lesson_label(r['index']),'当课后测',r['quiz_start'],end,q['status'] if q else 'timeout' if end is not None else '进行中','从开始后测计时，不含等待开放的时间',q.get('elapsed_seconds') if q else None)
             return {'csv':out.getvalue()}
 
         def teacher(self):
@@ -386,10 +423,10 @@ def install(Base, Problem, encode, stamp):
                 if 'prompts' in body:
                     pr=body['prompts']
                     values=[pr.get('common'),*pr.get('policies',{}).values(),*pr.get('lessons',[])]
-                    if set(pr.get('policies',{}))!={'L','T'} or len(pr.get('lessons',[]))!=4 or any(not isinstance(v,str) or not v.strip() or len(v)>15000 for v in values): raise Problem('请填写通用规则、两组策略和四课内容。')
+                    if set(pr.get('policies',{}))!={'L','T'} or len(pr.get('lessons',[]))!=len(TASKS) or any(not isinstance(v,str) or not v.strip() or len(v)>15000 for v in values): raise Problem('请填写通用规则、两组策略、准备课及四次正式课内容。')
                     cfg['prompts']=pr
                 if 'tasks' in body:
-                    if len(body['tasks'])!=4: raise Problem('需要四课任务。')
+                    if len(body['tasks'])!=len(TASKS): raise Problem('需要一份准备任务和四份正式工单。')
                     for task,new in zip(cfg['tasks'],body['tasks']):
                         for key in ('title','brief'):
                             value=str(new.get(key,'')).strip()
@@ -418,7 +455,7 @@ def install(Base, Problem, encode, stamp):
 
         def debug(self,body):
             i=body.get('lesson',0);text=str(body.get('text','')).strip()
-            if type(i)!=int or not 0<=i<4 or not 1<=len(text)<=4000: raise Problem('请选择课次并输入模拟学生解释。')
+            if type(i)!=int or i not in COURSE_ORDER or not 1<=len(text)<=4000: raise Problem('请选择课次并输入模拟学生解释。')
             cfg=self.config()
             def run(g):
                 r={'index':i,'task':cfg['tasks'][i],'group':g,'config':cfg,'knowledge':{},'requests':[{}],'messages':[{'role':'user','content':text}]}
