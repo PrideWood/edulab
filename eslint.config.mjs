@@ -14,6 +14,7 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    "public/sql-student/**", // Generated ES2017 assets; validated by parser and browser tests.
   ]),
   eslint.configs.recommended,
   ...tseslint.configs.recommended,

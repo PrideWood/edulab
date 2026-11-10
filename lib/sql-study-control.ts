@@ -51,7 +51,7 @@ export async function assignSqlClass(classCode:string,includeTests:boolean,admin
  const rows=(await c.query<CloudRow>(`SELECT p.* FROM edulab_local_backup.latest_participants p WHERE class_code=$1 AND archive->>'study_schema'=$2 AND NOT edulab_local_backup.sql_is_test(p.participant_name,p.is_test)
  AND NOT EXISTS(SELECT 1 FROM local_backup_dispositions d WHERE d.device_id=p.device_id AND d.participant_id=p.participant_id AND d.is_trashed) ORDER BY received_at DESC`,[classCode,SQL_STUDY])).rows;
  const seen=new Set<string>();const unique=rows.filter(r=>{if(seen.has(r.participant_name))return false;seen.add(r.participant_name);return true;});
- if(unique.some(r=>r.archive.study.research_version!=='sql-lt/1.1'||r.archive.study.client_version!=='0.11.0'))throw new ApiError(409,'CLIENT_UPGRADE_REQUIRED','名单含旧研究协议，请先升级0.11.0并同步。');
+ if(unique.some(r=>r.archive.study.research_version!=='sql-lt/1.1'||!['0.11.0','0.12.0'].includes(String(r.archive.study.client_version))))throw new ApiError(409,'CLIENT_UPGRADE_REQUIRED','名单含旧研究协议，请先升级0.12.0并同步。');
  if(unique.some(r=>!r.archive.study.meta_pre))throw new ApiError(409,'BASELINE_PENDING','请先完成基础前测和课前问卷再分组。');
  const ready=unique.filter(r=>r.archive.study.pretest&&Number.isFinite(r.archive.study.pretest.score));
  if(unique.some(r=>!r.archive.study.pretest))throw new ApiError(409,'PRETEST_PENDING','该范围还有学生未完成前测，请先核对名单。');

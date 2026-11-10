@@ -610,7 +610,7 @@ class Handler(BaseHTTPRequestHandler):
                     safe=[{k:v for k,v in q.items() if k!='answer'} if isinstance(q,dict) else q for q in bank]
                     if stage=='posttest':safe += [{'id':q['id'],'kind':'sql','text':q['text']} for q in self.store.quiz_sql_items(r)]
                     return self.respond(safe)
-                if path=='/api/health': return self.respond({'ok':True,'application':STUDY})
+                if path=='/api/health': return self.respond({'ok':True,'application':STUDY,'version':'0.12.0'})
                 raise Problem('未找到接口。',404)
             filename={'/':'index.html','/app.js':'app.js','/compat.js':'compat.js','/style.css':'style.css'}.get(path)
             if not filename: raise Problem('未找到页面。',404)
@@ -680,10 +680,19 @@ def open_student_browser(url):
     print('未找到Chrome或Edge。请使用Chrome69或更新版本打开上方本机地址；不支持Internet Explorer。',flush=True)
     return False
 
+def verified_launch_url(launch):
+    url=launch.get('url','');parsed=urllib.parse.urlsplit(url)
+    key=urllib.parse.parse_qs(parsed.fragment).get('key',[''])[0]
+    if parsed.scheme!='http' or parsed.hostname!='127.0.0.1' or not parsed.port or not key:raise ValueError('invalid local launch')
+    request=urllib.request.Request('http://127.0.0.1:'+str(parsed.port)+'/api/health',headers={'X-Local-Key':key})
+    with urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect).open(request,timeout=2) as response:health=json.loads(response.read(1024))
+    if health.get('application')!=STUDY or health.get('version')!='0.12.0':raise ValueError('old service')
+    return url
+
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--data-dir',type=Path,default=default_directory())
-    parser.add_argument('--port',type=int,default=47850)
+    parser.add_argument('--port',type=int,default=0)
     parser.add_argument('--no-browser',action='store_true')
     args=parser.parse_args()
     # Same local database must never have two independent timer/model workers.
@@ -700,10 +709,13 @@ def main():
         # A second click reopens the existing instance without resetting records.
         try:
             launch=json.loads((args.data_dir/'launch.json').read_text(encoding='utf-8'))
-            if not args.no_browser:open_student_browser(launch['url'])
+            verified=verified_launch_url(launch)
+            if not args.no_browser:open_student_browser(verified)
             return
-        except Exception:raise SystemExit('同一数据目录的SQL实验服务已运行，请使用原窗口。')
+        except Exception:raise SystemExit('本机数据仍被另一个进程占用，且未能确认新版服务正常运行。请先关闭旧EduLab窗口后重试；不要删除学生数据。')
+    print('[2/4] Loading local records...',flush=True)
     store=Store(args.data_dir)
+    print('[3/4] Starting local HTTP service...',flush=True)
     server=ThreadingHTTPServer(('127.0.0.1',args.port),Handler); server.store=store
     server.daemon_threads=True
     store.cloud_managed=True
@@ -711,11 +723,13 @@ def main():
     threading.Thread(target=store.backup_loop,daemon=True).start()
     url=f'http://127.0.0.1:{server.server_port}/#key={store.token}'
     launch=args.data_dir/'launch.json'
-    launch.write_text(encode({'url':url,'admin_url':'https://edulab.dacnote.com/admin'}),encoding='utf-8'); launch.chmod(0o600)
+    launch.write_text(encode({'url':url,'admin_url':'https://edulab.dacnote.com/admin','version':'0.12.0','pid':os.getpid(),'created_epoch':time.time()}),encoding='utf-8'); launch.chmod(0o600)
     print('EduLab SQL 本地MVP已启动：'+url,flush=True)
     print('教师管理统一使用EduLab管理平台；本机数据目录：'+str(args.data_dir),flush=True)
     print('默认使用明确标注的演示学徒。真实AI需要网络；本机保存不依赖云端。',flush=True)
-    if not args.no_browser: open_student_browser(url)
+    if not args.no_browser:
+        if open_student_browser(url):print('[EDULAB_READY] Browser launched.',flush=True)
+        else:print('[READY] Open this local URL in Chrome: '+url,flush=True)
     try: server.serve_forever(poll_interval=0.3)
     except KeyboardInterrupt: pass
     finally: store.stop.set(); server.server_close()

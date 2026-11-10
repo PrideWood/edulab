@@ -11,7 +11,7 @@ function toast(message){$('#toast').textContent=message;$('#toast').classList.ad
 async function api(path,data){const headers={'X-Local-Key':sessionStorage.getItem('local-key')||''};if(identity){headers['X-Participant']=identity.id;headers['X-Participant-Session']=identity.token;}
  const response=await fetch(path,{method:data?'POST':'GET',headers:{...headers,...(data?{'Content-Type':'application/json'}:{})},body:data?JSON.stringify(data):undefined});
  const out=await response.json();if(!response.ok)throw Error(out.error||'请求未完成');return out;}
-function accept(s){if(state&&s.access_policy==='current-task/1'&&state.current_lesson!==s.current_lesson){page='home';formLoad++;}if(s.test_reset_required)throw Error("试测记录已清理，请重新登录测试账号");if(state&&state.test_lesson_revision!==s.test_lesson_revision){clearTimeout(draftTimer);draftTimer=null;formLoad++;page='home';lessonExpansion.clear();}state=s;offset=s.server_now-Date.now()/1000;}
+function accept(s){if(state&&s.access_policy==='current-task/1'&&state.current_lesson!==s.current_lesson&&/^(ai|practice|quiz)[0-4]$/.test(page)){page='home';formLoad++;}if(s.test_reset_required)throw Error("试测记录已清理，请重新登录测试账号");if(state&&state.test_lesson_revision!==s.test_lesson_revision&&/^(ai|practice|quiz)[0-4]$/.test(page)){clearTimeout(draftTimer);draftTimer=null;formLoad++;page='home';lessonExpansion.clear();}state=s;offset=s.server_now-Date.now()/1000;}
 const now=()=>Date.now()/1000+offset;
 function btn(text,attrs=''){return `<button ${attrs}>${text}</button>`;}
 function timeLabel(t){return t?new Date(t*1000).toLocaleString('zh-CN',{hour12:false}):'—';}

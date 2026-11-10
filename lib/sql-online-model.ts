@@ -1,0 +1,14 @@
+import {deepSeekBaseUrl,DeepSeekError,type ModelMessage} from './deepseek';
+import type {SharedModelConfig} from './shared-model';
+import {chatPrompt,StudentError,type Data} from './sql-online-engine';
+export async function generateOnlineReply(r:Data,q:Data,shared:{token:string;baseUrl:string;config:SharedModelConfig}):Promise<Data>{
+ if(r.messages.some((m:Data)=>m.image)&&!['deepseek-flash','deepseek-v4-flash-vision-exp'].includes(shared.config.model))throw new StudentError('当前共享模型不支持图片，请教师更换视觉模型。');
+ const example=JSON.stringify({reply:'这里填写学徒对本轮讲解的自然回应；必要时才问一个未解决问题',target:r.group==='T'?(q.turn_index-1)%6:0,reason:'简短说明目标选择依据',knowledge:{}});
+ const messages:ModelMessage[]=[{role:'system',content:chatPrompt(r,q)},{role:'system',content:'你正在调用程序接口，不是在直接发送聊天消息。整个JSON仅供后台程序解析，学生只看到reply。必须只返回一个合法JSON对象，不能返回普通文本；隐藏检查点不等于省略JSON。JSON格式为'+example+'。reply遵守教学角色和本组策略，target为0到5整数，knowledge为对象。'},...r.messages.slice(-24).map((m:Data):ModelMessage=>({role:m.role==='user'?'user':'assistant',content:m.image?[{type:'text',text:m.content},{type:'image_url',image_url:{url:m.image}}]:m.content}))];
+ const signal=AbortSignal.timeout(90000);let response,attempt=0;
+ while(true){attempt++;try{const upstream=await fetch(deepSeekBaseUrl(shared.baseUrl)+'/chat/completions',{method:'POST',cache:'no-store',redirect:'error',signal,headers:{Authorization:'Bearer '+shared.token,'Content-Type':'application/json'},body:JSON.stringify({model:shared.config.model,messages,stream:false,temperature:shared.config.temperature,max_tokens:4096,thinking:{type:'disabled'},...(attempt===1?{response_format:{type:'json_object'}}:{})})});if(!upstream.ok)throw new DeepSeekError('DEEPSEEK_HTTP_'+upstream.status,'模型请求失败，请稍后重发。',upstream.status,true);const payload=await upstream.json();const choice=payload.choices?.[0];if(choice?.finish_reason!=='stop')throw new DeepSeekError('INCOMPLETE_ANSWER','学徒回复未完成，请重发。',502,true);if(typeof choice.message?.content!=='string'||!choice.message.content.trim())throw new DeepSeekError('EMPTY_ANSWER','模型返回空内容。',502,true);response={answer:choice.message.content};break;}
+ catch(e){const retry=e instanceof DeepSeekError&&(e.code==='EMPTY_ANSWER'||/^DEEPSEEK_HTTP_(429|500|502|503|504)$/.test(e.code));if(!retry||attempt>=3||signal.aborted)throw e;await new Promise(resolve=>setTimeout(resolve,attempt*500));}}
+ const raw=response.answer.trim().replace(/^```(?:json)?\s*|\s*```$/g,'');let result:Data;
+ try{result=JSON.parse(raw);}catch{if(raw.length<=1800&&/[\u4e00-\u9fff]/.test(raw)&&!raw.startsWith('{')&&!raw.startsWith('[')&&!raw.startsWith('<'))result={reply:raw,target:null,knowledge:r.knowledge,reason:'自然回复未更新结构化状态',source:'model-natural-no-state'};else throw new StudentError('学徒回复未完成，请重新发送。',502);}
+ return {...result,transport:{attempts:attempt,policy:'sql-json-recovery/1',mode:'nonstream-json'}};
+}

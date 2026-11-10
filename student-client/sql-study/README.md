@@ -1,4 +1,4 @@
-# EduLab SQL 0.11.0：当次任务版
+# EduLab SQL 0.12.0：当次任务版
 
 当前机房：Windows 7 64位、Chrome 69.0.3497.81。分发Win7 x64包；不需要学生安装Python或Node。数据库操作继续使用SSMS和真实SQL Server，不由平台模拟运行结果。
 
@@ -22,3 +22,5 @@
 部署执行0030、0031迁移；含清理操作的0031执行前必须备份旧SQL测试快照、分组、评分、试测命令及配置。只清理SQL测试身份，禁止清空正式学生或其他应用记录。私有配置、运行数据库、payload.zip和清理备份不提交仓库。
 
 版本升级前先关闭旧服务，复用原数据目录。Win7应有SP1和所需系统运行库；尚需在实际机房单机验收登录、文字/图片交互、暂停恢复、实操提交和云备份。语法转换与自动化检查不等于真机验收。
+
+线上入口：https://edulab.dacnote.com/sql-student。本机优先使用Start-Classroom.cmd；两种方式与排障边界详见docs/sql-dual-deployment.md。

@@ -20,7 +20,8 @@
     "db:migrate": "node scripts/migrate.mjs",
     "participants:link": "node scripts/generate-participant-link.mjs",
     "admin:create": "node scripts/create-admin.mjs",
-    "test:sql-student": "python3 -m unittest discover -s student-client/sql-study/tests && node --test student-client/sql-study/tests/test_live_refresh.mjs"
+    "test:sql-student": "python3 -m unittest discover -s student-client/sql-study/tests && node --test student-client/sql-study/tests/test_live_refresh.mjs",
+    "prebuild": "node scripts/build-sql-online-assets.mjs"
   },
   "dependencies": {
     "@coze/api": "1.3.9",

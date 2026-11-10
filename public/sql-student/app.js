@@ -1,0 +1,541 @@
+/* EduLab classroom build: Chrome 69, ES2017. */
+'use strict';
+var _a, _b, _c, _d;
+const $ = s => document.querySelector(s), esc = s => String(s !== null && s !== void 0 ? s : '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+let classes = [];
+const hash = new URLSearchParams(location.hash.slice(1));
+if (hash.has('key')) {
+    sessionStorage.setItem('local-key', hash.get('key'));
+    history.replaceState(null, '', location.pathname);
+}
+let identity = JSON.parse(sessionStorage.getItem('sql-identity') || 'null'), state = null, page = 'home', offset = 0, pollBusy = false;
+let draftTimer = null, saveChain = Promise.resolve(), formLoad = 0;
+let pendingImage = null, retryOf = null;
+const lessonExpansion = new Map();
+const app = $('#app');
+function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('show'); setTimeout(() => $('#toast').classList.remove('show'), 5000); }
+async function api(path, data) {
+    const headers = { 'X-Local-Key': sessionStorage.getItem('local-key') || '' };
+    if (identity) {
+        headers['X-Participant'] = identity.id;
+        headers['X-Participant-Session'] = identity.token;
+    }
+    const response = await fetch(path, { method: data ? 'POST' : 'GET', headers: Object.assign(Object.assign({}, headers), (data ? { 'Content-Type': 'application/json' } : {})), body: data ? JSON.stringify(data) : undefined });
+    const out = await response.json();
+    if (out.code === 'ACCESS_REQUIRED') {
+        location.href = '/sql-student';
+        throw Error('请先输入网站访问码。');
+    }
+    if (!response.ok)
+        throw Error(out.error || '请求未完成');
+    return out;
+}
+function accept(s) { if (state && s.access_policy === 'current-task/1' && state.current_lesson !== s.current_lesson && /^(ai|practice|quiz)[0-4]$/.test(page)) {
+    page = 'home';
+    formLoad++;
+} if (s.test_reset_required)
+    throw Error("试测记录已清理，请重新登录测试账号"); if (state && state.test_lesson_revision !== s.test_lesson_revision && /^(ai|practice|quiz)[0-4]$/.test(page)) {
+    clearTimeout(draftTimer);
+    draftTimer = null;
+    formLoad++;
+    page = 'home';
+    lessonExpansion.clear();
+} state = s; offset = s.server_now - Date.now() / 1000; }
+const now = () => Date.now() / 1000 + offset;
+function btn(text, attrs = '') { return `<button ${attrs}>${text}</button>`; }
+function timeLabel(t) { return t ? new Date(t * 1000).toLocaleString('zh-CN', { hour12: false }) : '—'; }
+function remain(t) { const v = Math.max(0, Math.ceil(t - now())); return v === 0 ? '建议时间已到 · 可继续' : `建议剩余 ${String(Math.floor(v / 60)).padStart(2, '0')}:${String(v % 60).padStart(2, '0')}`; }
+function gate(key) { return state.gates[key] || { open: false, reason: '教师暂未开放' }; }
+function syncChoices() { document.querySelectorAll('.choice').forEach(label => { const input = label.querySelector('input[type=radio]'); label.classList.toggle('selected', !!(input === null || input === void 0 ? void 0 : input.checked)); }); }
+app.onchange = e => { if (e.target.type === 'radio')
+    syncChoices(); };
+function layout(content) {
+    app.innerHTML = `<div class="shell student-shell"><main class="main"><header class="topbar"><button class="brand ghost" id="nav-home"><span class="brandmark">e</span>EduLab <em>SQL 线上</em></button><div class="topbar-right"><span class="student-identity">${esc(state.class_code)} · ${esc(state.name)}</span>${state.mode === 'demo' ? '<span class="badge demo">演示学徒 · 非真实 AI</span>' : ''}<button class="ghost" id="refresh-classroom" type="button">刷新课堂安排</button><button class="ghost" id="logout">退出</button></div></header><div class="workspace">${content}</div></main></div>`;
+    $('#refresh-classroom').onclick = async () => { const b = $('#refresh-classroom'); b.disabled = true; b.textContent = '正在同步…'; try {
+        await flushDraft();
+        accept(await api('/api/sql-student/refresh', {}));
+        if (page === 'home')
+            home();
+        else
+            updateChat();
+        toast('课堂安排已同步');
+    }
+    catch (e) {
+        toast(e.message);
+    }
+    finally {
+        const button = $('#refresh-classroom');
+        if (button) {
+            button.disabled = false;
+            button.textContent = '刷新课堂安排';
+        }
+    } };
+    syncChoices();
+    $('#nav-home').onclick = () => navigate('home');
+    $('#logout').onclick = async () => { await teachingPresence(false); await flushDraft(); identity = null; state = null; sessionStorage.removeItem('sql-identity'); login(); };
+}
+function login() {
+    app.innerHTML = `<div class="login-new"><section class="login-intro"><div class="brand"><span class="brandmark">e</span>EduLab <em>SQL</em></div><div><p class="eyebrow">LEARN BY TEACHING</p><h1>把你的理解，<br>教给虚拟学徒。</h1><p>观看对应微课、阅读工单，再用自己的话解释。<br>在这里完成课堂测量，记录每一次学习。</p></div><p class="small">SQL Server 课堂实验 · 本机学习空间</p></section><section class="login-panel"><div class="card"><p class="eyebrow">欢迎进入课堂</p><h2>确认身份，开始学习</h2><p class="muted">请选择所在班级，填写你的真实姓名。</p><form id="login-form"><label>班级<select name="class_code" required><option value="">请选择班级</option>${classes.map(c => `<option value="${esc(c.code)}">${esc(c.label)}</option>`).join('')}</select></label><label>姓名<input name="name" autocomplete="name" maxlength="30" placeholder="请输入真实姓名" required></label>${btn('进入课堂', 'type="submit" style="width:100%"')}</form><p class="small muted" style="margin-top:18px">同一台电脑上，再次选择相同班级和姓名可继续已有记录。</p></div></section></div>`;
+    $('#login-form').onsubmit = e => { e.preventDefault(); const v = Object.fromEntries(new FormData(e.target)); v.name = v.name.trim(); if (!v.name)
+        return; const d = document.createElement('dialog'); d.innerHTML = `<div class="card"><h2>请确认你的姓名</h2><p>班级：<strong>${esc(v.class_code)}</strong></p><p>姓名：<strong class="confirm-name">${esc(v.name)}</strong></p><p class="muted">课堂作答将记录在这个姓名下，请仔细核对。</p><div class="actions"><button class="secondary" id="edit-name">返回修改</button><button id="confirm-name">确认并进入</button></div></div>`; document.body.append(d); d.showModal(); d.querySelector('#edit-name').onclick = () => d.remove(); d.querySelector('#confirm-name').onclick = async (ev) => { ev.target.disabled = true; try {
+        const s = await api('/api/sql-student/enter', Object.assign(Object.assign({}, v), { confirmed: true }));
+        identity = { id: s.id, token: s.session_token };
+        sessionStorage.setItem('sql-identity', JSON.stringify(identity));
+        delete s.session_token;
+        accept(s);
+        d.remove();
+        navigate('home');
+    }
+    catch (e) {
+        toast(e.message);
+        ev.target.disabled = false;
+    } }; };
+}
+async function navigate(next) { await teachingPresence(false); await flushDraft(); page = next; formLoad++; render(); }
+function entry(title, key, target, done = false, extra = '', blocked = false) { const g = gate(key); return `<div class="entry-card"><div><h3>${title}</h3><p class="small muted">${done ? '已完成' : extra || g.reason}${!done && g.open_at ? ' · ' + timeLabel(g.open_at) : ''}</p></div>${btn(done ? '已完成' : blocked ? '未就绪' : g.open ? '进入' : '未开放', `data-go="${target}" ${done || blocked || !g.open ? 'disabled' : ''}`)}</div>`; }
+function formatBrief(text) { return esc(text).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>'); }
+function lessonNumber(i) { return i === 4 ? 0 : i + 1; }
+function lessonLabel(i) { return i === 4 ? '准备课P0' : '正式第' + (i + 1) + '课'; }
+function lessonOrder() { if (state.access_policy === 'current-task/1')
+    return [state.current_lesson]; return state.course_order || state.tasks.map((_, i) => i); }
+function started(r, stage) { var _a; if (!r)
+    return false; const spec = { ai: ['teaching_started', 'teaching_start', 'teaching'], practice: ['practice_started', 'practice_start', 'practice'], posttest: ['quiz_started', 'quiz_start', 'quiz'] }[stage]; return (_a = r[spec[0]]) !== null && _a !== void 0 ? _a : (r[spec[1]] != null || (stage !== 'posttest' && r.phase === spec[2])); }
+function quizDone(r) { var _a; return (_a = r === null || r === void 0 ? void 0 : r.quiz_completed) !== null && _a !== void 0 ? _a : (r === null || r === void 0 ? void 0 : r.phase) === 'done'; }
+function identityBlocked(r, i) { return !r && (!state.has_pretest || !state.has_meta_pre || ((state.preparation_grouped || i !== 4) && !state.group_assigned)); }
+async function ensureRound(i, stage) { if (!round(i))
+    await action('new_round', { lesson: i, stage }); }
+function home() {
+    var _a, _b, _c;
+    const order = lessonOrder(), active = state.rounds.find(r => r.phase !== 'done');
+    const pending = state.next_lesson !== undefined ? state.next_lesson : order.find(i => !round(i));
+    const current = (_c = (_b = (_a = order.find(i => { var _a; return gate('ai' + i).open && ((_a = round(i)) === null || _a === void 0 ? void 0 : _a.phase) !== 'done'; })) !== null && _a !== void 0 ? _a : active === null || active === void 0 ? void 0 : active.index) !== null && _b !== void 0 ? _b : pending) !== null && _c !== void 0 ? _c : order.at(-1);
+    layout(`<div class="page-head"><div><p class="eyebrow">CLASSROOM / 课堂任务</p><h2>${esc(state.name)}，欢迎回来</h2><p class="muted">一次分组准备课与四次正式实验。先看当课微课，再读工单、教学徒、独立实操和测评。系统只显示教师指定的本次任务，不受定时开放限制。</p></div></div><div class="card"><h3>课前测量</h3>${entry('SQL 基础前测 · 20 道单选题', 'pretest', 'pretest', state.has_pretest)}${entry('学习过程问卷 · 课前（13题）', 'meta_pre', 'meta_pre', state.has_meta_pre)}</div><div class="lesson-grid">${order.map(i => { var _a, _b; const t = state.tasks[i], r = round(i), unavailable = (_a = state.unavailable_lessons) === null || _a === void 0 ? void 0 : _a.includes(i); return `<details class="card lesson-card" data-lesson="${i}" ${((_b = lessonExpansion.get(i)) !== null && _b !== void 0 ? _b : i === current) ? 'open' : ''}><summary><span class="eyebrow">${lessonLabel(i)}</span><strong>${esc(t.title)}</strong>${i === current ? '<span class="current-lesson">当前课堂</span>' : ''}</summary><div class="lesson-content"><p class="muted small">${esc(t.pages)}</p>${entry('教虚拟学徒', 'ai' + i, 'ai' + i, false, unavailable ? (state.is_test ? '此账号保留旧版课堂记录，请教师在后台切换试测课堂' : '本课未在该学习记录中开启') : !state.has_pretest ? '请先完成基础前测' : !state.has_meta_pre ? '请先完成课前问卷' : (state.preparation_grouped || i !== 4) && !r && !state.group_assigned ? '请等待教师完成前测分组' : started(r, 'ai') ? '返回本课对话' : '', unavailable || identityBlocked(r, i))}${entry('SQL Server 独立实操', 'practice' + i, 'practice' + i, !!(r === null || r === void 0 ? void 0 : r.submission), '', unavailable || identityBlocked(r, i))}${entry('当课测评', 'posttest' + i, 'quiz' + i, quizDone(r), '', unavailable || identityBlocked(r, i))}</div></details>`; }).join('')}</div><div class="card">${entry('学习过程问卷 · 课后（13题）', 'meta_post', 'meta_post', state.has_meta_post)}</div>`);
+    document.querySelectorAll('[data-lesson]').forEach(d => d.ontoggle = () => lessonExpansion.set(Number(d.dataset.lesson), d.open));
+    document.querySelectorAll('[data-go]').forEach(b => b.onclick = () => navigate(b.dataset.go));
+}
+function displayedRound() { const match = page.match(/^(ai|practice|quiz)([0-4])$/); return match ? round(Number(match[2])) : null; }
+async function action(action, body = {}) { var _a; accept(await api('/api/sql-student/action', Object.assign({ action, round_id: (_a = displayedRound()) === null || _a === void 0 ? void 0 : _a.id }, body))); return state; }
+function back() { return '<button class="ghost" id="back">← 返回课堂任务</button>'; }
+function render() { if (!state)
+    return login(); if (page === 'home')
+    return home(); if (['pretest', 'meta_pre', 'meta_post'].includes(page))
+    return questionnaire(page); const m = page.match(/^(ai|practice|quiz)([0-4])$/); if (m)
+    return lesson(m[1], Number(m[2])); home(); }
+async function questionnaire(kind) {
+    var _a;
+    const version = formLoad;
+    layout(`${back()}<div class="card"><p>正在读取题目…</p></div>`);
+    $('#back').onclick = () => navigate('home');
+    try {
+        const bank = await api('/api/sql-student/questions?kind=' + (kind === 'pretest' ? 'pretest' : 'meta'));
+        if (version !== formLoad)
+            return;
+        await action('begin_measurement', { kind });
+        if (version !== formLoad)
+            return;
+        const meta = kind !== 'pretest';
+        const draftKey = `answers:${identity.id}:${kind}`, draft = ((_a = state.measurement_drafts) === null || _a === void 0 ? void 0 : _a[kind]) || JSON.parse(sessionStorage.getItem(draftKey) || '[]');
+        layout(`${back()}<div class="page-head"><div><h2>${meta ? '学习过程问卷' : 'SQL 基础知识前测'}</h2><p class="muted">${meta ? esc(state.meta_spec.instruction) + '<br>1＝非常不同意，2＝不同意，3＝既不同意也不反对，4＝同意，5＝非常同意。' : '共20题，每题5分。每题只有一个正确答案，请独立作答。'}</p></div></div><form id="question-form" class="card">${bank.map((q, i) => `<fieldset class="${meta ? 'likert-question' : 'mcq-question'}"><legend>${i + 1}. ${esc(meta ? q : q.text)}</legend><div class="${meta ? 'likert-options' : 'mcq-options'}">${(meta ? [1, 2, 3, 4, 5] : q.options).map((v, j) => { const value = meta ? v : 'ABCD'[j]; return `<label class="choice ${meta ? 'likert-choice' : ''}"><input type="radio" name="q${i}" value="${value}" ${String(draft[i]) === String(value) ? 'checked' : ''} ${meta && state.prediction_enabled ? '' : 'required'}> ${meta ? '<span class="likert-value">' + v + '</span><span class="likert-label">' + esc(state.meta_spec.options[j]) + '</span>' : 'ABCD'[j] + '. ' + esc(v)}</label>`; }).join('')}</div></fieldset>`).join('')}${meta && state.prediction_enabled ? '<p class="small muted">你可以留空不愿回答的项目；未答作为缺失记录，不计0分。</p>' : ''}${!meta && state.prediction_enabled ? predictionFields('pretest') : ''}<p class="small muted">确认提交后不能修改。</p>${btn('确认提交', 'type="submit"')}</form>`);
+        $('#back').onclick = () => navigate('home');
+        const f = $('#question-form');
+        f.oninput = () => { if (!meta)
+            storePrediction(f, 'pretest'); };
+        f.onchange = () => { const answers = bank.map((_, i) => meta ? (f.elements['q' + i].value ? Number(f.elements['q' + i].value) : null) : f.elements['q' + i].value); sessionStorage.setItem(draftKey, JSON.stringify(answers)); if (meta) {
+            saveChain = saveChain.catch(() => { }).then(() => action('measurement_draft', { kind, answers }));
+            saveChain.catch(e => toast(e.message));
+        } };
+        f.onsubmit = async (e) => { e.preventDefault(); const b = f.querySelector('button[type=submit]'); b.disabled = true; try {
+            await saveChain;
+            await action(kind, Object.assign(Object.assign({}, (!meta ? predictionBody(f) : {})), { answers: bank.map((_, i) => meta ? (f.elements['q' + i].value ? Number(f.elements['q' + i].value) : null) : f.elements['q' + i].value) }));
+            sessionStorage.removeItem(draftKey);
+            toast(kind === 'pretest' ? '基础前测已保存，请接着完成13题学习过程问卷。' : '已提交并保存');
+            navigate(kind === 'pretest' && gate('meta_pre').open ? 'meta_pre' : 'home');
+        }
+        catch (e) {
+            toast(e.message);
+            b.disabled = false;
+        } };
+    }
+    catch (e) {
+        toast(e.message);
+        navigate('home');
+    }
+}
+function round(i) { return state.rounds.find((r, n) => { var _a; return ((_a = r.index) !== null && _a !== void 0 ? _a : n) === i; }); }
+function notice(title, message) { layout(`${back()}<section class="card"><h2>${title}</h2><p>${formatBrief(message)}</p></section>`); $('#back').onclick = () => navigate('home'); }
+async function lesson(type, i) {
+    var _a, _b;
+    if (state.access_policy === 'current-task/1' && i !== state.current_lesson)
+        return notice('当前任务已更新', '请返回任务首页，完成本次任务。');
+    const r = round(i);
+    if (type === 'ai') {
+        if (r === null || r === void 0 ? void 0 : r.chat_locked)
+            return notice('学徒对话已封存', '独立实操开始后不能回看或继续学徒对话，请按共同任务独立完成。');
+        if (!started(r, 'ai')) {
+            notice('准备教虚拟学徒', state.tasks[i].brief);
+            const section = $('.workspace .card');
+            section.insertAdjacentHTML('beforeend', `<p class="muted">首次讲解可说明目标、方法、理由与核验；不会时说出具体卡点。后续回答只需回应当前问题，不设最低字数。学徒不会直接提供完整答案。</p>${btn('开始本课交互', 'id="start-ai"')}`);
+            $('#start-ai').onclick = async (e) => { e.target.disabled = true; try {
+                await ensureRound(i, 'ai');
+                await action('start_teaching');
+                render();
+            }
+            catch (e) {
+                toast(e.message);
+                e.target.disabled = false;
+            } };
+            return;
+        }
+        layout(`${back()}<div class="page-head"><div><h2>${esc(r.task.title)}</h2><p class="muted">${formatBrief(r.task.brief)}</p></div><span class="timer" data-ai-window="${!!(r === null || r === void 0 ? void 0 : r.dialogue)}" data-deadline="${(_a = r === null || r === void 0 ? void 0 : r.teaching_deadline) !== null && _a !== void 0 ? _a : 0}"></span></div><div class="card chat-card"><div id="messages" aria-live="polite"></div><p id="chat-status" class="small muted"></p><form id="chat-form"><textarea id="chat-text" maxlength="4000" placeholder="用自己的话教给学徒，支持粘贴截图…" aria-label="教给学徒的内容"></textarea><div id="image-preview" class="image-preview"></div><div class="actions"><button id="retry-chat" type="button" class="secondary" hidden>重新发送</button>${btn('发送给学徒', 'type="submit"')}</div></form></div>${r.dialogue ? '<section id="research-controls" class="card"></section>' : ''}`);
+        $('#back').onclick = () => navigate('home');
+        pendingImage = null;
+        retryOf = null;
+        updateChat();
+        void teachingPresence(true);
+        const input = $('#chat-text'), form = $('#chat-form');
+        input.onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+            e.preventDefault();
+            if (!form.querySelector('button[type="submit"]').disabled)
+                form.requestSubmit();
+        } };
+        const pick = async (file) => { try {
+            pendingImage = await prepareImage(file);
+            showImagePreview();
+        }
+        catch (e) {
+            toast(e.message);
+        } };
+        input.onpaste = e => { var _a, _b; const file = (_b = Array.from(((_a = e.clipboardData) === null || _a === void 0 ? void 0 : _a.items) || []).find(item => item.type.startsWith('image/'))) === null || _b === void 0 ? void 0 : _b.getAsFile(); if (file) {
+            e.preventDefault();
+            if (state.mode === 'demo')
+                return toast('演示学徒不能读取图片，请教师启用真实模型。');
+            pick(file);
+        } };
+        $('#retry-chat').onclick = () => { const latest = round(i), failed = latest.requests.at(-1), message = latest.messages.find(m => m.role === 'user' && m.request_id === (failed === null || failed === void 0 ? void 0 : failed.id)); if (message) {
+            input.value = message.content;
+            pendingImage = message.image || null;
+            retryOf = failed.id;
+            showImagePreview();
+            form.requestSubmit();
+        } };
+        form.onsubmit = async (e) => { e.preventDefault(); const text = input.value.trim(), image = pendingImage; if (!text && !image)
+            return; const button = form.querySelector('button[type="submit"]'); button.disabled = true; try {
+            await api('/api/sql-student/chat', Object.assign({ text, image, request_id: crypto.randomUUID(), round_id: r.id }, (retryOf ? { retry_of: retryOf } : {})));
+            input.value = '';
+            pendingImage = null;
+            retryOf = null;
+            showImagePreview();
+            accept(await api('/api/sql-student/state'));
+            updateChat();
+        }
+        catch (e) {
+            toast(e.message);
+            button.disabled = false;
+        } };
+        return;
+    }
+    if (type === 'practice') {
+        if (r === null || r === void 0 ? void 0 : r.submission)
+            return notice('独立实操', '本课实操已经提交。');
+        if (!started(r, 'practice')) {
+            notice('准备独立实操', '先关闭学徒，再在SSMS中按业务工单独立查询。可查共同语法卡和任务说明，不回看聊天或微课。');
+            $('.workspace .card').insertAdjacentHTML('beforeend', `${btn('开始计时并实操', 'id="start-practice"')}`);
+            $('#start-practice').onclick = async (e) => { e.target.disabled = true; try {
+                await ensureRound(i, 'practice');
+                await action('start_practice');
+                render();
+            }
+            catch (e) {
+                toast(e.message);
+                e.target.disabled = false;
+            } };
+            return;
+        }
+        layout(`${back()}<div class="page-head"><div><h2>SQL Server 独立实操</h2><p>${formatBrief(r.task.brief)}</p></div><span class="timer" data-deadline="${r.practice_deadline}"></span></div><form id="practice-form" class="card" data-round-id="${r.id}"><p class="muted">在电脑上的 SQL Server 完成操作，再粘贴代码和结果。确认提交时停止计时；请按教师安排完成；超出建议时长的实际用时仍会记录。</p>${['sql', 'result', 'note'].map((k, j) => `<label>${['SQL 代码', '本人运行结果（请粘贴实际结果文本）', '核验说明（必填）'][j]}<textarea name="${k}" required ${k === 'sql' ? 'class="code-input"' : ''}>${esc(r.draft[k])}</textarea></label>`).join('')}${r.dialogue ? predictionFields('practice:' + r.id) : ''}<div class="actions"><span id="save-status" class="small muted">草稿已保存到本机</span>${btn('完成实操并提交', 'type="submit"')}</div></form>`);
+        $('#back').onclick = () => navigate('home');
+        $('#practice-form').oninput = () => { if (r.dialogue)
+            storePrediction($('#practice-form'), 'practice:' + r.id); clearTimeout(draftTimer); $('#save-status').textContent = '正在保存…'; draftTimer = setTimeout(savePractice, 500); };
+        $('#practice-form').onsubmit = async (e) => { e.preventDefault(); if (!confirm('确认已完成实操？提交后停止计时，不能再修改。'))
+            return; try {
+            await flushDraft();
+            await action('submit_practice', predictionBody($('#practice-form')));
+            toast('实操已提交，完成时长已记录');
+            navigate('home');
+        }
+        catch (e) {
+            toast(e.message);
+        } };
+        return;
+    }
+    if (type === 'quiz') {
+        if (quizDone(r))
+            return notice('当课测评', '本课后测已经完成。');
+        if (!started(r, 'posttest')) {
+            notice(i === 4 ? '准备流程测评' : '准备独立测评', (r === null || r === void 0 ? void 0 : r.quiz_format) !== 'legacy_mixed' ? `共${(_b = r === null || r === void 0 ? void 0 : r.quiz_question_count) !== null && _b !== void 0 ? _b : (i === 4 ? 4 : 10)}道单选题。${i === 4 ? '仅练习测评与提交流程，不计入正式实验成绩。' : '请独立作答，测评不提供AI帮助。'}提交后保存结果。` : '含选择题和两道简单SQL编写题；选择题占60分，SQL编写题占40分。编写题由教师评分。');
+            $('.workspace .card').insertAdjacentHTML('beforeend', btn('开始后测', 'id="start-quiz"'));
+            $('#start-quiz').onclick = async () => { try {
+                await ensureRound(i, 'posttest');
+                await action('start_quiz');
+                render();
+            }
+            catch (e) {
+                toast(e.message);
+            } };
+            return;
+        }
+        return quiz(i);
+    }
+}
+function personIcon(role) { return `<svg viewBox="0 0 32 32" fill="none" aria-hidden="true"><circle cx="16" cy="12" r="5" fill="currentColor"/><path d="M6 28c0-7 4-10 10-10s10 3 10 10" fill="currentColor"/>${role === 'assistant' ? '<path d="m4 7 12-5 12 5-12 5Z" fill="currentColor" stroke="white" stroke-width="1.5"/>' : ''}</svg>`; }
+async function prepareImage(file) { if (!file || !['image/png', 'image/jpeg', 'image/webp'].includes(file.type))
+    throw Error('请选择PNG、JPEG或WebP图片。'); if (file.size > 8 * 1024 * 1024)
+    throw Error('原图片不能超过8MB。'); const url = URL.createObjectURL(file); try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    if (img.width * img.height > 32000000)
+        throw Error('图片尺寸过大，请先裁剪截图。');
+    const scale = Math.min(1, 1600 / Math.max(img.width, img.height)), canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.width * scale));
+    canvas.height = Math.max(1, Math.round(img.height * scale));
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    for (const quality of [.9, .75, .55]) {
+        const data = canvas.toDataURL('image/jpeg', quality);
+        if (data.length < 390000)
+            return data;
+    }
+    throw Error('图片内容过大，请裁剪后再发送。');
+}
+finally {
+    URL.revokeObjectURL(url);
+} }
+function showImagePreview() { const el = $('#image-preview'); if (!el)
+    return; el.innerHTML = pendingImage ? `<img src="${esc(pendingImage)}" alt="待发送的截图"><button class="ghost" id="remove-image" type="button">移除图片</button>` : ''; if ($('#remove-image'))
+    $('#remove-image').onclick = () => { pendingImage = null; showImagePreview(); }; }
+function updateChat() {
+    var _a, _b, _c, _d;
+    if (!page.startsWith('ai') || !$('#messages'))
+        return;
+    const r = round(Number(page.slice(2))), signature = JSON.stringify([r.messages, r.requests]);
+    if ($('#messages').dataset.signature !== signature) {
+        $('#messages').dataset.signature = signature;
+        $('#messages').innerHTML = r.messages.map(m => `<div class="message-row ${m.role === 'user' ? 'user' : 'assistant'}"><div class="chat-person"><span class="chat-avatar" aria-label="${m.role === 'user' ? '我的头像' : '学徒头像'}">${personIcon(m.role)}</span><span class="chat-person-name">${m.role === 'user' ? '我' : '虚拟学徒'}</span></div><div class="message ${m.role === 'user' ? 'user' : 'assistant'}"><p>${esc(m.content).replace(/\n/g, '<br>')}</p>${m.image ? `<img class="chat-image" src="${esc(m.image)}" alt="发送的截图">` : ''}</div></div>`).join('');
+        $('#messages').scrollTop = $('#messages').scrollHeight;
+        const scrollLatest = () => requestAnimationFrame(() => { const el = $('#messages'); if (el)
+            el.scrollTop = el.scrollHeight; });
+        scrollLatest();
+        $('#messages').querySelectorAll('img').forEach(img => { img.onload = scrollLatest; if (img.complete)
+            scrollLatest(); });
+    }
+    const active = r.requests.some(q => q.status === 'running'), disabled = active || !!(r.dialogue && !r.dialogue.can_send), button = $('#chat-form button[type=submit]'), text = $('#chat-text');
+    if (button.disabled !== Boolean(disabled))
+        button.disabled = Boolean(disabled);
+    if (text.disabled !== Boolean(disabled))
+        text.disabled = Boolean(disabled);
+    const status = active ? '学徒正在整理回复…' : ((_a = r.dialogue) === null || _a === void 0 ? void 0 : _a.closed) ? '本课对话已收束，请整理核对表并等待本课个人教学时段结束。' : ((_b = r.dialogue) === null || _b === void 0 ? void 0 : _b.closing_reply) ? '可回答最后一个问题，发送后不再发起新问题。' : ['failed', 'interrupted'].includes((_c = r.requests.at(-1)) === null || _c === void 0 ? void 0 : _c.status) ? (r.requests.at(-1).error || '学徒暂时未能回复，可以重新发送。') : '';
+    const retry = $('#retry-chat');
+    if (retry) {
+        retry.hidden = !['failed', 'interrupted'].includes((_d = r.requests.at(-1)) === null || _d === void 0 ? void 0 : _d.status);
+        retry.disabled = disabled;
+    }
+    if ($('#chat-status').textContent !== status)
+        $('#chat-status').textContent = status;
+    updateResearchControls(r);
+}
+async function savePractice() { clearTimeout(draftTimer); draftTimer = null; const f = $('#practice-form'); if (!f)
+    return; const body = Object.assign(Object.assign({}, Object.fromEntries(new FormData(f))), { round_id: f.dataset.roundId }); saveChain = saveChain.catch(() => { }).then(async () => { await action('draft', body); if ($('#save-status'))
+    $('#save-status').textContent = '草稿已保存到本机'; }); try {
+    await saveChain;
+}
+catch (e) {
+    toast(e.message);
+} }
+async function flushDraft() { if (draftTimer) {
+    if ($('#practice-form'))
+        await savePractice();
+    else if ($('#quiz-form'))
+        await saveQuiz();
+} await saveChain.catch(() => { }); }
+async function quiz(i) {
+    const version = formLoad;
+    try {
+        const bank = await api('/api/sql-student/questions?kind=posttest&round_id=' + encodeURIComponent(round(i).id));
+        if (version !== formLoad)
+            return;
+        const mcq = bank.filter(q => q.kind !== 'sql'), sql = bank.filter(q => q.kind === 'sql'), r = round(i), key = `quiz:${identity.id}:${r.id || i}`, draft = JSON.parse(sessionStorage.getItem(key) || JSON.stringify(r.draft_quiz || {}));
+        layout(`${back()}<div class="page-head"><div><h2>${lessonLabel(i)}后测</h2><p class="muted">${sql.length ? '选择题60分；SQL编写题共40分。' : '共10道单选题，每题10分。每题只有一个正确答案，请独立作答。'}时长仅作建议，请完成后主动提交。</p></div><span class="timer" data-deadline="${r.quiz_deadline}"></span></div><form id="quiz-form" class="card" data-round-id="${r.id}" data-count="${mcq.length}" data-sql-count="${sql.length}" data-key="${key}">${mcq.map((q, j) => `<fieldset class="mcq-question"><legend>${j + 1}. ${esc(q.text)}</legend><div class="mcq-options">${q.options.map((v, k) => { var _a; return `<label class="choice"><input type="radio" name="q${j}" value="${'ABCD'[k]}" ${((_a = draft.answers) === null || _a === void 0 ? void 0 : _a[j]) === 'ABCD'[k] ? 'checked' : ''} required> ${'ABCD'[k]}. ${esc(v)}</label>`; }).join('')}</div></fieldset>`).join('')}${sql.length ? '<h3>SQL 编写题 · 每题20分</h3>' : ''}${sql.map((q, j) => { var _a; return `<label>${j + 1}. ${esc(q.text)}<textarea class="code-input" name="s${j}" maxlength="10000" required>${esc(((_a = draft.sql_answers) === null || _a === void 0 ? void 0 : _a[j]) || '')}</textarea></label>`; }).join('')}<div class="actions"><span id="save-status" class="small muted">作答自动保存</span>${btn('确认提交后测', 'type="submit"')}</div></form>`);
+        $('#back').onclick = () => navigate('home');
+        $('#quiz-form').oninput = () => { clearTimeout(draftTimer); draftTimer = setTimeout(saveQuiz, 400); };
+        $('#quiz-form').onsubmit = async (e) => { e.preventDefault(); try {
+            await flushDraft();
+            const body = quizBody();
+            await action('quiz', body);
+            sessionStorage.removeItem(key);
+            toast('后测已提交');
+            navigate('home');
+        }
+        catch (e) {
+            toast(e.message);
+        } };
+    }
+    catch (e) {
+        toast(e.message);
+        navigate('home');
+    }
+}
+function quizBody() { const f = $('#quiz-form'); return Object.assign({ round_id: f.dataset.roundId, answers: Array.from({ length: Number(f.dataset.count) }, (_, j) => f.elements['q' + j].value || '') }, (Number(f.dataset.sqlCount) > 0 ? { sql_answers: Array.from({ length: Number(f.dataset.sqlCount) }, (_, j) => f.elements['s' + j].value) } : {})); }
+async function saveQuiz() { clearTimeout(draftTimer); draftTimer = null; if (!$('#quiz-form'))
+    return; const body = quizBody(); sessionStorage.setItem($('#quiz-form').dataset.key, JSON.stringify(body)); saveChain = saveChain.catch(() => { }).then(() => action('quiz_draft', body)); try {
+    await saveChain;
+    if ($('#save-status'))
+        $('#save-status').textContent = '作答已保存到本机';
+}
+catch (e) {
+    toast(e.message);
+} }
+function download(data, name, type = 'application/json') { const blob = new Blob([typeof data === 'string' ? data : JSON.stringify(data, null, 2)], { type }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 3000); }
+setInterval(() => { document.querySelectorAll('[data-deadline]').forEach(el => { var _a; const d = (_a = displayedRound()) === null || _a === void 0 ? void 0 : _a.dialogue; if (el.dataset.aiWindow === 'true' && (d === null || d === void 0 ? void 0 : d.foreground_clock)) {
+    const left = Math.max(0, Math.ceil(d.timer_remaining_seconds - (d.timer_running ? Math.max(0, Math.min(now(), d.timer_lease_until) - state.server_now) : 0)));
+    el.textContent = left === 0 ? '教学徒累计时长已到' : (d.timer_running ? '教学徒剩余 ' : '已暂停 · 剩余 ') + String(Math.floor(left / 60)).padStart(2, '0') + ':' + String(left % 60).padStart(2, '0');
+    return;
+} const text = el.dataset.aiWindow === 'true' && now() >= Number(el.dataset.deadline) ? '教学徒时段已结束' : remain(Number(el.dataset.deadline)); if (el.textContent !== text)
+    el.textContent = text; }); updateChat(); }, 500);
+async function refreshClasses() { const next = (await api('/api/sql-student/classes')).classes; if (!Array.isArray(next))
+    throw Error('班级列表暂不可用'); if (JSON.stringify(next) !== JSON.stringify(classes)) {
+    const select = $('#login-form select'), name = $('#login-form input');
+    const selected = (select === null || select === void 0 ? void 0 : select.value) || '', typed = (name === null || name === void 0 ? void 0 : name.value) || '';
+    classes = next;
+    if (!identity) {
+        login();
+        $('#login-form select').value = classes.some(c => c.code === selected) ? selected : '';
+        $('#login-form input').value = typed;
+    }
+} }
+setInterval(async () => { var _a; if (pollBusy)
+    return; if (!identity) {
+    try {
+        await refreshClasses();
+    }
+    catch (e) {
+        toast(e.message);
+    }
+    return;
+} pollBusy = true; try {
+    const old = (_a = displayedRound()) === null || _a === void 0 ? void 0 : _a.phase, before = JSON.stringify(Object.assign(Object.assign({}, state), { server_now: 0 }));
+    accept(await api('/api/sql-student/state'));
+    if (page === 'home') {
+        if (before !== JSON.stringify(Object.assign(Object.assign({}, state), { server_now: 0 })))
+            home();
+    }
+    else
+        updateChat();
+}
+catch (e) {
+    if (e.message.includes('身份') || e.message.includes('试测记录已清理')) {
+        identity = null;
+        state = null;
+        sessionStorage.removeItem('sql-identity');
+        login();
+    }
+    else
+        toast(e.message);
+}
+finally {
+    pollBusy = false;
+} }, 3000);
+(async () => { if (identity) {
+    try {
+        accept(await api('/api/sql-student/state'));
+        home();
+    }
+    catch (_a) {
+        identity = null;
+        login();
+    }
+}
+else {
+    login();
+    try {
+        await refreshClasses();
+    }
+    catch (e) {
+        toast(e.message);
+    }
+} })();
+function predictionFields(key) { var _a; let draft = {}; try {
+    draft = JSON.parse(sessionStorage.getItem('prediction:' + identity.id + ':' + key) || '{}');
+}
+catch (_b) { } return `<fieldset class="prediction-field"><legend>提交前估计（不计入本次成绩）</legend><label>在看到评分前，你估计本次可以得到多少分？<input name="predicted_score" type="number" min="0" max="100" step="1" inputmode="numeric" value="${esc((_a = draft.value) !== null && _a !== void 0 ? _a : '')}" placeholder="0—100"/></label><label><input type="checkbox" name="prediction_skipped" ${draft.skipped ? 'checked' : ''}/>暂不回答预估分</label><p class="small muted">按实际感受填写，填高填低均不影响评分。</p></fieldset>`; }
+function predictionBody(form) { var _a; if (!state.prediction_enabled)
+    return {}; const input = form.elements.predicted_score, skip = !!((_a = form.elements.prediction_skipped) === null || _a === void 0 ? void 0 : _a.checked); if (skip && (input === null || input === void 0 ? void 0 : input.value) !== '')
+    throw Error('请清空预估分，或取消“暂不回答”。'); if (!skip && (!input || input.value === '' || !Number.isFinite(Number(input.value)) || Number(input.value) < 0 || Number(input.value) > 100))
+    throw Error('请填写0—100预估分，或选择暂不回答。'); return { predicted_score: skip ? null : Number(input.value), prediction_skipped: skip }; }
+function storePrediction(form, key) { var _a, _b, _c; if (!state.prediction_enabled)
+    return; sessionStorage.setItem('prediction:' + identity.id + ':' + key, JSON.stringify({ value: (_b = (_a = form.elements.predicted_score) === null || _a === void 0 ? void 0 : _a.value) !== null && _b !== void 0 ? _b : '', skipped: !!((_c = form.elements.prediction_skipped) === null || _c === void 0 ? void 0 : _c.checked) })); }
+function updateResearchControls(r) {
+    const el = $('#research-controls'), d = r.dialogue;
+    if (!el || !d)
+        return;
+    const signature = JSON.stringify([d.completed_turns, d.max_turns, d.pending, d.closed, d.window_ended, d.effort_due, d.effort_done]);
+    if (el.dataset.signature === signature)
+        return;
+    el.dataset.signature = signature;
+    el.innerHTML = `<p>已完成 ${d.completed_turns} / ${d.max_turns} 轮 · 不要求凑满轮数</p>${!d.closed ? '<button id="finish-dialogue" class="secondary" type="button" ' + (d.pending ? 'disabled' : '') + '>结束对话并整理</button>' : ''}${d.closed && !d.window_ended ? '<p>对话已收束。请静默核对来源、条件、结果粒度与核验依据，等待本课个人教学时段结束。</p>' : ''}${d.effort_due ? `<form id="effort-form"><fieldset><legend>回顾刚才向虚拟学徒讲解SQL的过程，你投入了多少心力？</legend><p class="small muted">心力指理解、组织解释和思考所投入的脑力。没有好坏之分。</p><div class="effort-options">${Array.from({ length: 9 }, (_, i) => `<label class="choice"><input type="radio" name="effort" value="${i + 1}"/>${i + 1}</label>`).join('')}</div><p class="small muted">1＝非常非常低　5＝中等　9＝非常非常高</p></fieldset><div class="actions"><button type="submit">提交并继续</button><button id="skip-effort" class="secondary" type="button">暂不回答并继续</button></div></form>` : d.effort_done ? '<p>结束卡已保存，请按教师安排进入独立实操。</p>' : ''}`;
+    const finish = $('#finish-dialogue');
+    if (finish)
+        finish.onclick = async () => { if (!confirm('确认结束本课对话？之后将静默整理，等待本课个人教学时段结束。'))
+            return; try {
+            await action('finish_dialogue');
+            updateChat();
+        }
+        catch (e) {
+            toast(e.message);
+        } };
+    const form = $('#effort-form');
+    if (form) {
+        let saving = false;
+        const send = async (value, skipped) => { if (saving)
+            return; saving = true; try {
+            await action('mental_effort', { value, skipped });
+            navigate('home');
+        }
+        catch (e) {
+            toast(e.message);
+        }
+        finally {
+            saving = false;
+        } };
+        form.onsubmit = e => { e.preventDefault(); const value = form.elements.effort.value; if (!value)
+            return toast('请选择1—9，或暂不回答。'); send(Number(value), false); };
+        $('#skip-effort').onclick = () => send(null, true);
+    }
+}
+// Presence is scoped to the visible, focused conversation page. No foreground lease survives a restart.
+let presenceSequence = 0;
+const presenceView = String(Date.now()) + '-' + Math.random().toString(36).slice(2);
+async function teachingPresence(active, keepalive = false) {
+    var _a, _b, _c, _d;
+    const r = displayedRound();
+    if (!identity || !/^ai[0-4]$/.test(page) || !((_a = r === null || r === void 0 ? void 0 : r.dialogue) === null || _a === void 0 ? void 0 : _a.foreground_clock) || r.practice_started)
+        return;
+    const requested = !!active && document.visibilityState !== 'hidden' && ((_c = (_b = document.hasFocus) === null || _b === void 0 ? void 0 : _b.call(document)) !== null && _c !== void 0 ? _c : true), pid = identity.id, rid = r.id;
+    try {
+        const response = await fetch('/api/sql-student/action', { method: 'POST', keepalive, headers: { 'Content-Type': 'application/json', 'X-Local-Key': sessionStorage.getItem('local-key') || '', 'X-Participant': pid, 'X-Participant-Session': identity.token }, body: JSON.stringify({ action: 'teaching_presence', round_id: rid, active: requested, view_id: presenceView, sequence: ++presenceSequence }) });
+        if (response.ok) {
+            const next = await response.json();
+            if ((identity === null || identity === void 0 ? void 0 : identity.id) === pid && ((_d = displayedRound()) === null || _d === void 0 ? void 0 : _d.id) === rid && /^ai/.test(page)) {
+                accept(next);
+                updateChat();
+            }
+        }
+    }
+    catch (_e) { }
+}
+setInterval(() => { void teachingPresence(true); }, 2000);
+(_a = document.addEventListener) === null || _a === void 0 ? void 0 : _a.call(document, 'visibilitychange', () => { void teachingPresence(document.visibilityState !== 'hidden', true); });
+(_b = globalThis.addEventListener) === null || _b === void 0 ? void 0 : _b.call(globalThis, 'blur', () => { void teachingPresence(false, true); });
+(_c = globalThis.addEventListener) === null || _c === void 0 ? void 0 : _c.call(globalThis, 'focus', () => { void teachingPresence(true); });
+(_d = globalThis.addEventListener) === null || _d === void 0 ? void 0 : _d.call(globalThis, 'pagehide', () => { void teachingPresence(false, true); });
