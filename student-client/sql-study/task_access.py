@@ -1,11 +1,14 @@
 """Current-task access replaces every calendar gate in the active protocol."""
 import re
+from test_identity import is_test_identity
 POLICY='current-task/1'
 def current_lesson(config,p):
     return p.get('test_lesson_control',{}).get('lesson',config.get('current_lessons',{}).get(p['class_code'],4))
 def gate(store,p,key):
     cfg=store.config()
     if p['class_code'] not in store.active_classes():return {'open':False,'reason':'班级已停用，请联系教师'}
+    if is_test_identity(p) and (key in ('pretest','meta_pre','meta_post') or re.fullmatch(r'(ai|practice|posttest)[0-4]',key)):
+        return {'open':True,'reason':'测试入口：可独立试用，不要求前测问卷或正式分组'}
     if store.cloud_managed and (store.last_control_sync is None or __import__('time').monotonic()-store.last_control_sync>120):return {'open':False,'reason':'等待当前任务同步'}
     def result(value,reason):return {'open':bool(value),'reason':reason}
     if key=='pretest':return result(True,'可完成基础前测')

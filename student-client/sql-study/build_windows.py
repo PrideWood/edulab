@@ -46,7 +46,7 @@ def main():
             if f.filename.startswith('/') or '..' in Path(f.filename).parts:raise ValueError('Invalid runtime path')
             payload.writestr(f,original.read(f))
         for name,data in ucrt.items():payload.writestr(name,data)
-        for name in ['dialogue_policy.py','boot.py','server.py','study_control.py','course_layout.py','research_protocol.py','teaching_clock.py','task_access.py','research_defaults.json','cloud_connection.py','questions.json']:
+        for name in ['test_identity.py','dialogue_policy.py','boot.py','server.py','study_control.py','course_layout.py','research_protocol.py','teaching_clock.py','task_access.py','research_defaults.json','cloud_connection.py','questions.json']:
             payload.write(ROOT/name,name)
         for f in (ROOT/'web').glob('*'):
             if f.is_file():

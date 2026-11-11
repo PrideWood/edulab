@@ -52,7 +52,7 @@ export function AdminWorkspace() {
   const [admin, setAdmin] = useState<Admin | null>(null);
   const [settings, setSettings] = useState<ExperimentSettings | null>(null);
   const [mode, setMode] = useState<"loading" | "login" | "ready">("loading");
-  const [status, setStatus] = useState<string>("");
+  const [, setStatus] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [saving, setSaving] = useState(false);
   const [participants, setParticipants] = useState<ParticipantDirectoryRow[]>([]);
@@ -155,6 +155,7 @@ export function AdminWorkspace() {
     finally { setSaving(false); }
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- Archived settings handler; classroom controls save independently.
   async function save() {
     if (!settings) return;
     setSaving(true); setError(""); setStatus("");
@@ -189,12 +190,12 @@ export function AdminWorkspace() {
 
   return (
     <main className="admin-shell">
-      <aside className="admin-sidebar">
+      <header className="admin-sidebar admin-topnav">
         <div className="admin-brand"><span className="admin-brand-mark"><BrandLogo /></span><span>EduLab</span></div>
         <div className="experiment-selector"><p>SQL 可教智能体实验</p><small>学生机学习 · EduLab统一控制</small></div>
         <nav className="admin-nav" aria-label="设置导航">{sections.map((item) => <button className={section === item.id ? "active" : ""} key={item.id} onClick={() => { setSection(item.id); if (item.id === "participants") void loadParticipants(); if(item.id === "science-archive"){const science=experiments.find(e=>e.name.includes("科学教育"));if(science)void selectExperiment(science.id);} }}><span>{item.number}</span><div><strong>{item.label}</strong><small>{item.description}</small></div></button>)}</nav>
         <div className="admin-sidebar-footer"><div><span className="admin-online-dot" />{admin.displayName}</div><button onClick={logout}>退出</button></div>
-      </aside>
+      </header>
 
       <section className="admin-main">
         <header className="admin-header"><div><p className="admin-kicker">{section === "sql-study" ? "课堂控制" : "研究数据"}</p><h1>{sections.find(item=>item.id===section)?.label}</h1></div><span className="save-state">{section === "science-archive" ? "历史数据保留，归档查看" : "云端统一管理"}</span></header>

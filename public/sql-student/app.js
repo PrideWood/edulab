@@ -30,7 +30,7 @@ async function api(path, data) {
         throw Error(out.error || '请求未完成');
     return out;
 }
-function accept(s) { if (state && s.access_policy === 'current-task/1' && state.current_lesson !== s.current_lesson && /^(ai|practice|quiz)[0-4]$/.test(page)) {
+function accept(s) { if (state && !s.is_test && s.access_policy === 'current-task/1' && state.current_lesson !== s.current_lesson && /^(ai|practice|quiz)[0-4]$/.test(page)) {
     page = 'home';
     formLoad++;
 } if (s.test_reset_required)
@@ -105,12 +105,12 @@ function entry(title, key, target, done = false, extra = '', blocked = false) { 
 function formatBrief(text) { return esc(text).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>'); }
 function lessonNumber(i) { return i === 4 ? 0 : i + 1; }
 function lessonLabel(i) { return i === 4 ? '准备课P0' : '正式第' + (i + 1) + '课'; }
-function lessonOrder() { if (state.access_policy === 'current-task/1')
+function lessonOrder() { if (state.access_policy === 'current-task/1' && !state.is_test)
     return [state.current_lesson]; return state.course_order || state.tasks.map((_, i) => i); }
 function started(r, stage) { var _a; if (!r)
     return false; const spec = { ai: ['teaching_started', 'teaching_start', 'teaching'], practice: ['practice_started', 'practice_start', 'practice'], posttest: ['quiz_started', 'quiz_start', 'quiz'] }[stage]; return (_a = r[spec[0]]) !== null && _a !== void 0 ? _a : (r[spec[1]] != null || (stage !== 'posttest' && r.phase === spec[2])); }
 function quizDone(r) { var _a; return (_a = r === null || r === void 0 ? void 0 : r.quiz_completed) !== null && _a !== void 0 ? _a : (r === null || r === void 0 ? void 0 : r.phase) === 'done'; }
-function identityBlocked(r, i) { return !r && (!state.has_pretest || !state.has_meta_pre || ((state.preparation_grouped || i !== 4) && !state.group_assigned)); }
+function identityBlocked(r, i) { return !state.is_test && !r && (!state.has_pretest || !state.has_meta_pre || ((state.preparation_grouped || i !== 4) && !state.group_assigned)); }
 async function ensureRound(i, stage) { if (!round(i))
     await action('new_round', { lesson: i, stage }); }
 function home() {
@@ -118,7 +118,7 @@ function home() {
     const order = lessonOrder(), active = state.rounds.find(r => r.phase !== 'done');
     const pending = state.next_lesson !== undefined ? state.next_lesson : order.find(i => !round(i));
     const current = (_c = (_b = (_a = order.find(i => { var _a; return gate('ai' + i).open && ((_a = round(i)) === null || _a === void 0 ? void 0 : _a.phase) !== 'done'; })) !== null && _a !== void 0 ? _a : active === null || active === void 0 ? void 0 : active.index) !== null && _b !== void 0 ? _b : pending) !== null && _c !== void 0 ? _c : order.at(-1);
-    layout(`<div class="page-head"><div><p class="eyebrow">CLASSROOM / 课堂任务</p><h2>${esc(state.name)}，欢迎回来</h2><p class="muted">一次分组准备课与四次正式实验。先看当课微课，再读工单、教学徒、独立实操和测评。系统只显示教师指定的本次任务，不受定时开放限制。</p></div></div><div class="card"><h3>课前测量</h3>${entry('SQL 基础前测 · 20 道单选题', 'pretest', 'pretest', state.has_pretest)}${entry('学习过程问卷 · 课前（13题）', 'meta_pre', 'meta_pre', state.has_meta_pre)}</div><div class="lesson-grid">${order.map(i => { var _a, _b; const t = state.tasks[i], r = round(i), unavailable = (_a = state.unavailable_lessons) === null || _a === void 0 ? void 0 : _a.includes(i); return `<details class="card lesson-card" data-lesson="${i}" ${((_b = lessonExpansion.get(i)) !== null && _b !== void 0 ? _b : i === current) ? 'open' : ''}><summary><span class="eyebrow">${lessonLabel(i)}</span><strong>${esc(t.title)}</strong>${i === current ? '<span class="current-lesson">当前课堂</span>' : ''}</summary><div class="lesson-content"><p class="muted small">${esc(t.pages)}</p>${entry('教虚拟学徒', 'ai' + i, 'ai' + i, false, unavailable ? (state.is_test ? '此账号保留旧版课堂记录，请教师在后台切换试测课堂' : '本课未在该学习记录中开启') : !state.has_pretest ? '请先完成基础前测' : !state.has_meta_pre ? '请先完成课前问卷' : (state.preparation_grouped || i !== 4) && !r && !state.group_assigned ? '请等待教师完成前测分组' : started(r, 'ai') ? '返回本课对话' : '', unavailable || identityBlocked(r, i))}${entry('SQL Server 独立实操', 'practice' + i, 'practice' + i, !!(r === null || r === void 0 ? void 0 : r.submission), '', unavailable || identityBlocked(r, i))}${entry('当课测评', 'posttest' + i, 'quiz' + i, quizDone(r), '', unavailable || identityBlocked(r, i))}</div></details>`; }).join('')}</div><div class="card">${entry('学习过程问卷 · 课后（13题）', 'meta_post', 'meta_post', state.has_meta_post)}</div>`);
+    layout(`<div class="page-head"><div><p class="eyebrow">CLASSROOM / 课堂任务</p><h2>${esc(state.name)}，欢迎回来</h2><p class="muted">一次分组准备课与四次正式实验。先看当课微课，再读工单、教学徒、独立实操和测评。${state.is_test ? '测试模式：全部课次与测评入口可独立试用；前测和问卷可跳过。所填数据仍同步保存，不参与正式分组。' : '系统只显示教师指定的本次任务，不受定时开放限制。'}</p></div></div><div class="card"><h3>课前测量</h3>${entry('SQL 基础前测 · 20 道单选题', 'pretest', 'pretest', state.has_pretest)}${entry('学习过程问卷 · 课前（13题）', 'meta_pre', 'meta_pre', state.has_meta_pre)}</div><div class="lesson-grid">${order.map(i => { var _a, _b; const t = state.tasks[i], r = round(i), unavailable = (_a = state.unavailable_lessons) === null || _a === void 0 ? void 0 : _a.includes(i); return `<details class="card lesson-card" data-lesson="${i}" ${((_b = lessonExpansion.get(i)) !== null && _b !== void 0 ? _b : i === current) ? 'open' : ''}><summary><span class="eyebrow">${lessonLabel(i)}</span><strong>${esc(t.title)}</strong>${i === current ? '<span class="current-lesson">当前课堂</span>' : ''}</summary><div class="lesson-content"><p class="muted small">${esc(t.pages)}</p>${entry('教虚拟学徒', 'ai' + i, 'ai' + i, false, unavailable ? (state.is_test ? '此账号保留旧版课堂记录，请教师在后台切换试测课堂' : '本课未在该学习记录中开启') : !state.is_test && !state.has_pretest ? '请先完成基础前测' : !state.is_test && !state.has_meta_pre ? '请先完成课前问卷' : !state.is_test && (state.preparation_grouped || i !== 4) && !r && !state.group_assigned ? '请等待教师完成前测分组' : started(r, 'ai') ? '返回本课对话' : '', unavailable || identityBlocked(r, i))}${entry('SQL Server 独立实操', 'practice' + i, 'practice' + i, !!(r === null || r === void 0 ? void 0 : r.submission), '', unavailable || identityBlocked(r, i))}${entry('当课测评', 'posttest' + i, 'quiz' + i, quizDone(r), '', unavailable || identityBlocked(r, i))}</div></details>`; }).join('')}</div>${state.is_test || state.current_lesson === 3 ? '<div class="card">' + entry('学习过程问卷 · 课后（13题）', 'meta_post', 'meta_post', state.has_meta_post) + '</div>' : ''}`);
     document.querySelectorAll('[data-lesson]').forEach(d => d.ontoggle = () => lessonExpansion.set(Number(d.dataset.lesson), d.open));
     document.querySelectorAll('[data-go]').forEach(b => b.onclick = () => navigate(b.dataset.go));
 }
@@ -169,7 +169,7 @@ function round(i) { return state.rounds.find((r, n) => { var _a; return ((_a = r
 function notice(title, message) { layout(`${back()}<section class="card"><h2>${title}</h2><p>${formatBrief(message)}</p></section>`); $('#back').onclick = () => navigate('home'); }
 async function lesson(type, i) {
     var _a, _b;
-    if (state.access_policy === 'current-task/1' && i !== state.current_lesson)
+    if (!state.is_test && state.access_policy === 'current-task/1' && i !== state.current_lesson)
         return notice('当前任务已更新', '请返回任务首页，完成本次任务。');
     const r = round(i);
     if (type === 'ai') {

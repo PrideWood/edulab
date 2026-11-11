@@ -7,7 +7,7 @@ const bank=questions as Data;
 export const ONLINE_VERSION='0.14.0';
 export class StudentError extends Error{constructor(message:string,public status=400){super(message);}}
 const stamp=(now:number)=>new Date(now*1000).toISOString();
-export const isTestName=(name:string)=>['柴博泉','测试','test','ceshi'].includes(name.normalize('NFKC').trim().toLowerCase());
+export const isTestName=(name:string)=>/^(?:柴博泉|测试|test|ceshi)(?:[\s_-]*[0-9]+)?$/.test(name.normalize('NFKC').trim().toLowerCase());
 export function freshStudent(classCode:string,name:string,now:number):Data{return {id:randomUUID(),class_code:classCode,name,code:'SQL-'+randomUUID(),created_at:stamp(now),group:null,pretest:null,meta_pre:null,meta_post:null,rounds:[],scheme_version:'business-workorders/1',research_version:'sql-lt/1.1',access_policy:'current-task/1',client_version:ONLINE_VERSION,delivery_mode:'online',measurement_policy:'required-no-prediction/1',dialogue_policy:DIALOGUE_POLICY,timing_policy:'advisory/1',course_order:[4,0,1,2,3],measurement_starts:{},measurement_drafts:{},events:[]};}
 export function selectedLesson(p:Data,c:SqlControl):number{return p.test_lesson_control?.lesson??c.current_lessons[p.class_code]??4;}
 function event(p:Data,action:string,now:number,extra:Data={}){p.events.push({at:stamp(now),type:action,...extra});}

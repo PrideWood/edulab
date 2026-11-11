@@ -116,6 +116,8 @@ def install(Base, Problem, encode, stamp):
             return True
 
         def apply_test_lesson_command(self,p,command):
+            from test_identity import is_test_identity
+            if command.get('automatic_entry') and is_test_identity(p):return False
             if self.config().get('research',{}).get('version')=='sql-lt/1.1' and command.get('research_version')!='sql-lt/1.1':return False
             if command.get('scheme_version') != SCHEME_VERSION:return False
             if command.get('test_identity_verified') is not True or command.get('device_id')!=self.setting('device') or command.get('participant_id')!=p['id']:

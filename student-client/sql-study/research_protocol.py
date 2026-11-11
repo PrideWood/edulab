@@ -5,6 +5,7 @@ import time
 import unicodedata
 from task_access import POLICY as ACCESS_POLICY,current_lesson
 from pathlib import Path
+from test_identity import is_test_identity,is_test_name
 from dialogue_policy import POLICY as DIALOGUE_POLICY,MINIMUM_TURNS,completed_turns,upgrade_round
 from teaching_clock import POLICY as CLOCK_POLICY,ensure_clock,tick_clock,presence as clock_presence,status as clock_status
 
@@ -65,7 +66,7 @@ def install(Base,Problem,stamp):
                 row=db.execute('SELECT data FROM students WHERE class_code=? AND login_name=?',(data.get('class_code'),name)).fetchone()
                 if row:
                     old=json.loads(row[0])
-                    is_test=name.lower() in ('柴博泉','测试','test','ceshi') or old.get('test_lesson_control') or old.get('test_identity')
+                    is_test=is_test_name(name) or is_test_identity(old)
                     if epoch and is_test and (old.get('retired_by_cloud') or old.get('test_cleanup_epoch')!=epoch):
                         db.execute('CREATE TABLE IF NOT EXISTS retired_test_students(id TEXT PRIMARY KEY,data TEXT,retired_at TEXT)')
                         db.execute('INSERT OR IGNORE INTO retired_test_students VALUES(?,?,?)',(old['id'],row[0],stamp()))
@@ -79,10 +80,10 @@ def install(Base,Problem,stamp):
         def research_snapshot(self,r):
             if not enabled(r['config']):return None
             completed=completed_turns(r);pending=any(q.get('status')=='running' for q in r['requests'])
-            ended=r.get('dialogue_end');now=self.clock();started=self.stage_started(r,'ai');practice=self.stage_started(r,'practice')
-            return {'version':VERSION,'policy':DIALOGUE_POLICY,'completed_turns':completed,'minimum_turns':MINIMUM_TURNS,'max_turns':None,
+            ended=r.get('dialogue_end');test=bool(r.get('test_identity'));now=self.clock();started=self.stage_started(r,'ai');practice=self.stage_started(r,'practice')
+            return {'version':VERSION,'policy':DIALOGUE_POLICY,'completed_turns':completed,'minimum_turns':0 if test else MINIMUM_TURNS,'max_turns':None,
                 'pending':pending,'window_ended':False,'closing_period':False,'closed':bool(ended),'end_reason':ended.get('reason') if ended else None,
-                'can_send':started and not practice and not pending and not ended,'can_finish':started and not practice and not pending and not ended and completed>=MINIMUM_TURNS,
+                'can_send':started and not pending and (test or (not practice and not ended)),'can_finish':started and not pending and not ended and (test or (not practice and completed>=MINIMUM_TURNS)),
                 'remaining_turns':max(0,MINIMUM_TURNS-completed),'closing_reply':False,'effort_due':started and bool(ended) and completed>=MINIMUM_TURNS and not r.get('mental_effort') and not practice,
                 'effort_done':r.get('mental_effort') is not None,'mental_effort':r.get('mental_effort'),'timing_policy':'advisory/1',**clock_status(r,now)}
 
@@ -103,24 +104,27 @@ def install(Base,Problem,stamp):
 
         def public(self,p):
             changed=self.upgrade_individual_windows(p)
-            test=p.get('name','').strip().lower() in ('柴博泉','测试','test','ceshi') or p.get('test_identity') or p.get('test_lesson_control')
+            test=is_test_identity(p)
             if test and not p.get('retired_by_cloud') and p.get('group') not in ('L','T'):
                 p.update(group='L',test_identity=True);self.event(p,'test_default_group_assigned',group='L');changed=True
             if p.get('client_version')!='0.14.0' or p.get('access_policy')!=ACCESS_POLICY:p.update(client_version='0.14.0',access_policy=ACCESS_POLICY,delivery_mode='local',measurement_policy='required-no-prediction/1',dialogue_policy=DIALOGUE_POLICY,timing_policy='advisory/1');changed=True
             for r in p['rounds']:
+                if test and not r.get('test_identity'):r['test_identity']=True;changed=True
                 if enabled(r['config']) and tick_clock(r,self.clock()):changed=True
             if changed:self.save(p)
             out=super().public(p);out['research_version']=p.get('research_version');out['preparation_grouped']=enabled(self.config())
-            cfg=self.config();out['access_policy']=cfg.get('access_policy');out['current_lesson']=current_lesson(cfg,p);out['test_reset_required']=p.get('retired_by_cloud',False) or bool(cfg.get('test_cleanup_epoch') and p.get('test_cleanup_epoch')!=cfg['test_cleanup_epoch'] and (p.get('name','').strip().lower() in ('柴博泉','测试','test','ceshi') or p.get('test_identity') or p.get('test_lesson_control')))
+            cfg=self.config();out['access_policy']=cfg.get('access_policy');out['current_lesson']=current_lesson(cfg,p);out['test_reset_required']=p.get('retired_by_cloud',False) or bool(cfg.get('test_cleanup_epoch') and p.get('test_cleanup_epoch')!=cfg['test_cleanup_epoch'] and (is_test_identity(p)))
+            out['is_test']=test;out['test_access_policy']='all-lessons-optional-baseline/1' if test else None
             out['backup']=self.backup_status(p['id']);out['prediction_enabled']=False;out['history_count']+=len(p.get('research_history',[]))
             for r in out['rounds']:
                 original=self.round_for(p,r['id']);r['dialogue']=self.research_snapshot(original)
-                if enabled(original['config']) and self.stage_started(original,'practice'):
+                if not test and enabled(original['config']) and self.stage_started(original,'practice'):
                     r['messages']=[];r['requests']=[];r['chat_locked']=True
                 r.pop('teacher_assessment',None)
             return out
 
         def gate(self,p,key):
+            if is_test_identity(p):return super().gate(p,key)
             if enabled(self.config()) and key.startswith(('ai','practice','posttest')) and p.get('group') not in ('L','T'):
                 return {'open':False,'reason':'请先完成基线测量并等待教师分组；准备课也按固定组别进行'}
             if key.startswith('practice'):
@@ -145,7 +149,7 @@ def install(Base,Problem,stamp):
                 for item in p['rounds']:
                     if enabled(item['config']):changed=tick_clock(item,self.clock()) or changed
                 if changed:self.save(p)
-                if self.config().get('access_policy')==ACCESS_POLICY and action in ('start_teaching','start_practice','draft','submit_practice','start_quiz','quiz','quiz_draft','finish_dialogue','mental_effort','teaching_presence'):
+                if not is_test_identity(p) and self.config().get('access_policy')==ACCESS_POLICY and action in ('start_teaching','start_practice','draft','submit_practice','start_quiz','quiz','quiz_draft','finish_dialogue','mental_effort','teaching_presence'):
                     if self.round_for(p,data.get('round_id'))['index']!=current_lesson(self.config(),p):raise Problem('当前只能完成本次任务。',403)
                 if action=='teaching_presence':
                     r=self.round_for(p,data.get('round_id'));view=data.get('view_id');sequence=data.get('sequence');active=data.get('active')
@@ -158,14 +162,14 @@ def install(Base,Problem,stamp):
                     if not enabled(r['config']) or not self.stage_started(r,'ai') or self.stage_started(r,'practice'):raise Problem('当前不是教学徒结束环节。',409)
                     if action=='finish_dialogue':
                         if pid in self.active:raise Problem('请等待学徒回复结束后再收束。',409)
-                        if completed_turns(r)<MINIMUM_TURNS:raise Problem('请至少完成10轮有效对话后再进入下一环节。',409)
+                        if not is_test_identity(p) and completed_turns(r)<MINIMUM_TURNS:raise Problem('请至少完成10轮有效对话后再进入下一环节。',409)
                         if self.end_dialogue(p,r,'student_finished'):self.save(p)
                     else:
-                        if completed_turns(r)<MINIMUM_TURNS or not r.get('dialogue_end') or pid in self.active:raise Problem('请至少完成10轮有效对话，主动结束后填写。',409)
+                        if not is_test_identity(p) and (completed_turns(r)<MINIMUM_TURNS or not r.get('dialogue_end') or pid in self.active):raise Problem('请至少完成10轮有效对话，主动结束后填写。',409)
                         if r.get('mental_effort'):raise Problem('本课结束卡已经提交，不能覆盖。',409)
                         value=data.get('value');skip=data.get('skipped') is True
                         if skip or type(value)!=int or not 1<=value<=9:raise Problem('请选择1—9，精神努力题必须作答。')
-                        asked=r['dialogue_end']['at']
+                        asked=r.get('dialogue_end',{}).get('at',self.clock())
                         r['mental_effort']={'value':value,'status':'answered','response_policy':'required-items/1','version':r['config']['research']['effort_version'],
                             'asked_epoch':asked,'server_asked_epoch':asked+self.remote_time_offset,'server_submitted_epoch':self.clock()+self.remote_time_offset,'submitted_epoch':self.clock(),'at':stamp(),'lesson':r['index'],'stage':'teaching','analysis_phase':'preparation' if r['index']==4 else 'formal'}
                         self.event(p,'mental_effort_submitted',lesson=r['index'],status=r['mental_effort']['status']);self.save(p)
@@ -179,8 +183,8 @@ def install(Base,Problem,stamp):
                     p[action]={'answers':values,'monitoring':sum(m)/len(m) if len(m)>=6 else None,'evaluation':sum(e)/len(e) if len(e)>=5 else None,'monitoring_n':len(m),'evaluation_n':len(e),'response_policy':'required-items/1','status':'submitted',
                         'at':stamp(),'started_epoch':start,'finished_epoch':self.clock(),'elapsed_seconds':self.clock()-start if start is not None else None,'version':self.bank['meta_spec']['version'],'item_ids':self.bank['meta_spec']['item_ids'],'items':self.bank['meta'],'instruction':self.bank['meta_spec']['instruction'],'options':self.bank['meta_spec']['options']}
                     p.get('measurement_drafts',{}).pop(action,None);self.event(p,action);self.save(p);return self.public(p)
-                if action=='new_round' and self.config().get('access_policy')==ACCESS_POLICY and self.requested_lesson(p,data)!=current_lesson(self.config(),p):raise Problem('当前只能完成本次任务。',403)
-                if action in ('new_round','start_teaching') and enabled(self.config()) and p.get('group') not in ('L','T'):raise Problem('准备课也需教师按基线完成分组。',409)
+                if action=='new_round' and not is_test_identity(p) and self.config().get('access_policy')==ACCESS_POLICY and self.requested_lesson(p,data)!=current_lesson(self.config(),p):raise Problem('当前只能完成本次任务。',403)
+                if action in ('new_round','start_teaching') and not is_test_identity(p) and enabled(self.config()) and p.get('group') not in ('L','T'):raise Problem('准备课也需教师按基线完成分组。',409)
                 result=super().act(pid,action,data)
                 p=self.get(pid)
                 if action=='new_round':

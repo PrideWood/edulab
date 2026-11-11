@@ -27,6 +27,7 @@ import shutil
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from test_identity import is_test_identity
 from course_layout import PREPARATION_LESSON, COURSE_ORDER, PREPARATION_POLICY, TASKS, SCHEME_VERSION, course_order, next_lesson
 
 ROOT = Path(__file__).resolve().parent
@@ -225,14 +226,14 @@ class Store:
                 raw = self.score(data.get('answers'),self.bank['pretest'])
                 p['pretest']={'answers':data['answers'],'correct':raw,'score':raw*5,'submitted_at':stamp()}
             elif action in ('meta_pre','meta_post'):
-                if action=='meta_pre' and p['pretest'] is None:
+                if action=='meta_pre' and p['pretest'] is None and not is_test_identity(p):
                     raise Problem('请先完成SQL基础前测。',409)
                 values = data.get('answers')
                 if not isinstance(values,list) or len(values)!=13 or any(type(a)!=int or a<1 or a>5 for a in values):
                     raise Problem('请完成13道问卷题，每题选择1—5。')
                 if p[action] is not None:
                     raise Problem('这份问卷已经提交。',409)
-                if action=='meta_post' and (next_lesson(p) is not None or not p['rounds'] or any(r['phase']!='done' for r in p['rounds'])):
+                if action=='meta_post' and not is_test_identity(p) and (next_lesson(p) is not None or not p['rounds'] or any(r['phase']!='done' for r in p['rounds'])):
                     raise Problem('请先完成全部课程任务和后测。',409)
                 p[action]={'answers':values,'monitoring':sum(values[:7])/7,'evaluation':sum(values[7:])/6,'at':stamp(), 'version':self.bank['meta_spec']['version'],
                            'item_ids':self.bank['meta_spec']['item_ids'], 'items':self.bank['meta'],
@@ -241,7 +242,7 @@ class Store:
             elif action=='new_round':
                 p.setdefault('course_order',list(course_order(p)))
                 i=self.requested_lesson(p,data)
-                if (i != PREPARATION_LESSON and p['group'] not in ('L','T')) or p['meta_pre'] is None or p['pretest'] is None:
+                if not is_test_identity(p) and ((i != PREPARATION_LESSON and p['group'] not in ('L','T')) or p['meta_pre'] is None or p['pretest'] is None):
                     raise Problem('请先完成SQL基础前测。' if p['pretest'] is None else '请先完成13题课前问卷。' if p['meta_pre'] is None else '前测和课前问卷均已完成，但尚未分组；测试身份请由教师在EduLab后台分配试测学徒。' if p.get('name','').strip().lower() in ('test','测试','ceshi') else '前测和课前问卷均已完成，请等待教师分组。',409)
                 if any(r['index']==i for r in p['rounds']):raise Problem('本课已经开始，请返回已有记录。',409)
                 if i not in p['course_order']:p['course_order'].append(i)
@@ -366,7 +367,7 @@ class Store:
             r['messages'].append({'id':str(uuid.uuid4()),'request_id':rid,'role':'user','content':text,**({'image':image} if image else {}),'sent_at':stamp(),'turn_index':turn,'sequence_no':len(r['messages'])+1})
             self.event(p,'chat_requested',request_id=rid)
             self.save(p); self.active.add(pid)
-        threading.Thread(target=self.complete_chat,args=(pid,rid),daemon=True).start()
+        threading.Thread(target=self.complete_chat,args=(pid,rid,r['id']),daemon=True).start()
         return {'status':'running','request_id':rid}
 
     def infer(self,r):
@@ -477,11 +478,11 @@ class Store:
             reason=error.args[0] if type(error) is ValueError and error.args and error.args[0] in ('incomplete','reply','target','state','fixed sequence','object') else 'invalid_json'
             raise Problem('学徒回复未完成，请重新发送或联系教师。',502,'MODEL_SCHEMA_INVALID',{'validation':reason}) from None
 
-    def complete_chat(self,pid,rid):
+    def complete_chat(self,pid,rid,round_id=None):
         try:
-            p=self.get(pid); r=next(r for r in p['rounds'] if any(q['id']==rid for q in r['requests'])); result=self.infer(r)
+            p=self.get(pid); r=self.round_for(p,round_id) if round_id is not None else next(r for r in p['rounds'] if any(q['id']==rid for q in r['requests'])); result=self.infer(r)
             with self.lock:
-                p=self.get(pid); r=next(r for r in p['rounds'] if any(q['id']==rid for q in r['requests']))
+                p=self.get(pid); r=self.round_for(p,round_id) if round_id is not None else next(r for r in p['rounds'] if any(q['id']==rid for q in r['requests']))
                 req=next(q for q in r['requests'] if q['id']==rid)
                 if hasattr(self,'finalize_research_result'):result=self.finalize_research_result(p,r,req,result)
                 req.update(status='completed',completed_at=stamp(),first_reply_at=stamp(),transport=result.get('transport',{}))
@@ -493,7 +494,7 @@ class Store:
                 self.save(p)
         except Exception as e:
             with self.lock:
-                p=self.get(pid); r=next(r for r in p['rounds'] if any(q['id']==rid for q in r['requests']))
+                p=self.get(pid); r=self.round_for(p,round_id) if round_id is not None else next(r for r in p['rounds'] if any(q['id']==rid for q in r['requests']))
                 req=next(q for q in r['requests'] if q['id']==rid)
                 req.update(status='failed',completed_at=stamp(),error=str(e) if isinstance(e,Problem) else '学徒回复失败，本机已保留原话。',error_code=getattr(e,'code',None),transport=getattr(e,'diagnostics',{}))
                 self.save(p)

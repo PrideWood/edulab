@@ -100,13 +100,13 @@ export async function assignSqlTest(classCode:string,name:string,group:'L'|'T',a
  await c.query("SELECT pg_advisory_xact_lock(hashtextextended('sql:assign:'||$1,0))",[classCode]);
  const p=(await c.query<CloudRow>("SELECT p.* FROM edulab_local_backup.latest_participants p WHERE class_code=$1 AND participant_name=$2 AND edulab_local_backup.sql_is_test(p.participant_name,p.is_test) AND archive->>'study_schema'=$3 AND NOT EXISTS(SELECT 1 FROM local_backup_dispositions d WHERE d.device_id=p.device_id AND d.participant_id=p.participant_id AND d.is_trashed) ORDER BY received_at DESC LIMIT 1",[classCode,name,SQL_STUDY])).rows[0];
  if(!p)throw new ApiError(403,'TEST_IDENTITY_REQUIRED','此功能仅用于数据库明确标记的测试身份。');
- if(!p.archive.study.pretest)throw new ApiError(409,'PRETEST_PENDING','请先完成这个测试身份的基础前测。');
+
  const old=(await c.query<{group_code:string;method:string}>('SELECT group_code,method FROM sql_study_assignments WHERE class_code=$1 AND participant_name=$2 FOR UPDATE',[classCode,name])).rows[0];
  const startedGroup=p.archive.study.rounds.find(r=>r.group==='L'||r.group==='T')?.group??old?.group_code??p.archive.study.group;
  if(p.archive.study.rounds.some(r=>r.index!==4||r.group==='L'||r.group==='T')&&startedGroup!==group)throw new ApiError(409,'TEST_ALREADY_STARTED','该身份已经开始课堂，不能事后更改学徒组别。');
  if(old?.group_code===group)return {ok:true,group};
  if(old&&old.method!=='single_test_manual')throw new ApiError(409,'FORMAL_ALLOCATION_LOCKED','已有配对分组不能用单人试测覆盖。');
- const batch=randomUUID();await c.query("INSERT INTO sql_study_assignments(class_code,participant_name,group_code,pretest_score,pair_no,batch_id,method) VALUES($1,$2,$3,$4,NULL,$5,'single_test_manual') ON CONFLICT(class_code,participant_name) DO UPDATE SET group_code=EXCLUDED.group_code,batch_id=EXCLUDED.batch_id,assigned_at=now()",[classCode,name,group,p.archive.study.pretest.score,batch]);
+ const batch=randomUUID();await c.query("INSERT INTO sql_study_assignments(class_code,participant_name,group_code,pretest_score,pair_no,batch_id,method) VALUES($1,$2,$3,$4,NULL,$5,'single_test_manual') ON CONFLICT(class_code,participant_name) DO UPDATE SET group_code=EXCLUDED.group_code,batch_id=EXCLUDED.batch_id,assigned_at=now()",[classCode,name,group,p.archive.study.pretest?.score??0,batch]);
  await c.query('INSERT INTO sql_study_audit(id,admin_id,action,payload) VALUES($1,$2,$3,$4::jsonb)',[randomUUID(),adminId,'test.assign',JSON.stringify({classCode,name,group,batch,test_only:true})]);
  return {ok:true,group};});
 }

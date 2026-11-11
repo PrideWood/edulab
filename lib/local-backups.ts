@@ -46,7 +46,7 @@ export async function listLocalBackups(input: BackupFilters & { page: number }) 
     query<{ device_id: string; participant_id: string; participant_name: string; class_code: string;
       source_app: BackupSource; is_test: boolean; revision: string; exported_at: string; received_at: string; trashed_at: string | null; interaction_started_at: string | null;
       conversation_count: number; turn_count: string; message_count: string }>(`
-      SELECT device_id,participant_id,participant_name,class_code,source_app,is_test,revision,exported_at,received_at,
+      SELECT device_id,participant_id,participant_name,class_code,source_app,CASE WHEN archive->>'study_schema'='sql-teachable-mvp/1' THEN edulab_local_backup.sql_is_test(participant_name,is_test) ELSE is_test END AS is_test,revision,exported_at,received_at,
         ${interactionStart} AS interaction_started_at,
         (SELECT d.trashed_at FROM public.local_backup_dispositions d WHERE d.device_id=p.device_id AND d.participant_id=p.participant_id AND d.is_trashed) AS trashed_at,
         jsonb_array_length(archive->'conversations') AS conversation_count,

@@ -169,10 +169,10 @@ class ResearchProtocolTests(unittest.TestCase):
             for i in range(9):self.chat(pid,'covered'+str(i))
         self.chat(pid,'finished');r=self.s.get(pid)['rounds'][0];self.assertNotIn('？',r['messages'][-1]['content']);self.assertNotIn('掌握',r['messages'][-1]['content'])
 
-    def test_test_names_bypass_group_allocation_but_keep_baselines(self):
+    def test_test_names_bypass_group_allocation_and_baselines_are_optional(self):
         for name in ['测试','test','柴博泉']:
             p=self.s.enter({'class_code':'2531','name':name,'confirmed':True});pid=p['id']
-            self.assertTrue(p['group_assigned']);self.assertFalse(p['gates']['ai4']['open'])
+            self.assertTrue(p['group_assigned']);self.assertTrue(p['gates']['ai4']['open'])
             self.s.act(pid,'pretest',{'answers':['A']*20});self.s.act(pid,'meta_pre',{'answers':[3]*13})
             self.s.act(pid,'new_round',{'lesson':4});self.s.act(pid,'start_teaching',{})
             self.chat(pid,'test-reply');self.assertEqual(self.s.get(pid)['rounds'][0]['requests'][-1]['status'],'completed')
