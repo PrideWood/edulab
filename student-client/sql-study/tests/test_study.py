@@ -14,7 +14,7 @@ def local_open(req):return _http_open(req,timeout=5)
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from server import Store as CurrentStore,Problem,Handler,encode
 # Regression harness for immutable pre-research snapshots; new protocol is covered separately.
-class Store(CurrentStore.__bases__[0]):
+class Store(CurrentStore.__bases__[0].__bases__[0]):
     def __init__(self,*args,**kwargs):
         super().__init__(*args,**kwargs)
         from course_layout import PREPARATION_POLICY

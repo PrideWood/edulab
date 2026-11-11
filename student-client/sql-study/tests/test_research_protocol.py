@@ -104,6 +104,7 @@ class ResearchProtocolTests(unittest.TestCase):
         for i in range(10):self.chat(pid,str(i))
         self.s.act(pid,'finish_dialogue',{});self.s.act(pid,'mental_effort',{'value':5});self.s.act(pid,'start_practice',{})
         self.s.act(pid,'draft',{'sql':'SELECT 1','result':'1','note':'核对行列'})
+        self.s.act(pid,'practice_image_add',{'image':'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/nXcAAAAASUVORK5CYII='})
         self.s.act(pid,'submit_practice',{})
         self.assertNotIn('prediction',self.s.get(pid)['rounds'][0]['submission'])
         with self.assertRaises(Problem):self.s.act(pid,'submit_practice',{})

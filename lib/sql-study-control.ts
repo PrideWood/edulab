@@ -68,7 +68,7 @@ export async function assignSqlClass(classCode:string,includeTests:boolean,admin
  await c.query('INSERT INTO sql_study_assignments(class_code,participant_name,group_code,pretest_score,pair_no,batch_id,method) VALUES($1,$2,$3,$4,$5,$6,$7)',[classCode,p.name,started&&existing?existing:p.group,p.score,p.pair,batch,started&&existing?'preserved_started_local_assignment':'class_adjacent_pair_constrained_random_1500']);}
  await c.query('INSERT INTO sql_study_audit(id,admin_id,action,payload) VALUES($1,$2,$3,$4::jsonb)',[randomUUID(),adminId,'class.assign',JSON.stringify({classCode,requestedIncludeTests:includeTests,includeTests:false,batch,n:assigned.length})]);return {assigned:assigned.length,batch};});
 }
-export async function getSqlDashboard(){const [control,records,assignments,grades,versions,testLessonControls,researchAssessments]=await Promise.all([getSqlControl(),sqlRoster(),getSqlAssignments(),query('SELECT device_id,participant_id,lesson,scores,updated_at FROM sql_study_grades'),getSqlVersions(),getSqlTestLessonCommands(),query<ResearchAssessment>('SELECT device_id,participant_id,protocol_version,assessment,revision,payload,updated_at FROM sql_study_research_assessments ORDER BY updated_at DESC')]);
+export async function getSqlDashboard(){const [control,records,assignments,grades,versions,testLessonControls,researchAssessments,practiceAttachments]=await Promise.all([getSqlControl(),sqlRoster(),getSqlAssignments(),query('SELECT device_id,participant_id,lesson,scores,updated_at FROM sql_study_grades'),getSqlVersions(),getSqlTestLessonCommands(),query<ResearchAssessment>('SELECT device_id,participant_id,protocol_version,assessment,revision,payload,updated_at FROM sql_study_research_assessments ORDER BY updated_at DESC'),query('SELECT id,device_id,participant_id,round_id,submission_id,status,sha256,size_bytes,mime,created_at,confirmed_at FROM sql_practice_attachments')]);
  const seen=new Set<string>();const people=records.filter(r=>{const key=r.class_code+':'+r.participant_name;if(seen.has(key))return false;seen.add(key);return true;});
  const balance=activeSqlClasses(control.config).flatMap(cls=>(['L','T'] as const).map(g=>{
    const scores=people.filter(p=>{
@@ -77,7 +77,7 @@ export async function getSqlDashboard(){const [control,records,assignments,grade
    }).map(p=>p.archive.study.pretest!.score);
    return {class_code:cls,group:g,...groupStats(scores)};
  }));
- return {...control,records,assignments,grades:grades.rows,balance,versions,testLessonControls,researchAssessments:researchAssessments.rows,server_now:Date.now()/1000};}
+ return {...control,records,assignments,grades:grades.rows,balance,versions,testLessonControls,researchAssessments:researchAssessments.rows,practiceAttachments:practiceAttachments.rows,server_now:Date.now()/1000};}
 export async function gradeSql(input:{deviceId:string;participantId:string;lesson:number;scores:number[]},adminId:string){
  const row=(await query<{archive:CloudArchive}>("SELECT archive FROM edulab_local_backup.latest_participants WHERE device_id=$1 AND participant_id=$2 AND archive->>'study_schema'=$3",[input.deviceId,input.participantId,SQL_STUDY])).rows[0];
  if(!row||!row.archive.study.rounds.find(r=>r.index===input.lesson)?.quiz)throw new ApiError(409,'QUIZ_NOT_READY','该课后测尚未提交。');

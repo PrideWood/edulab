@@ -624,6 +624,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.guard()
                 if path.startswith('/api/teacher') or path=='/api/export': raise Problem('教师管理已迁移至EduLab管理平台。',410)
                 if path=='/api/classes': return self.respond(self.store.class_options())
+                if path=='/api/practice-image':
+                    image_id=urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get('id',[''])[0]
+                    content,mime=self.store.image_file(self.participant(),image_id)
+                    return self.respond(content,ctype=mime)
                 if path=='/api/state': return self.respond(self.store.state(self.participant()))
                 if path=='/api/questions':
                     stage=urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get('kind',['pretest'])[0]
@@ -678,6 +682,8 @@ from study_control import install
 Store = install(Store, Problem, encode, stamp)
 from research_protocol import install as install_research
 Store = install_research(Store, Problem, stamp)
+from practice_attachments import install as install_attachments
+Store = install_attachments(Store, Problem)
 
 def default_directory():
     if os.name=='nt': return Path(os.environ['LOCALAPPDATA'])/'EduLab-SQL'

@@ -3,6 +3,7 @@
 var _a, _b, _c, _d;
 const $ = s => document.querySelector(s), esc = s => String(s !== null && s !== void 0 ? s : '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 let classes = [];
+const practiceImageUrls = new Map();
 const hash = new URLSearchParams(location.hash.slice(1));
 if (hash.has('key')) {
     sessionStorage.setItem('local-key', hash.get('key'));
@@ -40,7 +41,7 @@ function accept(s) { if (state && !s.is_test && s.access_policy === 'current-tas
     formLoad++;
     page = 'home';
     lessonExpansion.clear();
-} state = s; offset = s.server_now - Date.now() / 1000; updateBackupStatus(); }
+} state = s; offset = s.server_now - Date.now() / 1000; updateBackupStatus(); updatePracticeImages(); }
 const now = () => Date.now() / 1000 + offset;
 function btn(text, attrs = '') { return `<button ${attrs}>${text}</button>`; }
 function timeLabel(t) { return t ? new Date(t * 1000).toLocaleString('zh-CN', { hour12: false }) : '—'; }
@@ -81,7 +82,8 @@ function layout(content) {
     } };
     syncChoices();
     $('#nav-home').onclick = () => navigate('home');
-    $('#logout').onclick = async () => { await teachingPresence(false); await flushDraft(); identity = null; state = null; sessionStorage.removeItem('sql-identity'); login(); };
+    $('#logout').onclick = async () => { await teachingPresence(false); await flushDraft(); identity = null; state = null; for (const url of practiceImageUrls.values())
+        URL.revokeObjectURL(url); practiceImageUrls.clear(); sessionStorage.removeItem('sql-identity'); login(); };
 }
 function login() {
     app.innerHTML = `<div class="login-new"><section class="login-intro"><div class="brand"><span class="brandmark">e</span>EduLab <em>SQL</em></div><div><p class="eyebrow">LEARN BY TEACHING</p><h1>把你的理解，<br>教给虚拟学徒。</h1><p>观看对应微课、阅读工单，再用自己的话解释。<br>在这里完成课堂测量，记录每一次学习。</p></div><p class="small">SQL Server 课堂实验 · 本机学习空间</p></section><section class="login-panel"><div class="card"><p class="eyebrow">欢迎进入课堂</p><h2>确认身份，开始学习</h2><p class="muted">请选择所在班级，填写你的真实姓名。</p><form id="login-form"><label>班级<select name="class_code" required><option value="">请选择班级</option>${classes.map(c => `<option value="${esc(c.code)}">${esc(c.label)}</option>`).join('')}</select></label><label>姓名<input name="name" autocomplete="name" maxlength="30" placeholder="请输入真实姓名" required></label>${btn('进入课堂', 'type="submit" style="width:100%"')}</form><p class="small muted" style="margin-top:18px">同一台电脑上，再次选择相同班级和姓名可继续已有记录。</p></div></section></div>`;
@@ -103,7 +105,6 @@ function login() {
 async function navigate(next) { await teachingPresence(false); await flushDraft(); page = next; formLoad++; render(); }
 function entry(title, key, target, done = false, extra = '', blocked = false) { const g = gate(key); return `<div class="entry-card"><div><h3>${title}</h3><p class="small muted">${done ? '已完成' : extra || g.reason}${!done && g.open_at ? ' · ' + timeLabel(g.open_at) : ''}</p></div>${btn(done ? '已完成' : blocked ? '未就绪' : g.open ? '进入' : '未开放', `data-go="${target}" ${done || blocked || !g.open ? 'disabled' : ''}`)}</div>`; }
 function formatBrief(text) { return esc(text).replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>'); }
-function lessonNumber(i) { return i === 4 ? 0 : i + 1; }
 function lessonLabel(i) { return i === 4 ? '准备课P0' : '正式第' + (i + 1) + '课'; }
 function lessonOrder() { if (state.access_policy === 'current-task/1' && !state.is_test)
     return [state.current_lesson]; return state.course_order || state.tasks.map((_, i) => i); }
@@ -255,10 +256,14 @@ async function lesson(type, i) {
             } };
             return;
         }
-        layout(`${back()}<div class="page-head"><div><h2>SQL Server 独立实操</h2><p>${formatBrief(r.task.brief)}</p></div><span class="timer" data-deadline="${r.practice_deadline}"></span></div><form id="practice-form" class="card" data-round-id="${r.id}"><p class="muted">在电脑上的 SQL Server 完成操作，再粘贴代码和结果。确认提交时停止计时；请按教师安排完成；超出建议时长的实际用时仍会记录。</p>${['sql', 'result', 'note'].map((k, j) => `<label>${['SQL 代码', '本人运行结果（请粘贴实际结果文本）', '核验说明（必填）'][j]}<textarea name="${k}" required ${k === 'sql' ? 'class="code-input"' : ''}>${esc(r.draft[k])}</textarea></label>`).join('')}<div class="actions"><span id="save-status" class="small muted">草稿已保存到本机</span>${btn('完成实操并提交', 'type="submit"')}</div></form>`);
+        layout(`${back()}<div class="page-head"><div><h2>SQL Server 独立实操</h2><p>${formatBrief(r.task.brief)}</p></div><span class="timer" data-deadline="${r.practice_deadline}"></span></div><form id="practice-form" class="card" data-round-id="${r.id}"><p class="muted">在电脑上的 SQL Server 完成操作，再粘贴代码和结果。确认提交时停止计时；请按教师安排完成；超出建议时长的实际用时仍会记录。</p>${['sql', 'result', 'note'].map((k, j) => `<label>${['SQL 代码', '本人运行结果（请粘贴实际结果文本）', '核验说明（必填）'][j]}<textarea name="${k}" required ${k === 'sql' ? 'class="code-input"' : ''}>${esc(r.draft[k])}</textarea></label>`).join('')}<section class="practice-screenshots"><h3>本人运行结果截图</h3><p class="muted">${state.is_test ? '测试账号可不上传。' : '请添加1—3张截图。'}截图随本课独立实操作品提交；SQL、实际结果文本及核验说明仍需填写。断网时保存在本机，联网后自动补传。</p><input id="practice-image-file" type="file" accept="image/png,image/jpeg,image/webp"><div id="practice-images" class="practice-image-grid"></div></section><div class="actions"><span id="save-status" class="small muted">草稿已保存到本机</span>${btn('完成实操并提交', 'type="submit"')}</div></form>`);
         $('#back').onclick = () => navigate('home');
         $('#practice-form').oninput = () => { clearTimeout(draftTimer); $('#save-status').textContent = '正在保存…'; draftTimer = setTimeout(savePractice, 500); };
-        $('#practice-form').onsubmit = async (e) => { e.preventDefault(); if (!confirm('确认已完成实操？提交后停止计时，不能再修改。'))
+        bindPracticeImages(r);
+        $('#practice-form').onsubmit = async (e) => { var _a; e.preventDefault(); if (!state.is_test && !(((_a = displayedRound()) === null || _a === void 0 ? void 0 : _a.practice_images) || []).length) {
+            toast('请先添加至少1张本人运行结果截图。');
+            return;
+        } if (!confirm('确认已完成实操？提交后停止计时，不能再修改。'))
             return; try {
             await flushDraft();
             await action('submit_practice');
@@ -369,7 +374,7 @@ async function quiz(i) {
         if (version !== formLoad)
             return;
         const mcq = bank.filter(q => q.kind !== 'sql'), sql = bank.filter(q => q.kind === 'sql'), r = round(i), key = `quiz:${identity.id}:${r.id || i}`, draft = JSON.parse(sessionStorage.getItem(key) || JSON.stringify(r.draft_quiz || {}));
-        layout(`${back()}<div class="page-head"><div><h2>${lessonLabel(i)}后测</h2><p class="muted">${sql.length ? '选择题60分；SQL编写题共40分。' : '共10道单选题，每题10分。每题只有一个正确答案，请独立作答。'}时长仅作建议，请完成后主动提交。</p></div><span class="timer" data-deadline="${r.quiz_deadline}"></span></div><form id="quiz-form" class="card" data-round-id="${r.id}" data-count="${mcq.length}" data-sql-count="${sql.length}" data-key="${key}">${mcq.map((q, j) => `<fieldset class="mcq-question"><legend>${j + 1}. ${esc(q.text)}</legend><div class="mcq-options">${q.options.map((v, k) => { var _a; return `<label class="choice"><input type="radio" name="q${j}" value="${'ABCD'[k]}" ${((_a = draft.answers) === null || _a === void 0 ? void 0 : _a[j]) === 'ABCD'[k] ? 'checked' : ''} required> ${'ABCD'[k]}. ${esc(v)}</label>`; }).join('')}</div></fieldset>`).join('')}${sql.length ? '<h3>SQL 编写题 · 每题20分</h3>' : ''}${sql.map((q, j) => { var _a; return `<label>${j + 1}. ${esc(q.text)}<textarea class="code-input" name="s${j}" maxlength="10000" required>${esc(((_a = draft.sql_answers) === null || _a === void 0 ? void 0 : _a[j]) || '')}</textarea></label>`; }).join('')}<div class="actions"><span id="save-status" class="small muted">作答自动保存</span>${btn('确认提交后测', 'type="submit"')}</div></form>`);
+        layout(`${back()}<div class="page-head"><div><h2>${lessonLabel(i)}后测</h2><p class="muted">${sql.length ? '选择题60分；SQL编写题共40分。' : '共10道单选题，每题10分。每题只有一个正确答案，请独立作答。'}时长仅作建议，请完成后主动提交。</p></div><span class="timer" data-deadline="${r.quiz_deadline}"></span></div><form id="quiz-form" class="card" data-round-id="${r.id}" data-count="${mcq.length}" data-sql-count="${sql.length}" data-key="${key}">${mcq.map((q, j) => `<fieldset class="mcq-question"><legend>${j + 1}. ${esc(q.text)}</legend><div class="mcq-options">${q.options.map((v, k) => { var _a; return `<label class="choice"><input type="radio" name="q${j}" value="${'ABCD'[k]}" ${((_a = draft.answers) === null || _a === void 0 ? void 0 : _a[j]) === 'ABCD'[k] ? 'checked' : ''} required> ${'ABCD'[k]}. ${esc(v)}</label>`; }).join('')}</div></fieldset>`).join('')}${sql.length ? '<h3>SQL 编写题 · 每题20分</h3>' : ''}${sql.map((q, j) => { var _a; return `<label>${j + 1}. ${esc(q.text)}<textarea class="code-input" name="s${j}" maxlength="10000" required>${esc(((_a = draft.sql_answers) === null || _a === void 0 ? void 0 : _a[j]) || '')}</textarea></label>`; }).join('')}<section class="practice-screenshots"><h3>本人运行结果截图</h3><p class="muted">${state.is_test ? '测试账号可不上传。' : '请添加1—3张截图。'}截图随本课独立实操作品提交；SQL、实际结果文本及核验说明仍需填写。断网时保存在本机，联网后自动补传。</p><input id="practice-image-file" type="file" accept="image/png,image/jpeg,image/webp"><div id="practice-images" class="practice-image-grid"></div></section><div class="actions"><span id="save-status" class="small muted">作答自动保存</span>${btn('确认提交后测', 'type="submit"')}</div></form>`);
         $('#back').onclick = () => navigate('home');
         $('#quiz-form').oninput = () => { clearTimeout(draftTimer); draftTimer = setTimeout(saveQuiz, 400); };
         $('#quiz-form').onsubmit = async (e) => { e.preventDefault(); try {
@@ -399,7 +404,6 @@ async function saveQuiz() { clearTimeout(draftTimer); draftTimer = null; if (!$(
 catch (e) {
     toast(e.message);
 } }
-function download(data, name, type = 'application/json') { const blob = new Blob([typeof data === 'string' ? data : JSON.stringify(data, null, 2)], { type }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 3000); }
 setInterval(() => { document.querySelectorAll('[data-deadline]').forEach(el => { var _a; const d = (_a = displayedRound()) === null || _a === void 0 ? void 0 : _a.dialogue; if (el.dataset.aiWindow === 'true' && (d === null || d === void 0 ? void 0 : d.foreground_clock)) {
     const left = Math.max(0, Math.ceil(d.timer_remaining_seconds - (d.timer_running ? Math.max(0, Math.min(now(), d.timer_lease_until) - state.server_now) : 0)));
     el.textContent = left === 0 ? '建议时间已到 · 可继续交流' : (d.timer_running ? '建议剩余 ' : '已暂停 · 建议剩余 ') + String(Math.floor(left / 60)).padStart(2, '0') + ':' + String(left % 60).padStart(2, '0');
@@ -417,7 +421,7 @@ async function refreshClasses() { const next = (await api('/api/sql-student/clas
         $('#login-form input').value = typed;
     }
 } }
-setInterval(async () => { var _a; if (pollBusy)
+setInterval(async () => { if (pollBusy)
     return; if (!identity) {
     try {
         await refreshClasses();
@@ -427,7 +431,7 @@ setInterval(async () => { var _a; if (pollBusy)
     }
     return;
 } pollBusy = true; try {
-    const old = (_a = displayedRound()) === null || _a === void 0 ? void 0 : _a.phase, before = JSON.stringify(Object.assign(Object.assign({}, state), { server_now: 0 }));
+    const before = JSON.stringify(Object.assign(Object.assign({}, state), { server_now: 0 }));
     accept(await api('/api/sql-student/state'));
     if (page === 'home') {
         if (before !== JSON.stringify(Object.assign(Object.assign({}, state), { server_now: 0 })))
@@ -478,7 +482,7 @@ function updateResearchControls(r) {
     if (el.dataset.signature === signature)
         return;
     el.dataset.signature = signature;
-    el.innerHTML = `<p>已完成 ${d.completed_turns} 轮有效对话 · 至少 ${minimum} 轮，无上限</p><p class="small muted">一轮指你的讲解得到学徒成功回复，失败重试不计轮数。计时仅作建议，达到最低轮数后可继续交流或主动结束。</p>${!d.closed ? '<button id="finish-dialogue" class="secondary" type="button" ' + (!ready ? 'disabled' : '') + '>' + (ready ? '结束对话，填写结束卡' : '还需完成 ' + Math.max(0, minimum - d.completed_turns) + ' 轮有效对话') + '</button>' : ''}${d.effort_due ? `<form id="effort-form"><fieldset><legend>回顾刚才向虚拟学徒讲解SQL的过程，你投入了多少心力？</legend><p class="small muted">心力指理解、组织解释和思考所投入的脑力。没有好坏之分。</p><div class="effort-options">${Array.from({ length: 9 }, (_, i) => `<label class="choice"><input type="radio" name="effort" value="${i + 1}" required/>${i + 1}</label>`).join('')}</div><p class="small muted">1＝非常非常低　5＝中等　9＝非常非常高</p></fieldset><button type="submit">提交并继续</button></form>` : d.effort_done ? '<p>结束卡已保存，可以进入独立实操。</p>' : ''}`;
+    el.innerHTML = `<p>已完成 ${d.completed_turns} 轮有效对话 · 至少 ${minimum} 轮，无上限</p><p class="small muted">一轮指你的讲解得到学徒成功回复，失败重试不计轮数。计时仅作建议，达到最低轮数后可继续交流或主动结束。</p>${!d.closed ? '<button id="finish-dialogue" class="secondary" type="button" ' + (!ready ? 'disabled' : '') + '>' + (ready ? '结束对话，填写结束卡' : '还需完成 ' + Math.max(0, minimum - d.completed_turns) + ' 轮有效对话') + '</button>' : ''}${d.effort_due ? `<form id="effort-form"><fieldset><legend>回顾刚才向虚拟学徒讲解SQL的过程，你投入了多少心力？</legend><p class="small muted">心力指理解、组织解释和思考所投入的脑力。没有好坏之分。</p><div class="effort-options">${Array.from({ length: 9 }, (_, i) => `<label class="choice"><input type="radio" name="effort" value="${i + 1}" required/>${i + 1}</label>`).join('')}</div><p class="small muted">1＝非常非常低\u30005＝中等\u30009＝非常非常高</p></fieldset><button type="submit">提交并继续</button></form>` : d.effort_done ? '<p>结束卡已保存，可以进入独立实操。</p>' : ''}`;
     const finish = $('#finish-dialogue');
     if (finish)
         finish.onclick = async () => { if (!ready)
@@ -527,7 +531,7 @@ async function teachingPresence(active, keepalive = false) {
             }
         }
     }
-    catch (_e) { }
+    catch ( /* The next presence pulse retries; local progress remains saved. */_e) { /* The next presence pulse retries; local progress remains saved. */ }
 }
 setInterval(() => { void teachingPresence(true); }, 2000);
 (_a = document.addEventListener) === null || _a === void 0 ? void 0 : _a.call(document, 'visibilitychange', () => { void teachingPresence(document.visibilityState !== 'hidden', true); });
@@ -535,4 +539,47 @@ setInterval(() => { void teachingPresence(true); }, 2000);
 (_c = globalThis.addEventListener) === null || _c === void 0 ? void 0 : _c.call(globalThis, 'focus', () => { void teachingPresence(true); });
 (_d = globalThis.addEventListener) === null || _d === void 0 ? void 0 : _d.call(globalThis, 'pagehide', () => { void teachingPresence(false, true); });
 function updateBackupStatus() { const el = $('#backup-status'); if (!el || !state)
-    return; const b = state.backup; el.textContent = !b ? '进度保存中' : b.status === 'uploaded' && b.pending === 0 ? '进度已同步' : (b.error ? '暂未同步，将自动重试' : '进度正在同步') + (b.last_uploaded_epoch ? ' · 上次 ' + timeLabel(b.last_uploaded_epoch) : ''); }
+    return; const b = state.backup; el.textContent = !b ? '进度保存中' : b.status === 'uploaded' && b.pending === 0 ? '进度已同步 · 云端归档完成' : (b.error ? '暂未同步，将自动重试' : '进度正在同步') + (b.pending_images ? ' · 待传截图 ' + b.pending_images + ' 张' : '') + (b.last_uploaded_epoch ? ' · 上次 ' + timeLabel(b.last_uploaded_epoch) : ''); }
+async function addPracticeImage(file, rid) { const input = $('#practice-image-file'); if (input)
+    input.disabled = true; try {
+    await flushDraft();
+    const image = await prepareImage(file);
+    await action('practice_image_add', { round_id: rid, image });
+    toast('截图已保存到本机，将自动上传');
+}
+catch (e) {
+    toast(e.message);
+}
+finally {
+    if (input) {
+        input.disabled = false;
+        input.value = '';
+    }
+} }
+function bindPracticeImages(r) { var _a; const input = $('#practice-image-file'); input.onchange = () => { if (input.files[0])
+    addPracticeImage(input.files[0], r.id); }; const form = $('#practice-form'); (_a = form.addEventListener) === null || _a === void 0 ? void 0 : _a.call(form, 'paste', e => { var _a; const item = Array.from(((_a = e.clipboardData) === null || _a === void 0 ? void 0 : _a.items) || []).find(x => x.type.startsWith('image/')); if (item) {
+    e.preventDefault();
+    addPracticeImage(item.getAsFile(), r.id);
+} }); updatePracticeImages(); }
+function updatePracticeImages() { const box = $('#practice-images'), r = displayedRound(); if (!box || !r || !/^practice/.test(page))
+    return; const images = r.practice_images || [], key = JSON.stringify(images); if (box.dataset.images === key)
+    return; box.dataset.images = key; box.innerHTML = images.map((a, i) => `<figure><a href="#" data-view-image="${a.id}"><img alt="本人实操截图 ${i + 1}" data-practice-image="${a.id}"></a><figcaption>截图 ${i + 1} · ${a.status === 'confirmed' ? '云端已确认' : '本机已保存，等待云端确认'}</figcaption><button type="button" class="secondary" data-remove-image="${a.id}">移除截图</button></figure>`).join(''); box.querySelectorAll('[data-remove-image]').forEach(b => b.onclick = async () => { try {
+    await action('practice_image_remove', { id: b.dataset.removeImage, round_id: r.id });
+}
+catch (e) {
+    toast(e.message);
+} }); for (const a of images) {
+    const apply = url => { const img = box.querySelector('[data-practice-image="' + a.id + '"]'), link = box.querySelector('[data-view-image="' + a.id + '"]'); if (img)
+        img.src = url; if (link) {
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener';
+    } };
+    if (practiceImageUrls.has(a.id)) {
+        apply(practiceImageUrls.get(a.id));
+        continue;
+    }
+    const headers = { 'X-Local-Key': sessionStorage.getItem('local-key') || '', 'X-Participant': identity.id, 'X-Participant-Session': identity.token };
+    fetch('/api/sql-student/practice-image?id=' + encodeURIComponent(a.id), { headers, mode: 'same-origin' }).then(response => { if (!response.ok)
+        throw Error('预览读取失败'); return response.blob(); }).then(blob => { const url = URL.createObjectURL(blob); practiceImageUrls.set(a.id, url); apply(url); }).catch(() => { box.dataset.images = ''; });
+} }

@@ -8,7 +8,7 @@ const compat=await readFile(new URL('../web/compat.js',import.meta.url),'utf8');
 test('legacy fallbacks generate secure UUIDs and preserve Enter validation and submit handlers',()=>{
  const actions=[];
  function Form(){}
- Form.prototype.appendChild=function(button){actions.push('append');};
+ Form.prototype.appendChild=function(){actions.push('append');};
  const context=vm.createContext({window:{crypto:{getRandomValues:array=>webcrypto.getRandomValues(array)}},HTMLFormElement:Form,document:{createElement:()=>({click(){actions.push('validated-click');},remove(){actions.push('remove');}})}});
  vm.runInContext('delete Array.prototype.at;',context);
  vm.runInContext(compat,context);

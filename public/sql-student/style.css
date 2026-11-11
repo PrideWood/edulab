@@ -137,3 +137,5 @@ dialog{width:94vw;max-width:1080px}dialog:not(#teacher){max-width:480px}
 .no-flex-gap #app .choice input{margin-right:10px}
 .no-flex-gap #app .likert-choice input{margin-right:0;margin-bottom:6px}
 .no-flex-gap #app .image-preview>*+*{margin-left:12px}
+
+.practice-image-grid{display:flex;flex-wrap:wrap;gap:16px}.practice-image-grid figure{margin:10px 0;max-width:300px}.practice-image-grid img{display:block;width:100%;max-height:220px;object-fit:contain;background:#f1f5f9;border:1px solid #ccd5e1}.practice-image-grid figcaption{font-size:13px;margin:8px 0}.practice-screenshots{margin:24px 0;padding:16px;background:#f6f9fc;border-radius:12px}

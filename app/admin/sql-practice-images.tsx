@@ -1,0 +1,6 @@
+'use client';
+/* Authenticated private image URLs must bypass the public image optimizer. */
+/* eslint-disable @next/next/no-img-element */
+export type PracticeImage={id:string;round_id:string;submission_id:string;deleted?:boolean;status:string;size_bytes:number;mime:string};
+export type CloudPracticeImage={id:string;device_id:string;participant_id:string;round_id:string;status:string};
+export function SqlPracticeImages({deviceId,participantId,roundId,images,confirmed}:{deviceId:string;participantId:string;roundId:string;images:PracticeImage[];confirmed:CloudPracticeImage[]}){const active=images.filter(a=>a.round_id===roundId&&!a.deleted);if(!active.length)return null;return <section className="sql-practice-images"><h4>本人实操截图</h4><div className="sql-practice-image-grid">{active.map((a,i)=>{const uploaded=confirmed.some(c=>c.id===a.id&&c.device_id===deviceId&&c.participant_id===participantId&&c.round_id===roundId&&c.status==='confirmed');const href='/api/admin/sql-attachments?id='+encodeURIComponent(a.id);return <figure key={a.id}>{uploaded?<a href={href} target="_blank" rel="noopener noreferrer"><img src={href} alt={'实操截图 '+(i+1)} loading="lazy"/></a>:<p>本机已保存，等待截图上传确认</p>}<figcaption>截图 {i+1} · {uploaded?'云端已确认':'尚未归档'} · {Math.ceil(a.size_bytes/1024)} KB</figcaption></figure>;})}</div></section>;}
