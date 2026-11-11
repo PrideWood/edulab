@@ -74,7 +74,7 @@ def install(Base,Problem,stamp):
                         db.execute('DELETE FROM students WHERE id=?',(old['id'],))
             result=super().enter(data);p=self.get(result['id'])
             if self.activate_research(p):self.save(p)
-            p['test_cleanup_epoch']=epoch;p['client_version']='0.14.0';self.save(p)
+            p['test_cleanup_epoch']=epoch;p['client_version']='0.15.0';self.save(p)
             return {**self.public(p),'session_token':result['session_token']}
 
         def research_snapshot(self,r):
@@ -107,7 +107,7 @@ def install(Base,Problem,stamp):
             test=is_test_identity(p)
             if test and not p.get('retired_by_cloud') and p.get('group') not in ('L','T'):
                 p.update(group='L',test_identity=True);self.event(p,'test_default_group_assigned',group='L');changed=True
-            if p.get('client_version')!='0.14.0' or p.get('access_policy')!=ACCESS_POLICY:p.update(client_version='0.14.0',access_policy=ACCESS_POLICY,delivery_mode='local',measurement_policy='required-no-prediction/1',dialogue_policy=DIALOGUE_POLICY,timing_policy='advisory/1');changed=True
+            if p.get('client_version')!='0.15.0' or p.get('access_policy')!=ACCESS_POLICY:p.update(client_version='0.15.0',access_policy=ACCESS_POLICY,delivery_mode='local',measurement_policy='required-no-prediction/1',dialogue_policy=DIALOGUE_POLICY,timing_policy='advisory/1');changed=True
             for r in p['rounds']:
                 if test and not r.get('test_identity'):r['test_identity']=True;changed=True
                 if enabled(r['config']) and tick_clock(r,self.clock()):changed=True

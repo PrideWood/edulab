@@ -1,6 +1,6 @@
 @echo off
 setlocal
-TITLE EduLab SQL 0.14.0 - Classroom
+TITLE EduLab SQL 0.15.0 - Classroom
 ECHO [1/4] EduLab SQL Win7 x64 portable launcher
 ECHO This entry bypasses the EXE launcher. Keep this window open.
 set "EDULAB_PYTHON=%~dp0runtime\python.exe"

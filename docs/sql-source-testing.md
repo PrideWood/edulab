@@ -1,6 +1,6 @@
 # 学生端源码测试（不重新打包）
 
-这次只更新源码和教师后台，坚果云中的0.14.0 Windows ZIP不变。
+已生成0.15.0 Win7截图采集版。本指南保留本机源码测试入口；旧0.14.0包不覆盖。
 
 在这台Mac上，关闭旧学生端窗口后，在终端运行：
 
@@ -17,7 +17,7 @@ bash "/Users/chai/Documents/Master_paper/运行学生端源码测试.command"
 - 当前源码测试固定保存在 `/Users/chai/Documents/Master_paper/SQL-Student-MVP/data-source-test/sql-study.sqlite3`；重复启动使用相同目录，不删除数据。正式Windows版对应 `%LOCALAPPDATA%\EduLab-SQL\sql-study.sqlite3`。
 - 原始对话在SQLite中按学生、课次及消息分别保存，并以完整快照备份到云端 `edulab_local_backup.snapshots`。确认页面“进度已同步”后再关机。
 
-测试确认没有问题后再生成新的Win7包；本次没有运行打包命令。
+0.15.0包已按新截图流程生成。源码与打包版均优先使用内置云端直连配置，不依赖旧本地桥接服务。
 
 ## 实操截图配套测试
 
@@ -27,4 +27,4 @@ bash "/Users/chai/Documents/Master_paper/运行学生端源码测试.command"
 
 教师后台“实操与后测”展开学生与对应课次，查看缩略图及原图。云端按设备、学生UUID、课次UUID、作品UUID、附件UUID绑定，重名与不同课次不会混在一起。没有云端确认的图片显示等待上传。
 
-COS永久密钥仅保存在教师后台生产环境；本机通过受限数据库登记及短期单附件授权上传，不需要给机房安装SDK或Python。旧0.14.0 ZIP保持不变，新增截图能力须源码测试通过后再打包。
+COS永久密钥仅保存在教师后台生产环境；本机通过受限数据库登记及短期单附件授权上传，不需要给机房安装SDK或Python。新增截图能力已纳入0.15.0包，旧0.14.0 ZIP保留。
