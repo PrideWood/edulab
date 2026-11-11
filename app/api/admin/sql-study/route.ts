@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import {saveResearchAssessment,exportEnaMessages,exportResearchMeasures,getPaperMaterial} from '@/lib/sql-study-research';
+import {saveResearchAssessment,getPaperMaterial} from '@/lib/sql-study-research';
 import {getAuthenticatedAdmin,assertSameOrigin} from '@/lib/admin-auth';
 import {ApiError,errorResponse} from '@/lib/http';
 import {getSqlDashboard,getSqlControl,saveSqlControl,assignSqlClass,gradeSql,assignSqlTest,selectSqlTestLesson} from '@/lib/sql-study-control';
@@ -22,8 +22,6 @@ export async function GET(request:Request){try{
  const formatRequested=new URL(request.url).searchParams.get('format');
  if(formatRequested==='d1_student'||formatRequested==='d1_teacher')return new Response(await getPaperMaterial(formatRequested==='d1_student'?'student':'teacher'),{headers:{...headers,'Content-Type':'text/markdown; charset=utf-8','Content-Disposition':`attachment; filename="SQL-D1-${formatRequested==='d1_student'?'student':'teacher'}.md"`}});
  const data=await getSqlDashboard();const format=new URL(request.url).searchParams.get('format');
- if(format==='ena')return csv(exportEnaMessages(data.records,new URL(request.url).searchParams.get('include_tests')==='1'),'SQL-ENA-messages-pseudonymized.csv');
- if(format==='research')return csv(exportResearchMeasures(data.records,data.researchAssessments,new URL(request.url).searchParams.get('include_tests')==='1'),'SQL-research-measures.csv');
  if(format==='full')return new Response(JSON.stringify({study:'sql-teachable-mvp/1',exported_at:new Date().toISOString(),...data},null,2),{headers:{...headers,'Content-Type':'application/json; charset=utf-8','Content-Disposition':'attachment; filename="SQL-study-complete.json"'}});
  if(format==='posttests'){
   const rows:unknown[][]=[['设备编号','学生UUID','班级','姓名','测试身份','课次','研究阶段','状态','题型','版本','题数','答对数','选择题得分','满分','用时秒',...Array.from({length:10},(_,i)=>`Q${i+1}`),'题目快照JSON']];

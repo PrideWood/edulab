@@ -40,7 +40,7 @@ function accept(s) { if (state && s.access_policy === 'current-task/1' && state.
     formLoad++;
     page = 'home';
     lessonExpansion.clear();
-} state = s; offset = s.server_now - Date.now() / 1000; }
+} state = s; offset = s.server_now - Date.now() / 1000; updateBackupStatus(); }
 const now = () => Date.now() / 1000 + offset;
 function btn(text, attrs = '') { return `<button ${attrs}>${text}</button>`; }
 function timeLabel(t) { return t ? new Date(t * 1000).toLocaleString('zh-CN', { hour12: false }) : '—'; }
@@ -50,7 +50,7 @@ function syncChoices() { document.querySelectorAll('.choice').forEach(label => {
 app.onchange = e => { if (e.target.type === 'radio')
     syncChoices(); };
 function layout(content) {
-    app.innerHTML = `<div class="shell student-shell"><main class="main"><header class="topbar"><button class="brand ghost" id="nav-home"><span class="brandmark">e</span>EduLab <em>SQL 线上</em></button><div class="topbar-right"><span class="student-identity">${esc(state.class_code)} · ${esc(state.name)}</span>${state.mode === 'demo' ? '<span class="badge demo">演示学徒 · 非真实 AI</span>' : ''}<button class="ghost" id="refresh-classroom" type="button">刷新课堂安排</button><button class="ghost" id="logout">退出</button></div></header><div class="workspace">${content}</div></main></div>`;
+    app.innerHTML = `<div class="shell student-shell"><main class="main"><header class="topbar"><button class="brand ghost" id="nav-home"><span class="brandmark">e</span>EduLab <em>SQL 线上</em></button><div class="topbar-right"><span id="backup-status" class="small muted"></span><button class="ghost" id="retry-backup" type="button">重新同步进度</button><span class="student-identity">${esc(state.class_code)} · ${esc(state.name)}</span>${state.mode === 'demo' ? '<span class="badge demo">演示学徒 · 非真实 AI</span>' : ''}<button class="ghost" id="refresh-classroom" type="button">刷新课堂安排</button><button class="ghost" id="logout">退出</button></div></header><div class="workspace">${content}</div></main></div>`;
     $('#refresh-classroom').onclick = async () => { const b = $('#refresh-classroom'); b.disabled = true; b.textContent = '正在同步…'; try {
         await flushDraft();
         accept(await api('/api/sql-student/refresh', {}));
@@ -69,6 +69,15 @@ function layout(content) {
             button.disabled = false;
             button.textContent = '刷新课堂安排';
         }
+    } };
+    updateBackupStatus();
+    $('#retry-backup').onclick = async () => { try {
+        await action('retry_backup');
+        updateBackupStatus();
+        toast('同步请求已发送，请等待进度已同步');
+    }
+    catch (e) {
+        toast(e.message);
     } };
     syncChoices();
     $('#nav-home').onclick = () => navigate('home');
@@ -138,10 +147,7 @@ async function questionnaire(kind) {
         layout(`${back()}<div class="page-head"><div><h2>${meta ? '学习过程问卷' : 'SQL 基础知识前测'}</h2><p class="muted">${meta ? esc(state.meta_spec.instruction) + '<br>1＝非常不同意，2＝不同意，3＝既不同意也不反对，4＝同意，5＝非常同意。' : '共20题，每题5分。每题只有一个正确答案，请独立作答。'}</p></div></div><form id="question-form" class="card">${bank.map((q, i) => `<fieldset class="${meta ? 'likert-question' : 'mcq-question'}"><legend>${i + 1}. ${esc(meta ? q : q.text)}</legend><div class="${meta ? 'likert-options' : 'mcq-options'}">${(meta ? [1, 2, 3, 4, 5] : q.options).map((v, j) => { const value = meta ? v : 'ABCD'[j]; return `<label class="choice ${meta ? 'likert-choice' : ''}"><input type="radio" name="q${i}" value="${value}" ${String(draft[i]) === String(value) ? 'checked' : ''} required> ${meta ? '<span class="likert-value">' + v + '</span><span class="likert-label">' + esc(state.meta_spec.options[j]) + '</span>' : 'ABCD'[j] + '. ' + esc(v)}</label>`; }).join('')}</div></fieldset>`).join('')}<p class="small muted">确认提交后不能修改。</p>${btn('确认提交', 'type="submit"')}</form>`);
         $('#back').onclick = () => navigate('home');
         const f = $('#question-form');
-        f.onchange = () => { const answers = bank.map((_, i) => meta ? (f.elements['q' + i].value ? Number(f.elements['q' + i].value) : null) : f.elements['q' + i].value); sessionStorage.setItem(draftKey, JSON.stringify(answers)); if (meta) {
-            saveChain = saveChain.catch(() => { }).then(() => action('measurement_draft', { kind, answers }));
-            saveChain.catch(e => toast(e.message));
-        } };
+        f.onchange = () => { const answers = bank.map((_, i) => meta ? (f.elements['q' + i].value ? Number(f.elements['q' + i].value) : null) : f.elements['q' + i].value); sessionStorage.setItem(draftKey, JSON.stringify(answers)); saveChain = saveChain.catch(() => { }).then(() => action('measurement_draft', { kind, answers })); saveChain.catch(e => toast(e.message)); };
         f.onsubmit = async (e) => { e.preventDefault(); const b = f.querySelector('button[type=submit]'); b.disabled = true; try {
             await saveChain;
             await action(kind, { answers: bank.map((_, i) => meta ? (f.elements['q' + i].value ? Number(f.elements['q' + i].value) : null) : f.elements['q' + i].value) });
@@ -313,7 +319,7 @@ function showImagePreview() { const el = $('#image-preview'); if (!el)
     return; el.innerHTML = pendingImage ? `<img src="${esc(pendingImage)}" alt="待发送的截图"><button class="ghost" id="remove-image" type="button">移除图片</button>` : ''; if ($('#remove-image'))
     $('#remove-image').onclick = () => { pendingImage = null; showImagePreview(); }; }
 function updateChat() {
-    var _a, _b, _c, _d;
+    var _a, _b, _c;
     if (!page.startsWith('ai') || !$('#messages'))
         return;
     const r = round(Number(page.slice(2))), signature = JSON.stringify([r.messages, r.requests]);
@@ -332,10 +338,10 @@ function updateChat() {
         button.disabled = Boolean(disabled);
     if (text.disabled !== Boolean(disabled))
         text.disabled = Boolean(disabled);
-    const status = active ? '学徒正在整理回复…' : ((_a = r.dialogue) === null || _a === void 0 ? void 0 : _a.closed) ? '本课对话已收束，请整理核对表并等待本课个人教学时段结束。' : ((_b = r.dialogue) === null || _b === void 0 ? void 0 : _b.closing_reply) ? '可回答最后一个问题，发送后不再发起新问题。' : ['failed', 'interrupted'].includes((_c = r.requests.at(-1)) === null || _c === void 0 ? void 0 : _c.status) ? (r.requests.at(-1).error || '学徒暂时未能回复，可以重新发送。') : '';
+    const status = active ? '学徒正在整理回复…' : ((_a = r.dialogue) === null || _a === void 0 ? void 0 : _a.closed) ? '本课对话已结束，请填写结束卡后进入独立实操。' : ['failed', 'interrupted'].includes((_b = r.requests.at(-1)) === null || _b === void 0 ? void 0 : _b.status) ? (r.requests.at(-1).error || '学徒暂时未能回复，可以重新发送。') : '';
     const retry = $('#retry-chat');
     if (retry) {
-        retry.hidden = !['failed', 'interrupted'].includes((_d = r.requests.at(-1)) === null || _d === void 0 ? void 0 : _d.status);
+        retry.hidden = !['failed', 'interrupted'].includes((_c = r.requests.at(-1)) === null || _c === void 0 ? void 0 : _c.status);
         retry.disabled = disabled;
     }
     if ($('#chat-status').textContent !== status)
@@ -396,9 +402,9 @@ catch (e) {
 function download(data, name, type = 'application/json') { const blob = new Blob([typeof data === 'string' ? data : JSON.stringify(data, null, 2)], { type }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 3000); }
 setInterval(() => { document.querySelectorAll('[data-deadline]').forEach(el => { var _a; const d = (_a = displayedRound()) === null || _a === void 0 ? void 0 : _a.dialogue; if (el.dataset.aiWindow === 'true' && (d === null || d === void 0 ? void 0 : d.foreground_clock)) {
     const left = Math.max(0, Math.ceil(d.timer_remaining_seconds - (d.timer_running ? Math.max(0, Math.min(now(), d.timer_lease_until) - state.server_now) : 0)));
-    el.textContent = left === 0 ? '教学徒累计时长已到' : (d.timer_running ? '教学徒剩余 ' : '已暂停 · 剩余 ') + String(Math.floor(left / 60)).padStart(2, '0') + ':' + String(left % 60).padStart(2, '0');
+    el.textContent = left === 0 ? '建议时间已到 · 可继续交流' : (d.timer_running ? '建议剩余 ' : '已暂停 · 建议剩余 ') + String(Math.floor(left / 60)).padStart(2, '0') + ':' + String(left % 60).padStart(2, '0');
     return;
-} const text = el.dataset.aiWindow === 'true' && now() >= Number(el.dataset.deadline) ? '教学徒时段已结束' : remain(Number(el.dataset.deadline)); if (el.textContent !== text)
+} const text = el.dataset.aiWindow === 'true' && now() >= Number(el.dataset.deadline) ? '建议时间已到 · 可继续交流' : remain(Number(el.dataset.deadline)); if (el.textContent !== text)
     el.textContent = text; }); updateChat(); }, 500);
 async function refreshClasses() { const next = (await api('/api/sql-student/classes')).classes; if (!Array.isArray(next))
     throw Error('班级列表暂不可用'); if (JSON.stringify(next) !== JSON.stringify(classes)) {
@@ -463,17 +469,20 @@ else {
     }
 } })();
 function updateResearchControls(r) {
+    var _a;
     const el = $('#research-controls'), d = r.dialogue;
     if (!el || !d)
         return;
-    const signature = JSON.stringify([d.completed_turns, d.max_turns, d.pending, d.closed, d.window_ended, d.effort_due, d.effort_done]);
+    const minimum = (_a = d.minimum_turns) !== null && _a !== void 0 ? _a : 10, ready = d.completed_turns >= minimum && !d.pending;
+    const signature = JSON.stringify([d.completed_turns, d.pending, d.closed, d.effort_due, d.effort_done]);
     if (el.dataset.signature === signature)
         return;
     el.dataset.signature = signature;
-    el.innerHTML = `<p>已完成 ${d.completed_turns} / ${d.max_turns} 轮 · 不要求凑满轮数</p>${!d.closed ? '<button id="finish-dialogue" class="secondary" type="button" ' + (d.pending ? 'disabled' : '') + '>结束对话并整理</button>' : ''}${d.closed && !d.window_ended ? '<p>对话已收束。请静默核对来源、条件、结果粒度与核验依据，等待本课个人教学时段结束。</p>' : ''}${d.effort_due ? `<form id="effort-form"><fieldset><legend>回顾刚才向虚拟学徒讲解SQL的过程，你投入了多少心力？</legend><p class="small muted">心力指理解、组织解释和思考所投入的脑力。没有好坏之分。</p><div class="effort-options">${Array.from({ length: 9 }, (_, i) => `<label class="choice"><input type="radio" name="effort" value="${i + 1}" required/>${i + 1}</label>`).join('')}</div><p class="small muted">1＝非常非常低　5＝中等　9＝非常非常高</p></fieldset><div class="actions"><button type="submit">提交并继续</button></div></form>` : d.effort_done ? '<p>结束卡已保存，请按教师安排进入独立实操。</p>' : ''}`;
+    el.innerHTML = `<p>已完成 ${d.completed_turns} 轮有效对话 · 至少 ${minimum} 轮，无上限</p><p class="small muted">一轮指你的讲解得到学徒成功回复，失败重试不计轮数。计时仅作建议，达到最低轮数后可继续交流或主动结束。</p>${!d.closed ? '<button id="finish-dialogue" class="secondary" type="button" ' + (!ready ? 'disabled' : '') + '>' + (ready ? '结束对话，填写结束卡' : '还需完成 ' + Math.max(0, minimum - d.completed_turns) + ' 轮有效对话') + '</button>' : ''}${d.effort_due ? `<form id="effort-form"><fieldset><legend>回顾刚才向虚拟学徒讲解SQL的过程，你投入了多少心力？</legend><p class="small muted">心力指理解、组织解释和思考所投入的脑力。没有好坏之分。</p><div class="effort-options">${Array.from({ length: 9 }, (_, i) => `<label class="choice"><input type="radio" name="effort" value="${i + 1}" required/>${i + 1}</label>`).join('')}</div><p class="small muted">1＝非常非常低　5＝中等　9＝非常非常高</p></fieldset><button type="submit">提交并继续</button></form>` : d.effort_done ? '<p>结束卡已保存，可以进入独立实操。</p>' : ''}`;
     const finish = $('#finish-dialogue');
     if (finish)
-        finish.onclick = async () => { if (!confirm('确认结束本课对话？之后将静默整理，等待本课个人教学时段结束。'))
+        finish.onclick = async () => { if (!ready)
+            return; if (!confirm('确认结束本课对话并填写结束卡？进入独立实操后不能返回AI。'))
             return; try {
             await action('finish_dialogue');
             updateChat();
@@ -509,7 +518,7 @@ async function teachingPresence(active, keepalive = false) {
         return;
     const requested = !!active && document.visibilityState !== 'hidden' && ((_c = (_b = document.hasFocus) === null || _b === void 0 ? void 0 : _b.call(document)) !== null && _c !== void 0 ? _c : true), pid = identity.id, rid = r.id;
     try {
-        const response = await fetch('/api/sql-student/action', { method: 'POST', keepalive, headers: { 'Content-Type': 'application/json', 'X-Local-Key': sessionStorage.getItem('local-key') || '', 'X-Participant': pid, 'X-Participant-Session': identity.token }, body: JSON.stringify({ action: 'teaching_presence', round_id: rid, active: requested, view_id: presenceView, sequence: ++presenceSequence }) });
+        const response = await fetch('/api/sql-student/action', { method: 'POST', mode: 'same-origin', referrerPolicy: 'same-origin', keepalive, headers: { 'Content-Type': 'application/json', 'X-Local-Key': sessionStorage.getItem('local-key') || '', 'X-Participant': pid, 'X-Participant-Session': identity.token }, body: JSON.stringify({ action: 'teaching_presence', round_id: rid, active: requested, view_id: presenceView, sequence: ++presenceSequence }) });
         if (response.ok) {
             const next = await response.json();
             if ((identity === null || identity === void 0 ? void 0 : identity.id) === pid && ((_d = displayedRound()) === null || _d === void 0 ? void 0 : _d.id) === rid && /^ai/.test(page)) {
@@ -525,3 +534,5 @@ setInterval(() => { void teachingPresence(true); }, 2000);
 (_b = globalThis.addEventListener) === null || _b === void 0 ? void 0 : _b.call(globalThis, 'blur', () => { void teachingPresence(false, true); });
 (_c = globalThis.addEventListener) === null || _c === void 0 ? void 0 : _c.call(globalThis, 'focus', () => { void teachingPresence(true); });
 (_d = globalThis.addEventListener) === null || _d === void 0 ? void 0 : _d.call(globalThis, 'pagehide', () => { void teachingPresence(false, true); });
+function updateBackupStatus() { const el = $('#backup-status'); if (!el || !state)
+    return; const b = state.backup; el.textContent = !b ? '进度保存中' : b.status === 'uploaded' && b.pending === 0 ? '进度已同步' : (b.error ? '暂未同步，将自动重试' : '进度正在同步') + (b.last_uploaded_epoch ? ' · 上次 ' + timeLabel(b.last_uploaded_epoch) : ''); }

@@ -15,7 +15,8 @@ export function upgradeSqlControl(config:SqlControl):SqlControl {
  }
 
  if(!next.classes){next.classes=structuredClone(defaults.classes);next.classes_version=1;for(const cls of next.classes)next.schedules[cls.code]??=structuredClone(defaults.schedules['2531']) as SqlControl['schedules'][string];}
- if(!next.research){next.research=structuredClone(defaults.research) as SqlControl['research'];next.research_questions=structuredClone(defaults.research_questions);next.prompts=structuredClone(defaults.prompts);next.max_questions=12;}
+ if(!next.research){next.research=structuredClone(defaults.research) as SqlControl['research'];next.research_questions=structuredClone(defaults.research_questions);next.prompts=structuredClone(defaults.prompts);next.max_questions=0;}
+ next.research=structuredClone(defaults.research) as SqlControl['research'];next.dialogue_policy='min10-advisory/1';next.timing_policy='advisory/1';next.max_questions=0;if(next.research_questions[4].length<10)next.research_questions[4].push(...defaults.research_questions[4].slice(next.research_questions[4].length));
  next.measurement_policy='required-no-prediction/1';delete (next.research as Record<string,unknown>).prediction_version;next.research.d1_version='SQL-LT-D1/v1.1';
  next.access_policy='current-task/1';next.current_lessons??={};for(const c of next.classes)next.current_lessons[c.code]??=4;next.test_cleanup_epoch??='sql-clean-20261110-01';
  next.d1_schedule??={};
@@ -27,7 +28,7 @@ export async function getSqlControl(){
  return {...row,config:upgradeSqlControl(row.config)};
 }
 export async function saveSqlControl(config:unknown,revision:number,adminId:string){
- const parsed=controlSchema.safeParse(config);if(!parsed.success)throw new ApiError(400,'INVALID_SQL_CONTROL','请检查班级编号、显示名称、预计人数及入口安排；编号不可重复且至少启用一个班级。课堂分钟需为整数、总时长不超过80分钟；云备份必须启用，自动解锁仅适用于实操。');
+ const parsed=controlSchema.safeParse(config);if(!parsed.success)throw new ApiError(400,'INVALID_SQL_CONTROL','请检查班级编号、显示名称、预计人数及入口安排；编号不可重复且至少启用一个班级。课堂建议分钟需为正整数；云备份必须启用，自动解锁仅适用于实操。');
  return transaction(async c=>{
  const old=(await c.query<{revision:number;config:SqlControl}>('SELECT revision,config FROM sql_study_control WHERE id=$1 FOR UPDATE',[SQL_STUDY])).rows[0];
  if(!old||old.revision!==revision)throw new ApiError(409,'CONTROL_CHANGED','设置已由其他窗口更新，请刷新后再保存。');
@@ -52,7 +53,7 @@ export async function assignSqlClass(classCode:string,includeTests:boolean,admin
  const rows=(await c.query<CloudRow>(`SELECT p.* FROM edulab_local_backup.latest_participants p WHERE class_code=$1 AND archive->>'study_schema'=$2 AND NOT edulab_local_backup.sql_is_test(p.participant_name,p.is_test)
  AND NOT EXISTS(SELECT 1 FROM local_backup_dispositions d WHERE d.device_id=p.device_id AND d.participant_id=p.participant_id AND d.is_trashed) ORDER BY received_at DESC`,[classCode,SQL_STUDY])).rows;
  const seen=new Set<string>();const unique=rows.filter(r=>{if(seen.has(r.participant_name))return false;seen.add(r.participant_name);return true;});
- if(unique.some(r=>r.archive.study.research_version!=='sql-lt/1.1'||!['0.13.0','0.13.1','0.13.2'].includes(String(r.archive.study.client_version))))throw new ApiError(409,'CLIENT_UPGRADE_REQUIRED','名单含旧研究协议，请先升级0.13.2并同步。');
+ if(unique.some(r=>r.archive.study.research_version!=='sql-lt/1.1'||r.archive.study.client_version!=='0.14.0'))throw new ApiError(409,'CLIENT_UPGRADE_REQUIRED','名单含旧研究协议，请先升级0.14.0并同步。');
  if(unique.some(r=>!r.archive.study.meta_pre))throw new ApiError(409,'BASELINE_PENDING','请先完成基础前测和课前问卷再分组。');
  const ready=unique.filter(r=>r.archive.study.pretest&&Number.isFinite(r.archive.study.pretest.score));
  if(unique.some(r=>!r.archive.study.pretest))throw new ApiError(409,'PRETEST_PENDING','该范围还有学生未完成前测，请先核对名单。');

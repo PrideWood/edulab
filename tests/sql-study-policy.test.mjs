@@ -15,10 +15,10 @@ test('invalid schedules cannot be saved; fixed group policy and common lesson sc
 });
 test('group exports escape formula names and preserve quoted CSV contents',()=>{assert.equal(p.csvCell('=SUM(1)'),`"'=SUM(1)"`);assert.equal(p.csvCell('张"三'),`"张""三"`);assert.ok(p.toCsv([['姓名'],['测试']]).startsWith('\ufeff'));});
 
-test('backup is always on, minute values fit an 80-minute class, and only practice supports auto',()=>{
+test('backup is always on, advisory minutes can exceed class time, and only practice supports auto',()=>{
  assert.equal(p.controlSchema.safeParse(cfg).success,true);
  const off=structuredClone(cfg);off.backup_enabled=false;assert.equal(p.controlSchema.safeParse(off).success,false);
- const tooLong=structuredClone(cfg);tooLong.teaching_seconds=1800;assert.equal(p.controlSchema.safeParse(tooLong).success,false);
+ const tooLong=structuredClone(cfg);tooLong.teaching_seconds=1800;assert.equal(p.controlSchema.safeParse(tooLong).success,true);
  const seconds=structuredClone(cfg);seconds.quiz_seconds=61;assert.equal(p.controlSchema.safeParse(seconds).success,false);
  const badAuto=structuredClone(cfg);badAuto.schedules['2531'].posttest0.mode='auto';assert.equal(p.controlSchema.safeParse(badAuto).success,false);
  const good=structuredClone(cfg);good.schedules['2531'].practice0.mode='auto';assert.equal(p.controlSchema.safeParse(good).success,true);
@@ -27,7 +27,7 @@ test('backup is always on, minute values fit an 80-minute class, and only practi
 test('version summaries describe changed lesson content instead of only showing counters',()=>{const next=structuredClone(cfg);next.tasks[0].checks[0]+=' 新检查';next.prompts.common+=' 自然学生语气';const summary=Array.from(p.summarizeSqlChanges(cfg,next));assert.ok(summary.includes('正式第1课检查点'));assert.ok(summary.includes('更新通用学徒规则与表达方式'));});
 test('classroom controls are ordered by measurement and lesson, with each lesson kept together',async()=>{const exports={};vm.runInNewContext(ts.transpileModule(await readFile('lib/sql-study-display.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText,{exports});const groups=exports.classroomScheduleGroups();assert.deepEqual(Array.from(groups[1].keys),['ai4','practice4','posttest4']);assert.deepEqual(Array.from(groups[2].keys),['ai0','practice0','posttest0']);assert.equal(groups.flatMap(x=>x.keys).length,18);});
 
-test('legacy count settings normalize to the bounded research protocol',()=>{const legacy=structuredClone(cfg);legacy.max_questions=6;assert.equal(p.controlSchema.parse(legacy).max_questions,12);const missing=structuredClone(cfg);delete missing.max_questions;assert.equal(p.controlSchema.parse(missing).max_questions,12);});
+test('new protocol has a minimum of ten and no upper-limit setting',()=>{assert.equal(p.controlSchema.parse(cfg).max_questions,0);assert.equal(p.controlSchema.parse(cfg).research.minimum_turns,10);const wrong=structuredClone(cfg);wrong.max_questions=12;assert.equal(p.controlSchema.safeParse(wrong).success,false);assert.ok(p.composeSqlPrompt(cfg,4,'T',100).includes(cfg.research_questions[4][99%10]));});
 
 test('preparation uses the assigned L/T policy from its first interaction',()=>{
  const left=p.composeSqlPrompt(cfg,4,'L',3),right=p.composeSqlPrompt(cfg,4,'T',3);
@@ -36,7 +36,7 @@ test('preparation uses the assigned L/T policy from its first interaction',()=>{
  const formalLeft=p.composeSqlPrompt(cfg,0,'L',3),formalRight=p.composeSqlPrompt(cfg,0,'T',3);
  assert.notEqual(formalLeft,formalRight);assert.ok(formalRight.includes('target必须为2'));
  const altered=structuredClone(cfg);altered.preparation_timing.teaching_seconds=2400;
- assert.equal(p.controlSchema.safeParse(altered).success,false);
+ assert.equal(p.controlSchema.safeParse(altered).success,true);
 });
 
 test('browser admin reads lesson numbers from the dependency-free display module',async()=>{const panel=await readFile('app/admin/sql-study-panel.tsx','utf8');assert.match(panel,/import type \{SqlControl\} from '@\/lib\/sql-study-policy'/);assert.match(panel,/import \{SQL_LESSON_ORDER,[^}]*\} from '@\/lib\/sql-study-display'/);});

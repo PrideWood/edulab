@@ -23,7 +23,10 @@ def gate(store,p,key):
     if stage=='practice':
         if r and store.stage_started(r,'practice'):return result(True,'可继续本次实操')
         if not r or not store.stage_started(r,'ai') or not any(m.get('role')=='user' for m in r['messages']):return result(False,'请先发送本课讲解')
-        if store.clock()<r['teaching_deadline']:return result(False,'请完成本课累计教学徒时段')
-        if not r.get('mental_effort'):return result(False,'请先完成教学徒结束卡（可暂不回答）')
+        from dialogue_policy import completed_turns
+        if completed_turns(r)<10:return result(False,'请至少完成10轮有效对话')
+        if any(q.get('status')=='running' for q in r['requests']):return result(False,'请等待学徒回复完成')
+        if not r.get('dialogue_end'):return result(False,'请主动结束本课对话')
+        if not r.get('mental_effort'):return result(False,'请先完成教学徒结束卡')
         return result(True,'可开始独立实操')
     return result(bool(r and r.get('submission')),'请先提交本课独立实操' if not(r and r.get('submission')) else '可完成本次测评')

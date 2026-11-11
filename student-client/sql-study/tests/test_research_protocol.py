@@ -15,7 +15,7 @@ class ResearchProtocolTests(unittest.TestCase):
         self.s.state(pid)
     def tearDown(self):self.s.stop.set();self.tmp.cleanup()
     def open(self,key,**extra):self.s.schedule({'class_code':'2531','key':key,'rule':{'mode':'open',**extra}})
-    def person(self,name='测试'):
+    def person(self,name='正式学生'):
         p=self.s.enter({'class_code':'2531','name':name,'confirmed':True});pid=p['id']
         self.open('pretest');self.open('meta_pre')
         self.s.act(pid,'pretest',{'answers':['A']*20,'predicted_score':70})
@@ -42,20 +42,21 @@ class ResearchProtocolTests(unittest.TestCase):
         p=self.s.get(pid);p['group']='T';self.s.save(p)
         self.s.act(pid,'new_round',{'lesson':4});r=self.s.get(pid)['rounds'][0]
         self.assertEqual(r['group'],'T');self.assertEqual(r['research_version'],'sql-lt/1.1')
-    def test_p0_six_rounds_then_one_closing_answer_never_a_seventh_question(self):
+    def test_p0_has_no_upper_limit_and_requires_ten_successes(self):
         pid=self.start('T')
-        for i in range(6):self.chat(pid,str(i),text='是的')
-        d=self.s.state(pid)['rounds'][0]['dialogue'];self.assertEqual(d['completed_turns'],6);self.assertTrue(d['closing_reply'])
-        self.chat(pid,'final','最后一问的回答')
-        r=self.s.get(pid)['rounds'][0];self.assertTrue(r['requests'][-1]['closing']);self.assertNotIn('？',r['messages'][-1]['content'])
-        self.assertEqual(r['dialogue_end']['reason'],'turn_limit')
-        with self.assertRaises(Problem):self.s.chat(pid,{'request_id':'overflow','text':'再问'})
-        self.assertEqual(self.s.state(pid)['rounds'][0]['dialogue']['completed_turns'],6)
+        for i in range(9):self.chat(pid,str(i),text='解释该检查点')
+        with self.assertRaises(Problem):self.s.act(pid,'finish_dialogue',{})
+        self.chat(pid,'tenth')
+        self.assertTrue(self.s.state(pid)['rounds'][0]['dialogue']['can_finish'])
+        for i in range(10,24):self.chat(pid,str(i))
+        d=self.s.state(pid)['rounds'][0]['dialogue'];self.assertEqual(d['completed_turns'],24);self.assertIsNone(d['max_turns']);self.assertTrue(d['can_send'])
+        self.assertNotIn('dialogue_end',self.s.get(pid)['rounds'][0])
+
     def test_formal_has_twelve_distinct_fixed_slots(self):
         pid=self.start('T',0)
         for i in range(12):self.chat(pid,str(i))
         r=self.s.get(pid)['rounds'][0];self.assertIn(r['config']['research_questions'][0][6],r['messages'][14]['content'])
-        self.assertEqual(self.s.state(pid)['rounds'][0]['dialogue']['max_turns'],12)
+        self.assertIsNone(self.s.state(pid)['rounds'][0]['dialogue']['max_turns'])
     def test_failed_retry_does_not_consume_budget_and_keeps_provenance(self):
         pid=self.start();original=self.s.infer
         def fail(r):raise Problem('simulated failure')
@@ -66,37 +67,42 @@ class ResearchProtocolTests(unittest.TestCase):
         self.assertEqual(self.s.get(pid)['rounds'][0]['requests'][-1]['retry_of'],'failed')
         self.s.chat(pid,{'request_id':'retry','text':'重复传输'})
         self.assertEqual(len(self.s.get(pid)['rounds'][0]['requests']),2)
-    def test_clock_boundaries_and_effort_never_open_practice_early(self):
-        pid=self.start();self.chat(pid,'first');self.s.act(pid,'finish_dialogue',{})
-        with self.assertRaises(Problem):self.s.act(pid,'mental_effort',{'value':5})
-        with self.assertRaises(Problem):self.s.act(pid,'start_practice',{})
-        self.advance(900)
-        self.assertTrue(self.s.state(pid)['rounds'][0]['dialogue']['effort_due'])
-        with self.assertRaises(Problem):self.s.act(pid,'start_practice',{})
-        self.s.act(pid,'mental_effort',{'value':7})
-        self.s.act(pid,'start_practice',{});self.assertEqual(self.s.get(pid)['rounds'][0]['mental_effort']['value'],7)
-        self.assertTrue(self.s.state(pid)['rounds'][0]['chat_locked'])
+    def test_ten_turns_unlock_before_suggested_time_without_waiting(self):
+        pid=self.start()
+        for i in range(9):self.chat(pid,str(i))
+        for action in ['finish_dialogue','mental_effort','start_practice']:
+            with self.assertRaises(Problem):self.s.act(pid,action,{'value':5})
+        self.chat(pid,'10');self.s.act(pid,'finish_dialogue',{})
+        self.s.act(pid,'mental_effort',{'value':7});self.s.act(pid,'start_practice',{})
+        self.assertEqual(self.clock[0],1000);self.assertEqual(self.s.get(pid)['rounds'][0]['mental_effort']['value'],7)
         self.assertEqual(self.s.state(pid)['rounds'][0]['messages'],[])
+
     def test_required_effort_rejects_skip_and_cannot_overwrite(self):
-        pid=self.start();self.chat(pid,'one');self.advance(900)
+        pid=self.start()
+        for i in range(10):self.chat(pid,str(i))
+        self.s.act(pid,'finish_dialogue',{})
         for body in [{'value':v} for v in [0,10,True,5.5,None]]+[{'skipped':True}]:
             with self.assertRaises(Problem):self.s.act(pid,'mental_effort',body)
         self.s.act(pid,'mental_effort',{'value':5})
         with self.assertRaises(Problem):self.s.act(pid,'mental_effort',{'value':6})
         self.s.act(pid,'start_practice',{})
-    def test_last_minute_saves_answer_without_new_question_and_hard_deadline(self):
-        pid=self.start();self.chat(pid,'one');self.advance(840);self.chat(pid,'closing','这里的理由是…')
-        self.assertEqual(self.s.get(pid)['rounds'][0]['dialogue_end']['reason'],'closing_period')
-        pid2=self.person('另一个');p=self.s.get(pid2);p['group']='L';self.s.save(p);self.s.act(pid2,'new_round',{'lesson':4});self.s.act(pid2,'start_teaching',{})
-        self.advance(901,pid2)
-        with self.assertRaises(Problem):self.s.chat(pid2,{'request_id':'late','text':'来不及'})
+
+    def test_advisory_expiry_neither_closes_chat_nor_caps_recorded_time(self):
+        pid=self.start();self.chat(pid,'one');p=self.s.get(pid);r=p['rounds'][0]
+        r['teaching_clock']['elapsed_seconds']=r['config']['teaching_seconds']+100;self.s.save(p)
+        self.advance(4);self.chat(pid,'over-time')
+        d=self.s.state(pid)['rounds'][0]['dialogue'];self.assertTrue(d['can_send']);self.assertFalse(d['window_ended']);self.assertGreater(d['timer_elapsed_seconds'],r['config']['teaching_seconds'])
+        with self.assertRaises(Problem):self.s.act(pid,'start_practice',{})
+
     def test_no_prediction_required_and_submission_immutable(self):
         p=self.s.enter({'class_code':'2531','name':'必答','confirmed':True});pid=p['id'];self.open('pretest')
         with self.assertRaises(Problem):self.s.act(pid,'pretest',{'answers':['A']*19+[None]})
         self.s.act(pid,'pretest',{'answers':['A']*20})
         self.assertNotIn('prediction',self.s.get(pid)['pretest'])
         with self.assertRaises(Problem):self.s.act(pid,'pretest',{'answers':['B']*20})
-        pid=self.start();self.chat(pid,'one');self.advance(900);self.s.act(pid,'mental_effort',{'value':5});self.s.act(pid,'start_practice',{})
+        pid=self.start()
+        for i in range(10):self.chat(pid,str(i))
+        self.s.act(pid,'finish_dialogue',{});self.s.act(pid,'mental_effort',{'value':5});self.s.act(pid,'start_practice',{})
         self.s.act(pid,'draft',{'sql':'SELECT 1','result':'1','note':'核对行列'})
         self.s.act(pid,'submit_practice',{})
         self.assertNotIn('prediction',self.s.get(pid)['rounds'][0]['submission'])
@@ -125,7 +131,7 @@ class ResearchProtocolTests(unittest.TestCase):
         self.assertEqual(self.s.get(pid)['rounds'][0]['teaching_deadline'],3900)
         self.s.schedule({'class_code':'2531','key':'ai4','rule':{'mode':'closed'}});self.assertTrue(self.s.gate(self.s.get(pid),'ai4')['open'])
     def test_incomplete_old_shared_window_recovers_without_touching_completed_work(self):
-        pid=self.start();p=self.s.get(pid);r=p['rounds'][0];r.pop('teaching_window_policy');r.pop('teaching_clock');r.update(teaching_deadline=900,classroom_window_start=0,dialogue_end={'reason':'time_limit','at':900},teaching_end=900)
+        pid=self.start();p=self.s.get(pid);r=p['rounds'][0];r.pop('dialogue_policy',None);r.pop('teaching_window_policy');r.pop('teaching_clock');r.update(teaching_deadline=900,classroom_window_start=0,dialogue_end={'reason':'time_limit','at':900},teaching_end=900)
         self.s.save(p);self.s.state(pid);r=self.s.get(pid)['rounds'][0]
         self.assertEqual(r['teaching_deadline'],1900);self.assertEqual(r['teaching_clock']['elapsed_seconds'],0);self.assertNotIn('dialogue_end',r);self.assertEqual(r['previous_teaching_window']['deadline'],900)
         r['practice_start']=1000;r.pop('teaching_window_policy');p=self.s.get(pid);p['rounds'][0]=r;self.s.save(p)
@@ -146,7 +152,7 @@ class ResearchProtocolTests(unittest.TestCase):
         for _ in range(300):
             if pid not in self.s.active:break
             time.sleep(.005)
-        r=self.s.get(pid)['rounds'][0];self.assertNotIn('？',r['messages'][-1]['content']);self.assertEqual(r['dialogue_end']['reason'],'closing_period')
+        r=self.s.get(pid)['rounds'][0];self.assertNotIn('dialogue_end',r);self.assertEqual(r['requests'][-1]['status'],'completed')
     def test_old_protocol_test_commands_never_replay(self):
         pid=self.person();p=self.s.get(pid)
         command={'id':'old','device_id':self.s.setting('device'),'participant_id':pid,'lesson':0,'scheme_version':'business-workorders/1','test_identity_verified':True}
@@ -160,4 +166,13 @@ class ResearchProtocolTests(unittest.TestCase):
         for group in ['L','T']:
             pid=self.person('完成'+group);p=self.s.get(pid);p['group']=group;self.s.save(p);self.open('ai4');self.s.act(pid,'new_round',{'lesson':4});self.s.act(pid,'start_teaching',{})
             self.s.infer=lambda r:{'reply':'还要保存结果吗？','target':0,'knowledge':{str(i):{'status':'explained','evidence':'合成输入'} for i in range(6)},'source':'synthetic'}
-            self.chat(pid,'finished');r=self.s.get(pid)['rounds'][0];self.assertNotIn('？',r['messages'][-1]['content']);self.assertNotIn('掌握',r['messages'][-1]['content'])
+            for i in range(9):self.chat(pid,'covered'+str(i))
+        self.chat(pid,'finished');r=self.s.get(pid)['rounds'][0];self.assertNotIn('？',r['messages'][-1]['content']);self.assertNotIn('掌握',r['messages'][-1]['content'])
+
+    def test_test_names_bypass_group_allocation_but_keep_baselines(self):
+        for name in ['测试','test','柴博泉']:
+            p=self.s.enter({'class_code':'2531','name':name,'confirmed':True});pid=p['id']
+            self.assertTrue(p['group_assigned']);self.assertFalse(p['gates']['ai4']['open'])
+            self.s.act(pid,'pretest',{'answers':['A']*20});self.s.act(pid,'meta_pre',{'answers':[3]*13})
+            self.s.act(pid,'new_round',{'lesson':4});self.s.act(pid,'start_teaching',{})
+            self.chat(pid,'test-reply');self.assertEqual(self.s.get(pid)['rounds'][0]['requests'][-1]['status'],'completed')

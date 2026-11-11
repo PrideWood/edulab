@@ -17,11 +17,11 @@ def ensure_clock(r,now):
 
 def tick_clock(r,now):
     c=r.get('teaching_clock')
-    if c is None or r.get('practice_start') is not None:return False
+    if c is None or r.get('practice_start') is not None or r.get('dialogue_end') is not None:return False
     before=(c['elapsed_seconds'],c['accounted_at'],r.get('teaching_deadline'))
     duration=r['config']['teaching_seconds']
     elapsed=max(0,min(now,c['active_until'])-c['accounted_at'])
-    c['elapsed_seconds']=min(duration,c['elapsed_seconds']+elapsed)
+    c['elapsed_seconds']+=elapsed
     c['accounted_at']=max(now,c['accounted_at'])
     r['teaching_deadline']=now+max(0,duration-c['elapsed_seconds'])
     return before!=(c['elapsed_seconds'],c['accounted_at'],r['teaching_deadline'])
@@ -41,4 +41,4 @@ def status(r,now):
     c=r.get('teaching_clock')
     if c is None:return {}
     remaining=max(0,r['config']['teaching_seconds']-c['elapsed_seconds'])
-    return {'foreground_clock':True,'timer_running':remaining>0 and now<c['active_until'],'timer_elapsed_seconds':c['elapsed_seconds'],'timer_remaining_seconds':remaining,'timer_lease_until':c['active_until'],'timer_policy':POLICY}
+    return {'foreground_clock':True,'timer_running':r.get('dialogue_end') is None and now<c['active_until'],'timer_elapsed_seconds':c['elapsed_seconds'],'timer_remaining_seconds':remaining,'timer_lease_until':c['active_until'],'timer_policy':POLICY}

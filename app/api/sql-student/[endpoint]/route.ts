@@ -2,8 +2,10 @@ import {randomUUID} from 'node:crypto';
 import {ACCESS_COOKIE,verifyAccessCookie} from '@/lib/access-code';
 import {onlineEnter,onlineCall,onlineChat,onlineClasses,DEVICE_COOKIE,cookie,sameOrigin,uuid,StudentError} from '@/lib/sql-online';
 export const runtime='nodejs';export const maxDuration=120;
+const studentWebPaused=process.env.SQL_STUDENT_WEB_PAUSED!=='false';
 const headers={'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'};
 async function handle(request:Request,context:{params:Promise<{endpoint:string}>}){try{
+ if(studentWebPaused)return Response.json({error:'学生线上版暂缓开放，请使用教师发放的机房客户端。',code:'STUDENT_WEB_PAUSED'},{status:503,headers});
  const code=process.env.ACCESS_CODE;if(!code||!await verifyAccessCookie(cookie(request,ACCESS_COOKIE),code))return Response.json({error:'请先打开线上入口输入网站访问码。',code:'ACCESS_REQUIRED'},{status:401,headers});
  const {endpoint}=await context.params;
  if(request.method==='GET'&&endpoint==='classes')return Response.json(await onlineClasses(),{headers});

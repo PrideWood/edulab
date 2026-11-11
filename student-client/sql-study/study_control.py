@@ -253,10 +253,12 @@ def install(Base, Problem, encode, stamp):
                 if data.get('round_id'):self.round_for(p,data['round_id'])
                 if action=='measurement_draft':
                     kind=data.get('kind');values=data.get('answers')
-                    if kind not in ('meta_pre','meta_post'):raise Problem('问卷类型无效。')
+                    if kind not in ('pretest','meta_pre','meta_post'):raise Problem('问卷类型无效。')
                     self.require_gate(p,kind)
                     if p.get(kind) is not None:raise Problem('问卷已经提交，不能覆盖。',409)
-                    if not isinstance(values,list) or len(values)!=13 or any(a is not None and (type(a)!=int or a<1 or a>5) for a in values):raise Problem('问卷草稿格式有误。')
+                    if kind=='pretest':
+                        if not isinstance(values,list) or len(values)!=20 or any(a not in ('','A','B','C','D') for a in values):raise Problem('前测草稿格式有误。')
+                    elif not isinstance(values,list) or len(values)!=13 or any(a is not None and (type(a)!=int or a<1 or a>5) for a in values):raise Problem('问卷草稿格式有误。')
                     p.setdefault('measurement_drafts',{})[kind]=values
                     self.save(p);return self.public(p)
                 if action=='begin_measurement':
@@ -330,8 +332,8 @@ def install(Base, Problem, encode, stamp):
                     r=self.round_for(p,body.get('round_id'));self.require_gate(p,'ai'+str(r['index']))
                 return super().chat(pid,body)
 
-        def archive(self,pid):
-            out=super().archive(pid);p=self.get(pid)
+        def archive(self,pid,participant=None):
+            out=super().archive(pid,participant=participant);p=participant if participant is not None else self.get(pid)
             out['participant']['name']=p.get('name',p['code']);out['study'].pop('session_hash',None)
             return out
 

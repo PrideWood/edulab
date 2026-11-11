@@ -92,6 +92,7 @@ class Store:
         self.lock = threading.RLock()
         self.active = set()
         self.stop = threading.Event()
+        self.backup_wake = threading.Event()
         self.bank = json.loads((ROOT/'questions.json').read_text(encoding='utf-8'))
         self.token = secrets.token_urlsafe(32)
         with self.db() as db:
@@ -101,6 +102,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS backups(id TEXT PRIMARY KEY,participant_id TEXT,sha256 TEXT,payload TEXT,
                     status TEXT NOT NULL DEFAULT 'queued',attempts INTEGER DEFAULT 0,next_at REAL DEFAULT 0,error TEXT);
                 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,created_at TEXT,event TEXT,payload TEXT);''')
+            if 'uploaded_at' not in [c[1] for c in db.execute('PRAGMA table_info(backups)')]:db.execute('ALTER TABLE backups ADD COLUMN uploaded_at REAL')
+            db.execute("UPDATE backups SET status='queued' WHERE status='uploading'")
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',('config',encode(DEFAULTS)))
             db.execute('INSERT OR IGNORE INTO settings VALUES (?,?)',('device',encode(str(uuid.uuid4()))))
             for row in db.execute('SELECT * FROM students').fetchall():
@@ -141,8 +144,10 @@ class Store:
             db.execute('INSERT INTO audit(created_at,event,payload) VALUES (?,?,?)',(stamp(),event,encode(payload)))
 
     def save(self, p):
-        with self.db() as db:
+        with self.lock,self.db() as db:
             db.execute('UPDATE students SET data=?,revision=revision+1 WHERE id=?',(encode(p),p['id']))
+            self._queue_snapshot(db,p)
+        self.backup_wake.set()
 
     def get(self, pid):
         with self.db() as db:
@@ -369,7 +374,7 @@ class Store:
             return {'reply':'本次收尾内容已保存。','target':0,'reason':'程序收束','knowledge':r['knowledge'],'source':'protocol-closure'}
         turn=r['requests'][-1].get('turn_index',len(r['requests'])); task=r['task']; cfg=r['config']
         question_bank=cfg.get('research_questions',[]);research=cfg.get('research',{}).get('version')=='sql-lt/1.1'
-        fixed_question=question_bank[r['index']][turn-1] if research and r['group']=='T' and 0<turn<=len(question_bank[r['index']]) else None
+        fixed_question=question_bank[r['index']][(turn-1)%len(question_bank[r['index']])] if research and r['group']=='T' else None
         if cfg['mode']=='demo':
             text=r['messages'][-1]['content']; scores=[]
             words=[['表','来源','目标'],['列','函数','最高','结果'],['行','人数','条件'],['别名','分组','ANY'],['WHERE','HAVING','ALL'],['核对','检查','验证']]
@@ -495,24 +500,43 @@ class Store:
         finally:
             with self.lock: self.active.discard(pid)
 
-    def archive(self,pid):
-        p=self.get(pid)
+    def archive(self,pid,participant=None):
+        p=participant if participant is not None else self.get(pid)
         safe={k:v for k,v in p.items() if k!='pin'}
         return {'schema_version':'edulab-light/1','study_schema':STUDY,'source_app':'student-light',
             'device_id':self.setting('device'),'exported_at':stamp(),
             'participant':{'id':p['id'],'name':p['code'],'class_code':p['class_code'],'created_at':p['created_at']},
-            'study':safe,'conversations':[{'id':r['id'],'title':r['task']['title'],'created_at':r['created_at'],
-                'agent':{'provider':r['config']['mode'],'group':r['group'],'study':STUDY},'messages':r['messages'],'requests':r['requests']} for r in p['rounds']]}
+            'study':safe,'conversations':[{'id':r['id'],'title':r.get('task',{}).get('title','SQL任务'),'created_at':r.get('created_at',p['created_at']),
+                'agent':{'provider':r.get('config',{}).get('mode','legacy'),'group':r.get('group'),'study':STUDY},'messages':r.get('messages',[]),'requests':r.get('requests',[])} for r in p['rounds']]}
+
+    def _queue_snapshot(self,db,p):
+        if p.get('retired_by_cloud'):
+            db.execute("UPDATE backups SET status='retired' WHERE participant_id=? AND status='queued'",(p['id'],));return None
+        row=db.execute('SELECT revision FROM students WHERE id=?',(p['id'],)).fetchone()
+        if row is None:return None
+        a=self.archive(p['id'],participant=p);a['backup_revision']=row['revision']
+        canonical={k:v for k,v in a.items() if k!='exported_at'}
+        digest=hashlib.sha256(encode(canonical).encode()).hexdigest();key=f"{a['device_id']}:{p['id']}:{digest}"
+        # New full snapshots contain every earlier message/event; only unsent snapshots coalesce.
+        db.execute("UPDATE backups SET status='superseded' WHERE participant_id=? AND status='queued' AND id<>?",(p['id'],key))
+        db.execute('INSERT OR IGNORE INTO backups(id,participant_id,sha256,payload) VALUES (?,?,?,?)',(key,p['id'],digest,encode(a)))
+        return key
 
     def queue(self,pid):
-        with self.lock,self.db() as db:
-            row=db.execute('SELECT revision FROM students WHERE id=?',(pid,)).fetchone()
-            a=self.archive(pid); a['backup_revision']=row['revision']+1
-            canonical={k:v for k,v in a.items() if k!='exported_at'}
-            digest=hashlib.sha256(encode(canonical).encode()).hexdigest()
-            key=f"{a['device_id']}:{pid}:{digest}"
-            db.execute('INSERT OR IGNORE INTO backups(id,participant_id,sha256,payload) VALUES (?,?,?,?)',(key,pid,digest,encode(a)))
-            return key
+        with self.lock,self.db() as db:key=self._queue_snapshot(db,self.get(pid))
+        self.backup_wake.set();return key
+
+    def backup_status(self,pid):
+        with self.db() as db:
+            pending=db.execute("SELECT count(*) FROM backups WHERE participant_id=? AND status IN ('queued','uploading')",(pid,)).fetchone()[0]
+            row=db.execute("SELECT status,error,uploaded_at FROM backups WHERE participant_id=? AND status NOT IN ('retired','superseded') ORDER BY rowid DESC LIMIT 1",(pid,)).fetchone()
+            confirmed=db.execute("SELECT max(uploaded_at) FROM backups WHERE participant_id=? AND status='uploaded'",(pid,)).fetchone()[0]
+        return {'pending':pending,'status':row['status'] if row else 'queued','error':row['error'] if row else None,'last_uploaded_epoch':confirmed,'delivery':'local-outbox'}
+
+    def retry_backup(self,pid):
+        self.queue(pid)
+        with self.db() as db:db.execute("UPDATE backups SET next_at=0 WHERE participant_id=? AND status='queued'",(pid,))
+        self.backup_wake.set()
 
     def backup_payload(self,row):
         archive=json.loads(row['payload'])
@@ -522,35 +546,39 @@ class Store:
                 'archive':{'exported_at':archive['exported_at']},
                 'canonical':encode({k:v for k,v in archive.items() if k!='exported_at'})}
 
+    def backup_once(self):
+        connection=self.connection()
+        if connection.get('source') not in ('edulab-local-bridge','windows-direct'):return False
+        with self.lock,self.db() as db:
+            row=db.execute("SELECT * FROM backups WHERE status='queued' AND next_at<=? ORDER BY rowid LIMIT 1",(self.clock(),)).fetchone()
+            if not row:return False
+            db.execute("UPDATE backups SET status='uploading' WHERE id=?",(row['id'],))
+        try:
+            if connection.get('source')=='windows-direct':
+                from cloud_connection import CloudConnection
+                receipt=CloudConnection(connection).upload(row)
+            else:
+                payload=self.backup_payload(row)
+                req=urllib.request.Request(connection['base_url'],data=encode(payload).encode(),headers={'Authorization':'Bearer '+connection['token'],'Content-Type':'application/json'})
+                with urllib.request.build_opener(NoRedirect).open(req,timeout=20) as response:receipt=json.loads(response.read(100000))
+            if receipt.get('ok') is not True or receipt.get('upload_id')!=row['id'] or receipt.get('sha256')!=row['sha256']:raise ValueError('receipt')
+            with self.db() as db:db.execute("UPDATE backups SET status='uploaded',error=NULL,uploaded_at=? WHERE id=?",(self.clock(),row['id']))
+        except Exception:
+            with self.db() as db:
+                newer=db.execute("SELECT 1 FROM backups WHERE participant_id=? AND status='queued' AND id<>?",(row['participant_id'],row['id'])).fetchone()
+                db.execute("UPDATE backups SET status=?,attempts=attempts+1,next_at=?,error=? WHERE id=?",('superseded' if newer else 'queued',self.clock()+min(60,2*2**min(row['attempts'],5)),'备份尚未确认，内容已保存在本机，联网后自动重试。',row['id']))
+        return True
+
     def backup_loop(self):
-        while not self.stop.wait(5):
-            try:
-                if self.active: continue
-                connection=self.connection()
-                if connection.get('source') not in ('edulab-local-bridge','windows-direct'): continue
-                with self.db() as db:
-                    pids=[r[0] for r in db.execute('SELECT id FROM students')]
-                for pid in pids: self.queue(pid)
-                with self.db() as db:
-                    row=db.execute("SELECT * FROM backups WHERE status='queued' AND next_at<=? ORDER BY rowid LIMIT 1",(self.clock(),)).fetchone()
-                if not row: continue
-                try:
-                    if connection.get('source')=='windows-direct':
-                        from cloud_connection import CloudConnection
-                        receipt=CloudConnection(connection).upload(row)
-                    else:
-                        payload=self.backup_payload(row)
-                        req=urllib.request.Request(connection['base_url'],data=encode(payload).encode(),headers={
-                            'Authorization':'Bearer '+connection['token'],'Content-Type':'application/json'})
-                        with urllib.request.build_opener(NoRedirect).open(req,timeout=20) as response:
-                            receipt=json.loads(response.read(100000))
-                    if receipt.get('ok') is not True or receipt.get('upload_id')!=row['id'] or receipt.get('sha256')!=row['sha256']: raise ValueError('receipt')
-                    with self.db() as db: db.execute("UPDATE backups SET status='uploaded',error=NULL WHERE id=?",(row['id'],))
-                except Exception:
-                    with self.db() as db:
-                        db.execute("UPDATE backups SET attempts=attempts+1,next_at=?,error=? WHERE id=?",(self.clock()+min(300,5*2**min(row['attempts'],6)),'备份未确认，记录仍在本机，将稍后重试。',row['id']))
-            except Exception:
-                pass  # backup never changes the result of a student action
+        # Queue a recovery snapshot before uploading; never wait for an active model request.
+        with self.db() as db:pids=[r[0] for r in db.execute('SELECT id FROM students')]
+        for pid in pids:self.queue(pid)
+        while not self.stop.is_set():
+            self.backup_wake.wait(1);self.backup_wake.clear()
+            if self.stop.is_set():break
+            try:self.backup_once()
+            except Exception:pass  # Local durable outbox survives network/service interruptions.
+            self.stop.wait(1)
 
     def teacher(self):
         with self.db() as db:
@@ -610,7 +638,7 @@ class Handler(BaseHTTPRequestHandler):
                     safe=[{k:v for k,v in q.items() if k!='answer'} if isinstance(q,dict) else q for q in bank]
                     if stage=='posttest':safe += [{'id':q['id'],'kind':'sql','text':q['text']} for q in self.store.quiz_sql_items(r)]
                     return self.respond(safe)
-                if path=='/api/health': return self.respond({'ok':True,'application':STUDY,'version':'0.13.2'})
+                if path=='/api/health': return self.respond({'ok':True,'application':STUDY,'version':'0.14.0'})
                 raise Problem('未找到接口。',404)
             filename={'/':'index.html','/app.js':'app.js','/compat.js':'compat.js','/style.css':'style.css'}.get(path)
             if not filename: raise Problem('未找到页面。',404)
@@ -686,7 +714,7 @@ def verified_launch_url(launch):
     if parsed.scheme!='http' or parsed.hostname!='127.0.0.1' or not parsed.port or not key:raise ValueError('invalid local launch')
     request=urllib.request.Request('http://127.0.0.1:'+str(parsed.port)+'/api/health',headers={'X-Local-Key':key})
     with urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect).open(request,timeout=2) as response:health=json.loads(response.read(1024))
-    if health.get('application')!=STUDY or health.get('version')!='0.13.2':raise ValueError('old service')
+    if health.get('application')!=STUDY or health.get('version')!='0.14.0':raise ValueError('old service')
     return url
 
 def main():
@@ -723,7 +751,7 @@ def main():
     threading.Thread(target=store.backup_loop,daemon=True).start()
     url=f'http://127.0.0.1:{server.server_port}/#key={store.token}'
     launch=args.data_dir/'launch.json'
-    launch.write_text(encode({'url':url,'admin_url':'https://edulab.dacnote.com/admin','version':'0.13.2','pid':os.getpid(),'created_epoch':time.time()}),encoding='utf-8'); launch.chmod(0o600)
+    launch.write_text(encode({'url':url,'admin_url':'https://edulab.dacnote.com/admin','version':'0.14.0','pid':os.getpid(),'created_epoch':time.time()}),encoding='utf-8'); launch.chmod(0o600)
     print('EduLab SQL 本地MVP已启动：'+url,flush=True)
     print('教师管理统一使用EduLab管理平台；本机数据目录：'+str(args.data_dir),flush=True)
     print('默认使用明确标注的演示学徒。真实AI需要网络；本机保存不依赖云端。',flush=True)

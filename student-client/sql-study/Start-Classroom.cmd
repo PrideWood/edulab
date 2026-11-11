@@ -1,6 +1,6 @@
 @echo off
 setlocal
-TITLE EduLab SQL 0.13.2 - Classroom
+TITLE EduLab SQL 0.14.0 - Classroom
 ECHO [1/4] EduLab SQL Win7 x64 portable launcher
 ECHO This entry bypasses the EXE launcher. Keep this window open.
 set "EDULAB_PYTHON=%~dp0runtime\python.exe"
@@ -29,7 +29,7 @@ ECHO Keep runtime intact. Save the exact missing-DLL or startup error for diagno
 ECHO Bootstrap details: %LOCALAPPDATA%\EduLab-SQL\bootstrap.log
 ECHO If Python started, see: %LOCALAPPDATA%\EduLab-SQL\startup-diagnostic.log
 :fallback
-ECHO Online classroom: https://edulab.dacnote.com/sql-student
-ECHO Open that URL manually in Chrome 69 or later.
+ECHO Student web delivery is paused. Use this local classroom package.
+ECHO Send the startup error and diagnostic logs to your teacher.
 PAUSE
 exit /b 1
