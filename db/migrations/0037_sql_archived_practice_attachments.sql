@@ -9,9 +9,9 @@ BEGIN
  IF snapshot IS NULL THEN RAISE EXCEPTION 'Snapshot not synchronized';END IF;
  SELECT x INTO r FROM (
   SELECT value AS x FROM jsonb_array_elements(coalesce(snapshot#>'{study,rounds}','[]'::jsonb))
-  UNION ALL SELECT value AS x FROM jsonb_path_query(snapshot->'study','$.test_lesson_history[*].rounds[*]')
-  UNION ALL SELECT value AS x FROM jsonb_path_query(snapshot->'study','$.research_history[*].rounds[*]')
-  UNION ALL SELECT value AS x FROM jsonb_path_query(snapshot->'study','$.scheme_history[*].rounds[*]')
+  UNION ALL SELECT value AS x FROM jsonb_path_query(snapshot->'study','$.test_lesson_history[*].rounds[*]') AS history(value)
+  UNION ALL SELECT value AS x FROM jsonb_path_query(snapshot->'study','$.research_history[*].rounds[*]') AS history(value)
+  UNION ALL SELECT value AS x FROM jsonb_path_query(snapshot->'study','$.scheme_history[*].rounds[*]') AS history(value)
  ) owned_rounds WHERE x->>'id'=p_round::text AND x->>'practice_start' IS NOT NULL;
  SELECT x INTO item FROM jsonb_array_elements(coalesce(snapshot#>'{study,practice_attachments}','[]'::jsonb)) x WHERE x->>'id'=p_id::text AND x->>'round_id'=p_round::text AND x->>'submission_id'=p_submission::text AND x->>'sha256'=p_sha AND x->>'content_md5'=p_md5 AND (x->>'size_bytes')::int=p_size AND x->>'mime'=p_mime AND coalesce(x->>'deleted','false')='false';
  IF r IS NULL OR item IS NULL THEN RAISE EXCEPTION 'Attachment ownership mismatch';END IF;
