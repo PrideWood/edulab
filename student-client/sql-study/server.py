@@ -518,7 +518,7 @@ class Store:
         canonical={k:v for k,v in a.items() if k!='exported_at'}
         digest=hashlib.sha256(encode(canonical).encode()).hexdigest();key=f"{a['device_id']}:{p['id']}:{digest}"
         # New full snapshots contain every earlier message/event; only unsent snapshots coalesce.
-        db.execute("UPDATE backups SET status='superseded' WHERE participant_id=? AND status='queued' AND id<>?",(p['id'],key))
+        db.execute("UPDATE backups SET status='superseded',payload='' WHERE participant_id=? AND status='queued' AND id<>?",(p['id'],key))
         db.execute('INSERT OR IGNORE INTO backups(id,participant_id,sha256,payload) VALUES (?,?,?,?)',(key,p['id'],digest,encode(a)))
         return key
 
@@ -562,7 +562,10 @@ class Store:
                 req=urllib.request.Request(connection['base_url'],data=encode(payload).encode(),headers={'Authorization':'Bearer '+connection['token'],'Content-Type':'application/json'})
                 with urllib.request.build_opener(NoRedirect).open(req,timeout=20) as response:receipt=json.loads(response.read(100000))
             if receipt.get('ok') is not True or receipt.get('upload_id')!=row['id'] or receipt.get('sha256')!=row['sha256']:raise ValueError('receipt')
-            with self.db() as db:db.execute("UPDATE backups SET status='uploaded',error=NULL,uploaded_at=? WHERE id=?",(self.clock(),row['id']))
+            with self.db() as db:
+                db.execute("UPDATE backups SET status='uploaded',error=NULL,uploaded_at=? WHERE id=?",(self.clock(),row['id']))
+                # Retain the latest confirmed recovery snapshot and receipt audit; avoid quadratic full-archive copies.
+                db.execute("UPDATE backups SET payload='' WHERE participant_id=? AND id<>? AND status IN ('uploaded','superseded')",(row['participant_id'],row['id']))
         except Exception:
             with self.db() as db:
                 newer=db.execute("SELECT 1 FROM backups WHERE participant_id=? AND status='queued' AND id<>?",(row['participant_id'],row['id'])).fetchone()

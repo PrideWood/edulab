@@ -43,3 +43,9 @@ class BackupOutboxTests(unittest.TestCase):
         answers=['A']+['']*19;self.s.act(self.pid,'measurement_draft',{'kind':'pretest','answers':answers})
         latest=json.loads(self.rows()[-1]['payload']);self.assertEqual(latest['study']['measurement_drafts']['pretest'],answers)
         with self.assertRaises(Exception):self.s.act(self.pid,'pretest',{'answers':answers})
+
+    def test_latest_confirmed_recovery_snapshot_is_kept_without_duplicate_archive_growth(self):
+        def upload(_connection,row):return {'ok':True,'upload_id':row['id'],'sha256':row['sha256']}
+        with patch.object(CloudConnection,'__init__',lambda self,config:None),patch.object(CloudConnection,'upload',upload):
+            self.s.backup_once();p=self.s.get(self.pid);p['sample']='newest';self.s.save(p);self.s.backup_once()
+        rows=self.rows();confirmed=[r for r in rows if r['status']=='uploaded'];self.assertEqual(len(confirmed),2);self.assertEqual(confirmed[0]['payload'],'');self.assertEqual(json.loads(confirmed[-1]['payload'])['study']['sample'],'newest');self.assertTrue(all(r['sha256'] for r in confirmed));self.assertEqual(self.s.get(self.pid)['sample'],'newest')
